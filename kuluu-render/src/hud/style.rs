@@ -88,12 +88,17 @@ pub fn text_font(size: f32) -> TextFont {
     }
 }
 
+/// The inset a framed window leaves between its border and its content. A window that sizes itself
+/// to its rows needs the same numbers, so they live here rather than only inside `window_frame`.
+pub const WINDOW_PAD_X_PX: f32 = 10.0;
+pub const WINDOW_PAD_Y_PX: f32 = 8.0;
+
 /// A framed window panel: translucent navy fill, steel-blue 1px border,
 /// column layout. Every game window's outer chrome goes through this.
 pub fn window_frame() -> (Node, BackgroundColor, BorderColor) {
     (
         Node {
-            padding: UiRect::axes(Val::Px(10.0), Val::Px(8.0)),
+            padding: UiRect::axes(Val::Px(WINDOW_PAD_X_PX), Val::Px(WINDOW_PAD_Y_PX)),
             border: UiRect::all(Val::Px(1.0)),
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(2.0),

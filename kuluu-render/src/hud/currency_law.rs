@@ -484,6 +484,16 @@ pub fn currency_value(mode: CurrencyMode, id: u8, body: &[u8]) -> Option<u32> {
     })
 }
 
+/// The prestige a report carries at packet +0x6E (body offset 0x6A), which is the Status Profile
+/// window's `Prestige:` row. LSB has no client-side getter for it (no descriptor in either mode
+/// reads that word), so its position comes from the field order of
+/// vendor/server/src/map/packets/s2c/0x113_currencies_1.h under `#pragma pack(push, 1)`: `infamy`
+/// at body 0x68, `prestige` at 0x6A, then the `legion_points` dword at 0x6C, which is exactly
+/// where kind 15 of [`MODE1_GETTERS`] already reads. `None` when the block stops short.
+pub fn prestige(body: &[u8]) -> Option<u16> {
+    read_field(body, 0x6e, 2).map(|v| v as u16)
+}
+
 /// The whole list for one mode in DISPLAY order: `(label text id, value)` per descriptor — the
 /// label strings are resolved from the DAT table-12 catalog by the caller.
 pub fn currency_rows(mode: CurrencyMode, body: &[u8]) -> Vec<(u16, Option<u32>)> {
@@ -637,6 +647,32 @@ mod tests {
         let rows = currency_rows(CurrencyMode::One, &body);
         assert_eq!(rows.len(), 99);
         assert_eq!(rows[11].0, 473);
+    }
+
+    #[test]
+    fn prestige_reads_the_word_between_infamy_and_legion_points() {
+        // Body 0x6A (packet +0x6E): sandwiched between the legion-points dword at body 0x6C, so a
+        // shift of one byte in either direction would change what kind 15 reads.
+        let mut body = vec![0u8; 0xF0];
+        body[0x6A..0x6C].copy_from_slice(&4242u16.to_le_bytes());
+        assert_eq!(prestige(&body), Some(4242));
+        let legion = currency_value(
+            CurrencyMode::One,
+            first_row_with_kind(CurrencyMode::One, 15),
+            &body,
+        );
+        assert_eq!(legion, Some(0));
+        body[0x6C..0x70].copy_from_slice(&(-1i32).to_le_bytes());
+        assert_eq!(
+            currency_value(
+                CurrencyMode::One,
+                first_row_with_kind(CurrencyMode::One, 15),
+                &body
+            ),
+            Some(u32::from_le_bytes((-1i32).to_le_bytes()))
+        );
+        // Short blocks read nothing.
+        assert_eq!(prestige(&[0u8; 0x6A]), None);
     }
 
     #[test]

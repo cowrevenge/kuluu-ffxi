@@ -704,6 +704,9 @@ fn job_line(job: u8, level: u8) -> String {
     format!("{LEVEL_LABEL} {level} {name}")
 }
 
+/// The persona panel. Its caption carries `KeepOwnFont` (it wants the oblique cut of the
+/// HUD family, which `update_persona_frame` assigns) so `apply_ui_font`, which stamps the
+/// regular face onto every new `TextFont`, passes it by.
 pub fn spawn_status_panel(mut commands: Commands) {
     let stack = commands
         .spawn((
@@ -755,7 +758,14 @@ pub fn spawn_status_panel(mut commands: Commands) {
             StatusLevelBox,
             Node {
                 width: Val::Px(PANEL_WIDTH_PX),
-                padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                // Owner ruling 2026-10-20: no padding at the bottom of these boxes - the gauge
+                // ends at the box's border, top and side air unchanged.
+                padding: UiRect {
+                    left: Val::Px(10.0),
+                    right: Val::Px(10.0),
+                    top: Val::Px(6.0),
+                    bottom: Val::ZERO,
+                },
                 border: UiRect::all(Val::Px(1.0)),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(1.0),
@@ -889,25 +899,24 @@ pub fn spawn_status_panel(mut commands: Commands) {
             StatusCaptionMask,
             Node {
                 position_type: PositionType::Absolute,
-                top: Val::ZERO,
-                left: Val::ZERO,
+                // Absolute children measure from the padding edge, so the frame band sits
+                // one border-width ABOVE it. Sitting at 0 (as this did) covered a content
+                // row instead and left the frame line running through the glyphs.
+                top: Val::Px(-PERSONA_BORDER_PX),
                 height: Val::Px(PERSONA_BORDER_PX),
                 ..default()
             },
             // Matches the panel's own fill exactly — same chrome color, one border row.
             BackgroundColor(theme::FRAME_BG),
         ));
-        // Stretched across the panel's content box and centered by Taffy itself — the
-        // earlier hand-computed `caption_left` drifted with any metric gap between
-        // `text_width_px` and the real glyph advance (owner 2026-10-19: "its not center
-        // on the top line correctly").
+        // Placed by `update_persona_frame` from the measured word width. Stretch plus
+        // `Justify::Center` was the old attempt at centering and never worked: bevy draws
+        // the implicit text child at its own laid-out width, so the box being wide did not
+        // move the word (owner 2026-10-19: "its not center on the top line correctly").
         p.spawn((
             StatusCaption,
             Node {
                 position_type: PositionType::Absolute,
-                top: Val::ZERO,
-                left: Val::ZERO,
-                right: Val::ZERO,
                 ..default()
             },
             Text::new(STATUS_CAPTION_TEXT),
@@ -915,6 +924,10 @@ pub fn spawn_status_panel(mut commands: Commands) {
                 justify: bevy::text::Justify::Center,
                 linebreak: LineBreak::NoWrap,
             },
+            // Italic by face, not by slanting the box (owner 2026-10-19): `update_persona_frame`
+            // gives it DejaVu Sans Mono Oblique, drawn with the same advances as every other
+            // HUD string.
+            crate::ui_font::KeepOwnFont,
             style::text_font(PERSONA_ROW_FONT_PX),
             bevy::text::LineHeight::default(),
             TextColor(theme::TITLE),
@@ -1059,6 +1072,7 @@ pub fn update_status_level_box(
 pub fn update_persona_frame(
     config_rows: Res<crate::hud::menu::ConfigDatRows>,
     state: Res<SceneState>,
+    italic_font: Res<crate::ui_font::UiFontItalic>,
     mut panel_q: Query<
         &mut Node,
         (
@@ -1099,7 +1113,26 @@ pub fn update_persona_frame(
     for mut node in panel_q.iter_mut() {
         let mut want = node.clone();
         want.width = Val::Px(layout.width);
-        want.height = layout.height.map_or(Val::Auto, Val::Px);
+        // Owner ruling 2026-10-20: remove the padding at the bottom of these boxes. The stats
+        // panel keeps no padding under its last row, and takes only as much height as the rows it
+        // actually draws - a thirteen-row character used to end in a band of empty blue above the
+        // bottom border (owner capture 2026-10-20, far-left arrow). The fitted pitch stays law.
+        want.padding.bottom = Val::ZERO;
+        want.height = match (layout.height, layout.line_pitch) {
+            (Some(_h), Some(pitch)) => {
+                let visible_rows = persona_lines(&state.snapshot).len().min(PERSONA_ROW_COUNT);
+                // border + top padding · block gaps · one fitted pitch per drawn row · bottom
+                // border. No bottom pad, no undrawn rows' worth of height.
+                Val::Px(
+                    2.0 * PERSONA_BORDER_PX
+                        + PERSONA_PAD_Y_PX
+                        + PERSONA_BLOCK_GAPS as f32 * PERSONA_BLOCK_GAP_PX
+                        + pitch * visible_rows as f32,
+                )
+            }
+            (Some(h), None) => Val::Px(h),
+            _ => Val::Auto,
+        };
         want.row_gap = Val::Px(layout.row_gap);
         node.set_if_neq(want);
     }
@@ -1117,30 +1150,53 @@ pub fn update_persona_frame(
     let pitch_px = layout
         .line_pitch
         .unwrap_or_else(|| crate::ui_font::line_height_px(layout.row_font_px));
-    // The word itself is centered by Taffy (the caption box stretches left→right).
-    // Only the mask strip needs a measured width — one border row of panel fill, as wide
-    // as the glyphs plus air, placed at the content box's middle.
-    let caption_inner = layout.width - 2.0 * (PERSONA_PAD_X_PX + PERSONA_BORDER_PX);
+    // Absolute children are inset from the padding box, so half the panel's width for
+    // centering spans them is its width minus BOTH borders — not the content width inside
+    // the padding. Subtracting `PERSONA_PAD_X_PX` as well (as this did) measured against a
+    // narrower band and left the word visibly right of centre, while the strip sat on a
+    // content row instead of over the frame line (owner 2026-10-19: "the box line is
+    // overwriting the text and our status is not centered").
+    let caption_band = layout.width - 2.0 * PERSONA_BORDER_PX;
+    let caption_width = crate::ui_font::text_width_px(STATUS_CAPTION_TEXT, layout.row_font_px);
+    // The word is set in the family's oblique cut: slanted outlines with upright letters,
+    // which is what italic means (owner 2026-10-19, after a rotated text box was tried and
+    // rejected). Assigned here rather than at spawn so it survives whatever order a
+    // front-end schedules spawners against font loading; untouched until the asset exists.
+    let caption_face = if italic_font.0 == Handle::default() {
+        None
+    } else {
+        Some(bevy::text::FontSource::Handle(italic_font.0.clone()))
+    };
     for (mut node, mut font, mut pitch) in caption_q.iter_mut() {
         let size = bevy::text::FontSize::Px(layout.row_font_px);
         if font.font_size != size {
             font.font_size = size;
         }
+        if let Some(face) = &caption_face {
+            if font.font != *face {
+                font.font = face.clone();
+            }
+        }
         pitch.set_if_neq(line_height);
-        let want_top = Val::Px(-pitch_px / 2.0);
+        // Half a border further down than the old half-pitch lift: centred on the frame
+        // line itself, so no sliver of it shows above or below the glyphs.
+        let want_top = Val::Px(-pitch_px / 2.0 - PERSONA_BORDER_PX / 2.0);
         if node.top != want_top {
             node.top = want_top;
+        }
+        // The word is centered by placement, from its own measured width: the box gets that
+        // exact width and sits at the band's middle (monospace advances make this exact).
+        let want_left = Val::Px((caption_band - caption_width) / 2.0);
+        if node.left != want_left {
+            node.left = want_left;
         }
     }
     // The strip behind the word: panel fill, one border row tall, wide enough for the
     // glyphs plus their air — it breaks the frame line where the caption sits (retail's
     // gap in the top border) and nothing else. No box.
-    let mask_width = crate::ui_font::text_width_px(STATUS_CAPTION_TEXT, layout.row_font_px)
-        + 2.0 * PERSONA_CAPTION_PAD_PX;
-    // Centered strip: the content box's middle minus half its width.
-    let caption_left = (caption_inner - mask_width) / 2.0;
+    let mask_width = caption_width + 2.0 * PERSONA_CAPTION_PAD_PX;
     for mut mask in mask_q.iter_mut() {
-        let want_left = Val::Px(caption_left);
+        let want_left = Val::Px((caption_band - mask_width) / 2.0);
         if mask.left != want_left {
             mask.left = want_left;
         }
@@ -1272,25 +1328,157 @@ pub fn update_status_panel(
     }
 }
 
-fn profile_header(
+/// Where the Profile row sits in [`STATUS_ENTRIES`], for callers that match a detail window by
+/// selector row rather than repeating the index.
+pub fn profile_entry_index() -> usize {
+    STATUS_ENTRIES
+        .iter()
+        .position(|entry| entry.kind == StatusEntryKind::Profile)
+        .unwrap_or(0)
+}
+
+/// The first section caption of the Status Profile window. Retail draws both captions as their own
+/// header plates across the window; kuluu has no plate surface for them yet, so they read as plain
+/// rows in the same list (owner capture 2026-10-19).
+pub const PROFILE_SECTION_PROFILE: &str = "Profile";
+
+/// The second section caption of the same window.
+pub const PROFILE_SECTION_MONSTROSITY: &str = "Monstrosity";
+
+/// The word printed beside a conquest rank and above its progress bar, whose left edge it marks.
+pub const PROFILE_RANK_BAR_LABEL: &str = "Rank Points";
+
+/// What the row carrying the rank starts with, so `menu::update_status_detail_window` can find the
+/// row again to hang the gauge under it.
+pub const PROFILE_RANK_ROW_PREFIX: &str = "Rank:";
+
+/// What an unread field shows, as everywhere else in this window family.
+const UNREAD: &str = "\u{2014}";
+
+/// The playable races by entity-look race id: 1 Hume M, 2 Hume F, 3 Elvaan M, 4 Elvaan F,
+/// 5 Tarutaru M, 6 Tarutaru F, 7 Mithra, 8 Galka. That is the numbering the item DAT `races` mask
+/// uses (its bits are proven one-per-race against retail records in `item_detail::format_races`),
+/// and the same byte a player's own record carries.
+fn race_name(race: u8) -> Option<&'static str> {
+    Some(match race {
+        1 | 2 => "Hume",
+        3 | 4 => "Elvaan",
+        5 | 6 => "Tarutaru",
+        7 => "Mithra",
+        8 => "Galka",
+        _ => return None,
+    })
+}
+
+/// Our own race, read from our entity's look. That is where FFXiMain.dll retail-2026-09 reads it as
+/// well (`mov bl, byte ptr [entity + 0xEF]` at `.text 0x132099`, inside the equip-legality RVA
+/// 0x132050), and `None` means that spawn has not arrived yet.
+fn self_race(snap: &kuluu_snapshot::SceneSnapshot) -> Option<u8> {
+    snap.self_char_id
+        .and_then(|id| snap.entities.iter().find(|e| e.id == id))
+        .and_then(|e| match e.look.as_ref()? {
+            kuluu_snapshot::EntityLook::Equipped { race, .. } => Some(*race),
+            _ => None,
+        })
+}
+
+/// The Status Profile window's rows (owner capture 2026-10-19): allegiance, then Monstrosity, and
+/// nothing else. No name/job line, no HP/MP/TP, no item level and no primary attributes: those are
+/// the persona panel's, which stays open beside this window in retail (owner ruling 2026-10-19,
+/// after comparing the two windows side by side: "the profile of retail and kuluu are not matching
+/// items.. at all").
+fn profile_lines(
     snap: &kuluu_snapshot::SceneSnapshot,
-    me: Option<&kuluu_snapshot::PartyMember>,
-) -> String {
-    let name = me
-        .and_then(|m| m.name.clone())
-        .or_else(|| snap.char_name.clone())
-        .unwrap_or_else(|| "—".to_string());
-    match me {
-        Some(m) => {
-            let main = job_abbrev(m.main_job);
-            if m.sub_job != 0 {
-                let sub = job_abbrev(m.sub_job);
-                format!("{name}  {main}{} / {sub}{}", m.main_job_lv, m.sub_job_lv)
-            } else {
-                format!("{name}  {main}{}", m.main_job_lv)
-            }
+    zone_names: Option<&crate::hud::zone_flash::ZoneNameResolver>,
+) -> Vec<String> {
+    let stats = snap.stats.as_ref();
+    let mut lines = vec![PROFILE_SECTION_PROFILE.to_string()];
+
+    // `Nation:` is s2c 0x061's nation byte, named through the pinned list the mission tables use.
+    lines.push(format!(
+        "Nation: {}",
+        match stats
+            .and_then(|s| crate::hud::menu::MISSION_NATION_NAMES_PINNED.get(usize::from(s.nation)))
+        {
+            Some(name) => (*name).to_string(),
+            None => UNREAD.to_string(),
         }
-        None => name,
+    ));
+
+    // `Race:` comes from the entity look, not from s2c 0x061, so it stays unread until we spawn.
+    lines.push(format!(
+        "Race: {}",
+        match self_race(snap).and_then(race_name) {
+            Some(name) => name.to_string(),
+            None => UNREAD.to_string(),
+        }
+    ));
+
+    // `Home Point:` is s2c 0x061's BindZoneNo; the zone table names it exactly as the entry banner
+    // does (same resolver, same underscore law).
+    let home_point_zone = stats.and_then(|s| (s.home_point_zone != 0).then_some(s.home_point_zone));
+    lines.push(format!(
+        "Home Point: {}",
+        match home_point_zone.and_then(|zone| zone_names.and_then(|r| (r.0)(zone))) {
+            Some(name) => name.replace('_', " "),
+            None => UNREAD.to_string(),
+        }
+    ));
+
+    // `Rank:` prints s2c 0x061's rank and, to its right, the label of the bar that fills in the row
+    // under it (the widget lives in the window; this row is where it hangs from).
+    let rank = stats.map_or_else(|| UNREAD.to_string(), |s| s.conquest_rank.to_string());
+    lines.push(format!("Rank: {rank}   {PROFILE_RANK_BAR_LABEL}"));
+
+    // The bar's own line carries no text; the spacer keeps its vertical slot reserved so the
+    // window is as tall as retail's whether or not the report has arrived.
+    lines.push(String::new());
+
+    // `Mastery Rank:` and the mentor marker are s2c 0x01B's three tail bytes. Retail draws the
+    // mentor as a pennant glyph; these rows take text only, so kuluu prints its rank number there
+    // and an unread marker when the byte says no mentor.
+    let ranks = snap.job_ranks.as_ref();
+    lines.push(format!(
+        "Mastery Rank: {}    Mentor: {}",
+        match ranks {
+            Some(r) => r.mastery_rank.to_string(),
+            None => UNREAD.to_string(),
+        },
+        match ranks.filter(|r| r.mentor_rank != 0) {
+            Some(r) => r.mentor_rank.to_string(),
+            None => UNREAD.to_string(),
+        }
+    ));
+
+    lines.push(PROFILE_SECTION_MONSTROSITY.to_string());
+    // `Gladiator Rank:` is in retail's window but nowhere else: a search for gladiator across the
+    // vendored server turns up mob names, a key item and the pankration enum, never a rank ladder,
+    // so there is no field to read here. kuluu shows the label with an unread marker instead of
+    // inventing one.
+    lines.push(format!("Gladiator Rank: {UNREAD}"));
+
+    // `Prestige:` comes out of the s2c 0x113 report body the Currencies list already keeps.
+    let prestige = snap
+        .currencies_1
+        .as_deref()
+        .and_then(crate::hud::currency_law::prestige);
+    lines.push(format!(
+        "Prestige:   {}",
+        prestige.map_or_else(|| UNREAD.to_string(), |p| p.to_string(),)
+    ));
+    lines
+}
+
+/// The caption retail puts on the Profile window's top border: the title currently worn, which is
+/// s2c 0x061's `designation` shown through the generated title table.
+pub fn profile_caption(snap: &kuluu_snapshot::SceneSnapshot) -> String {
+    match snap
+        .stats
+        .as_ref()
+        .and_then(|s| ffxi_vocab::title_names::lookup(s.title_id))
+    {
+        Some(title) => format!("Title: {title}"),
+        None => "Title:".to_string(),
     }
 }
 
@@ -1329,43 +1517,20 @@ fn attr_value(stats: &kuluu_snapshot::CharStats, attr_index: usize) -> Option<u1
 /// `currency_labels_1`/`currency_labels_2` are the two Currencies lists' table-12 label
 /// columns — slot-aligned with `currency_law::CurrencyMode::rows()`; empty before the DAT
 /// catalog loads, in which case each row falls back to its text id like the other loaders do.
+/// `zone_names` names the home point of [`kuluu_snapshot::CharStats::home_point_zone`] through the
+/// same resolver the entry banner uses; without it that row reads unread rather than a raw id.
 pub fn status_detail_lines(
     entry_idx: usize,
     snap: &kuluu_snapshot::SceneSnapshot,
     currency_labels_1: &[Option<String>],
     currency_labels_2: &[Option<String>],
+    zone_names: Option<&crate::hud::zone_flash::ZoneNameResolver>,
 ) -> Vec<String> {
     let Some(entry) = STATUS_ENTRIES.get(entry_idx) else {
         return vec!["(no such status row)".to_string()];
     };
-    let me = crate::snapshot::resolve_self(&snap.party, snap.self_char_id);
     match entry.kind {
-        StatusEntryKind::Profile => {
-            let mut lines = vec![profile_header(snap, me)];
-            lines.push(match me {
-                Some(m) => format!("HP {}   MP {}   TP {}", m.hp, m.mp, m.tp),
-                None => "HP —   MP —   TP —".to_string(),
-            });
-            lines.push(match snap.stats.as_ref().filter(|s| s.item_level > 0) {
-                Some(s) => format!("Item Level: {}", s.item_level),
-                _ => "Item Level: —".to_string(),
-            });
-            for (attr_index, name) in PRIMARY_ATTRS.iter().enumerate() {
-                lines.push(match snap.stats.as_ref() {
-                    Some(s) => {
-                        let base = attr_value(s, attr_index).unwrap_or(0);
-                        let bonus = s.bonus.get(attr_index).copied().unwrap_or(0);
-                        if bonus != 0 {
-                            format!("{name:<4}{base:>4} {bonus:+}")
-                        } else {
-                            format!("{name:<4}{base:>4}")
-                        }
-                    }
-                    None => format!("{name:<4}   —"),
-                });
-            }
-            lines
-        }
+        StatusEntryKind::Profile => profile_lines(snap, zone_names),
         StatusEntryKind::JobLevels => match snap.jobs.as_ref() {
             Some(list) => {
                 let mut lines: Vec<String> = list
@@ -1692,8 +1857,15 @@ mod tests {
 
     fn persona_app() -> bevy::app::App {
         let mut app = bevy::app::App::new();
+        // Enough of the asset layer for `load_ui_fonts` to hand out handles; no IO wanted.
+        app.insert_resource(bevy::asset::Assets::<Font>::default());
         app.init_resource::<crate::hud::menu::ConfigDatRows>();
         app.init_resource::<SceneState>();
+        // Mirrors KuluuRenderPlugin: both cuts of the HUD family load, so
+        // `update_persona_frame` can set the caption in the oblique.
+        app.init_resource::<crate::ui_font::UiFont>();
+        app.init_resource::<crate::ui_font::UiFontItalic>();
+        app.add_systems(bevy::app::Startup, crate::ui_font::load_ui_fonts);
         app.add_systems(bevy::app::Startup, spawn_status_panel);
         app.add_systems(bevy::app::Update, update_persona_frame);
         app.update();
@@ -1708,8 +1880,9 @@ mod tests {
             .clone()
     }
 
-    /// Persona takes width and height from its record frame and fits every row inside it; without
-    /// an install it keeps kuluu's own panel.
+    /// Persona takes width from its record frame, fits the pitch to that frame, and (owner
+    /// 2026-10-20) spends only its drawn rows on height with no bottom padding; without an install
+    /// it keeps kuluu's own panel.
     #[test]
     fn persona_takes_its_rectangle_from_its_record_frame() {
         let mut app = persona_app();
@@ -1739,12 +1912,27 @@ mod tests {
         }
         app.update();
         let placed = persona_node(&mut app);
+        // Height law (owner 2026-10-20): borders + top padding + the two block gaps + one fitted
+        // pitch per drawn row; nothing under the last row.
+        let inner_full = f32::from(RECORD_HEIGHT)
+            - 2.0 * (PERSONA_PAD_Y_PX + PERSONA_BORDER_PX)
+            - PERSONA_BLOCK_GAPS as f32 * PERSONA_BLOCK_GAP_PX;
+        let pitch = inner_full / PERSONA_ROW_COUNT as f32;
+        let visible = persona_lines(&app.world().resource::<SceneState>().snapshot).len();
+        assert!((1..=PERSONA_ROW_COUNT).contains(&visible));
+        assert_eq!(placed.padding.bottom, Val::ZERO);
         assert_eq!(
             (placed.width, placed.height),
             (
                 Val::Px(f32::from(RECORD_WIDTH)),
-                Val::Px(f32::from(RECORD_HEIGHT))
-            )
+                Val::Px(
+                    2.0 * PERSONA_BORDER_PX
+                        + PERSONA_PAD_Y_PX
+                        + PERSONA_BLOCK_GAPS as f32 * PERSONA_BLOCK_GAP_PX
+                        + pitch * visible as f32,
+                ),
+            ),
+            "width from the record; height spent on drawn rows with no bottom padding"
         );
 
         let inner = f32::from(RECORD_HEIGHT) - 2.0 * (PERSONA_PAD_Y_PX + PERSONA_BORDER_PX);
@@ -2034,29 +2222,65 @@ mod tests {
             "lifted over the frame edge: {:?}",
             node.top
         );
-        // Centering law (owner 2026-10-19): the caption box stretches across the panel's
-        // content box and Taffy centers the word — never a hand-computed left offset.
-        assert_eq!(node.left, Val::ZERO);
-        assert_eq!(
-            node.right,
-            Val::ZERO,
-            "the box spans the panel so justify can center the word"
-        );
-        // The strip sits under the glyphs: same measured width as before, centered on the
-        // content box's middle.
-        let inner = PANEL_WIDTH_PX - 2.0 * (PERSONA_PAD_X_PX + PERSONA_BORDER_PX);
+        // Centering law (owner 2026-10-19): word and strip share one middle — that of the
+        // band absolute children measure across, i.e. the panel minus its two borders, NOT
+        // the content box inside the padding (the old math was off by `PERSONA_PAD_X_PX`).
+        let band = PANEL_WIDTH_PX - 2.0 * PERSONA_BORDER_PX;
         let text_w = crate::ui_font::text_width_px(STATUS_CAPTION_TEXT, PERSONA_ROW_FONT_PX);
         let want_mask_w = text_w + 2.0 * PERSONA_CAPTION_PAD_PX;
-        let want_mask_left = (inner - want_mask_w) / 2.0;
+        let want_mask_left = (band - want_mask_w) / 2.0;
+        let want_caption_left = (band - text_w) / 2.0;
+        assert!(
+            matches!(node.left, Val::Px(l) if (l - want_caption_left).abs() < 0.5),
+            "word centered by placement: left {:?}, want {want_caption_left}",
+            node.left
+        );
         assert!(
             matches!(mask.left, Val::Px(l) if (l - want_mask_left).abs() < 0.5),
-            "strip centered on the content box: left {:?}, want {want_mask_left}",
+            "strip centered on the same band: left {:?}, want {want_mask_left}",
             mask.left
         );
+        let Val::Px(mask_left) = mask.left else {
+            unreachable!("the update system places the strip in pixels")
+        };
         assert!(
             matches!(mask.width, Val::Px(w) if (w - want_mask_w).abs() < 1.0),
             "strip covers the glyphs plus air: {:?}",
             mask.width
+        );
+        // The strip is symmetric about the word, which only holds if both were centered on
+        // one band.
+        let mask_center = mask_left + want_mask_w / 2.0;
+        assert!(
+            (mask_center - band / 2.0).abs() < 0.5,
+            "strip middle {mask_center} sits on the panel middle {}",
+            band / 2.0
+        );
+        // Italic (owner 2026-10-19): the word is set in an italic FACE — DejaVu Sans Mono
+        // Oblique — while its box stays square up. Tilting the text node was tried and
+        // rejected: "that is NOT italics.. you just slanted the whole word".
+        let face = {
+            let mut q = world.query_filtered::<&TextFont, With<StatusCaption>>();
+            q.single(world).expect("one caption font").font.clone()
+        };
+        let italic = world.resource::<crate::ui_font::UiFontItalic>().0.clone();
+        let regular = world.resource::<crate::ui_font::UiFont>().0.clone();
+        assert_ne!(italic, regular, "the test app loaded both cuts");
+        assert_eq!(
+            face,
+            bevy::text::FontSource::Handle(italic),
+            "the caption is set in the oblique cut"
+        );
+        assert!(
+            world.get::<crate::ui_font::KeepOwnFont>(caption).is_some(),
+            "and `apply_ui_font` must not stamp the regular face back over it"
+        );
+        // The strip covers the frame band (-border..0 from the padding edge), otherwise the
+        // line keeps running through the glyphs.
+        assert!(
+            matches!(mask.top, Val::Px(t) if (t + PERSONA_BORDER_PX).abs() < 0.01),
+            "strip sits on the frame band: top {:?}",
+            mask.top
         );
         let child_of = world.get::<ChildOf>(caption).expect("caption is parented");
         assert!(
@@ -2525,7 +2749,7 @@ mod tests {
             .position(|e| e.kind == StatusEntryKind::CombatSkill)
             .unwrap();
         let mask = status_detail_capped(combat_entry, &snap);
-        let lines = status_detail_lines(combat_entry, &snap, &[], &[]);
+        let lines = status_detail_lines(combat_entry, &snap, &[], &[], None);
         assert!(!lines.is_empty());
         assert_eq!(mask.len(), lines.len(), "one flag per drawn line");
         assert!(mask.iter().any(|c| *c), "the capped id is flagged");
@@ -2743,7 +2967,7 @@ mod tests {
         let snap = kuluu_snapshot::SceneSnapshot::default();
         for kind in [StatusEntryKind::MeritPoints, StatusEntryKind::JobPoints] {
             let entry = STATUS_ENTRIES.iter().position(|e| e.kind == kind).unwrap();
-            assert!(status_detail_lines(entry, &snap, &[], &[]).is_empty());
+            assert!(status_detail_lines(entry, &snap, &[], &[], None).is_empty());
         }
     }
 
@@ -2783,10 +3007,22 @@ mod tests {
         snap.currencies_2 = Some(body2);
         let entry_of =
             |want: StatusEntryKind| STATUS_ENTRIES.iter().position(|e| e.kind == want).unwrap();
-        let cur1 = status_detail_lines(entry_of(StatusEntryKind::Currencies), &snap, &labels, &[]);
+        let cur1 = status_detail_lines(
+            entry_of(StatusEntryKind::Currencies),
+            &snap,
+            &labels,
+            &[],
+            None,
+        );
         assert_eq!(cur1.len(), 99);
         assert!(&cur1[0].contains("7777"));
-        let cur2 = status_detail_lines(entry_of(StatusEntryKind::Currencies2), &snap, &[], &labels);
+        let cur2 = status_detail_lines(
+            entry_of(StatusEntryKind::Currencies2),
+            &snap,
+            &[],
+            &labels,
+            None,
+        );
         assert_eq!(cur2.len(), 97, "report 2 has its own descriptor count");
         assert!(&cur2[0].contains('5'), "bayld slot reads report 2");
         assert!(!&cur2[0].contains("7777"), "blocks never cross modes");

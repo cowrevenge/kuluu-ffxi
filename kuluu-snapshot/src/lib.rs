@@ -111,7 +111,10 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 46;
+// v47: CharStats gains the allegiance block s2c 0x061 already carries (title id, conquest rank and
+// bar, home-point zone, nation) and SceneSnapshot gains `job_ranks`, the mastery/mentor pair from
+// s2c 0x01B. The Status Profile window draws all of it.
+pub const PROTOCOL_VERSION: u32 = 47;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1221,6 +1224,21 @@ pub struct SceneSnapshot {
     /// Trailing on purpose.
     #[serde(default)]
     pub homepoints: Option<HomepointMasks>,
+
+    /// The mastery and mentor ranks s2c 0x01B JOB_INFO carries past its dancer block, which the
+    /// Status Profile window shows as `Mastery Rank: n` and the `Mentor:` marker. `None` until that
+    /// packet arrives. Trailing on purpose.
+    #[serde(default)]
+    pub job_ranks: Option<JobRanks>,
+}
+
+/// s2c 0x01B JOB_INFO's three tail bytes (vendor/server/src/map/packets/s2c/0x01b_job_info.h
+/// `PacketData`: `can_thumbs_up_mentor`, `mentor_rank`, `mastery_rank`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobRanks {
+    pub mastery_rank: u8,
+    pub mentor_rank: u8,
+    pub can_thumbs_up_mentor: bool,
 }
 
 /// One merit s2c 0x08C stored: the cost of its next upgrade and its current upgrade count
@@ -1908,6 +1926,23 @@ pub struct CharStats {
     /// (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md).
     #[serde(default)]
     pub mjob_lv: u8,
+    /// `designation` from s2c 0x061: the title id currently worn. Displayed through
+    /// `ffxi_vocab::title_names`; 0 is "no title".
+    #[serde(default)]
+    pub title_id: u16,
+    /// `rank` and `rankbar` from s2c 0x061 (`profile.rank[nation]`, `profile.rankpoints`): the
+    /// character's conquest rank and its progress bar in the Status Profile window.
+    #[serde(default)]
+    pub conquest_rank: u16,
+    #[serde(default)]
+    pub conquest_rank_bar: u16,
+    /// `BindZoneNo` from s2c 0x061 (`profile.home_point.destination`): the zone id of the character's
+    /// home point, 0 when none is set. Named through the zone table.
+    #[serde(default)]
+    pub home_point_zone: u16,
+    /// `nation` from s2c 0x061 (`profile.nation`): 0 San d'Oria, 1 Bastok, 2 Windurst.
+    #[serde(default)]
+    pub nation: u8,
 }
 
 /// Mirror of `kuluu`'s browsed-bazaar model (s2c 0x105 rows keyed by the
@@ -2944,6 +2979,7 @@ mod tests {
                 atmos: 0xCAFE_BABE,
                 eschan_portal: 0xF00D_D00D,
             }),
+            job_ranks: None,
             party_invite: None,
             stage: Stage::InZone,
             char_name: Some("Sylvie".into()),
@@ -3276,7 +3312,7 @@ mod tests {
 
     #[test]
     fn current_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 46;
+        const VERSION: u32 = 47;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();
@@ -3658,6 +3694,7 @@ mod tests {
             "job_points_received",
             "job_points",
             "homepoints",
+            "job_ranks",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
@@ -3672,7 +3709,10 @@ mod tests {
     // the quest flag), the `alter_ego_points` `None` tag, and three scalar zeros. The merit and job
     // point fields append four zero bytes: two empty map lengths, a flag and a `None` tag. §59
     // addendum 37 appends homepoints (`Option<HomepointMasks>`) as exactly one more `None` tag byte.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    // v47 appends job_ranks (`Option<JobRanks>`), again one more `None` tag byte; the five allegiance
+    // fields added to CharStats sit inside the existing `stats` Option and cost nothing while it is
+    // None, which is why only one byte moves here.
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "000000000000000000000000000000001919000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

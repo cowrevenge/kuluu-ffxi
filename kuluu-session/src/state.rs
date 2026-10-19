@@ -431,6 +431,20 @@ pub struct CharStatsRaw {
     /// CLISTATUS `mjob_lv`.
     #[serde(default)]
     pub mjob_lv: u8,
+    /// CLISTATUS `designation` (title id), `rank`/`rankbar` (conquest rank and its bar),
+    /// `BindZoneNo` (home-point zone) and `nation` — the allegiance block of the Status Profile
+    /// window, all from the same packet.
+    #[serde(default)]
+    pub title_id: u16,
+    #[serde(default)]
+    pub conquest_rank: u16,
+    #[serde(default)]
+    pub conquest_rank_bar: u16,
+    #[serde(default)]
+    pub home_point_zone: u16,
+    /// 0 San d'Oria, 1 Bastok, 2 Windurst.
+    #[serde(default)]
+    pub nation: u8,
 }
 
 /// s2c 0x00A myroom cluster; present only while inside a Mog House. `model`
@@ -461,6 +475,14 @@ pub struct JobInfoState {
     pub unlocked: u32,
     pub sub_job_unlocked: bool,
     pub job_levels: [u8; ffxi_proto::decode::JobInfo::MAX_JOBTYPE],
+    /// The packet tail past the dancer block: the ranks behind the Status Profile window's
+    /// `Mastery Rank:` row and `Mentor:` marker, plus the thumbs-up permission bit.
+    #[serde(default)]
+    pub can_thumbs_up_mentor: bool,
+    #[serde(default)]
+    pub mentor_rank: u8,
+    #[serde(default)]
+    pub mastery_rank: u8,
 }
 
 impl From<ffxi_proto::decode::JobInfo> for JobInfoState {
@@ -471,6 +493,9 @@ impl From<ffxi_proto::decode::JobInfo> for JobInfoState {
             unlocked: j.unlocked,
             sub_job_unlocked: j.sub_job_unlocked,
             job_levels: j.job_levels,
+            can_thumbs_up_mentor: j.can_thumbs_up_mentor,
+            mentor_rank: j.mentor_rank,
+            mastery_rank: j.mastery_rank,
         }
     }
 }

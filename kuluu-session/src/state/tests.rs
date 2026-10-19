@@ -191,6 +191,9 @@ fn job_info_and_2f_unlock_fold() {
         unlocked: 0b1011,
         sub_job_unlocked: true,
         job_levels,
+        can_thumbs_up_mentor: true,
+        mentor_rank: 2,
+        mastery_rank: 1,
     };
     s.apply_event(&AgentEvent::JobInfoUpdated { info });
     assert_eq!(s.job_info, Some(info));

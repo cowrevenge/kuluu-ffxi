@@ -217,20 +217,49 @@ pub fn spawn_status_ribbon(mut commands: Commands, mut images: ResMut<Assets<Ima
         });
 }
 
+/// The ribbon hangs under the help line, which is exactly where a Command-menu window lands once one
+/// opens. Owner ruling 2026-10-20, pointing at a buff icon left poking out of the Profile window's
+/// top border: while a menu stack holds the screen the status icons are hidden rather than half
+/// covered. Buff inspection runs through `InputMode::PassiveCursor`, which is not a menu stack, so
+/// clicking a buff off the ribbon still works.
+pub fn status_icons_hidden(mode: &crate::input_mode::InputMode) -> bool {
+    matches!(
+        mode,
+        crate::input_mode::InputMode::Menu(_) | crate::input_mode::InputMode::SubTarget(_)
+    )
+}
+
 pub fn update_status_ribbon(
     state: Res<SceneState>,
     dat_root: Res<StatusIconDatRoot>,
     mut cache: ResMut<StatusIconCache>,
     mut images: ResMut<Assets<Image>>,
-    mut chips: Query<(
-        &StatusChip,
-        &Children,
-        &mut Node,
-        &mut ImageNode,
-        &mut BackgroundColor,
-    )>,
+    mode: Res<crate::input_mode::InputMode>,
+    // The ribbon node itself; hiding it takes its chips with it, and the per-chip display law below
+    // stays untouched so coming back out of a menu restores exactly what was there.
+    mut ribbon_q: Query<&mut Node, With<StatusRibbon>>,
+    mut chips: Query<
+        (
+            &StatusChip,
+            &Children,
+            &mut Node,
+            &mut ImageNode,
+            &mut BackgroundColor,
+        ),
+        Without<StatusRibbon>,
+    >,
     mut text_q: Query<&mut Text, With<StatusChipFallback>>,
 ) {
+    let want_display = if status_icons_hidden(&mode) {
+        Display::None
+    } else {
+        Display::Flex
+    };
+    for mut ribbon in ribbon_q.iter_mut() {
+        if ribbon.display != want_display {
+            ribbon.display = want_display;
+        }
+    }
     if !state.dirty {
         return;
     }

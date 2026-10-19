@@ -178,6 +178,21 @@ pub struct CliStatus {
     /// (vendor/server/src/map/packets/s2c/0x061_clistatus.cpp).
     pub unity_points1: u16,
     pub unity_points2: u16,
+    /// `designation` — the title id the character wears right now (LSB fills it from
+    /// `profile.title`, vendor/server/src/map/packets/s2c/0x061_clistatus.cpp). Display text comes
+    /// from [`ffxi_vocab::title_names`]; 0 means "wearing nothing".
+    pub title_id: u16,
+    /// `rank` — the conquest rank of the character's nation (`profile.rank[nation]`).
+    pub conquest_rank: u16,
+    /// `rankbar` — standing toward the next conquest rank (`profile.rankpoints`). Retail draws this
+    /// as the bar under `Rank:` in the Status Profile window.
+    pub conquest_rank_bar: u16,
+    /// `BindZoneNo` — zone id of the character's home point (`profile.home_point.destination`).
+    /// 0 means none set; a name comes from the zone table.
+    pub home_point_zone: u16,
+    /// `nation` — allegiance of the character: 0 San d'Oria, 1 Bastok, 2 Windurst
+    /// (`profile.nation`).
+    pub nation: u8,
 }
 
 impl CliStatus {
@@ -219,6 +234,14 @@ impl CliStatus {
     pub(crate) const UNITY_POINTS_MASK: u32 = 0x1_FFFF;
     pub(crate) const UNITY_POINTS1_OFFSET: usize = 0x58;
     pub(crate) const UNITY_POINTS2_OFFSET: usize = 0x5A;
+    // The allegiance block of the Status Profile window: designation (title), rank, rankbar,
+    // BindZoneNo (home point) and nation sit in one run here
+    // (vendor/server/src/map/packets/s2c/0x061_clistatus.h CLISTATUS).
+    pub(crate) const TITLE_ID_OFFSET: usize = 0x40;
+    pub(crate) const CONQUEST_RANK_OFFSET: usize = 0x42;
+    pub(crate) const CONQUEST_RANK_BAR_OFFSET: usize = 0x44;
+    pub(crate) const HOME_POINT_ZONE_OFFSET: usize = 0x46;
+    pub(crate) const NATION_OFFSET: usize = 0x4C;
     const NEEDED: usize = Self::MASTERY_INFO_FLAGS_OFFSET + 1;
 
     /// STR, DEX, VIT, AGI, INT, MND, CHR.
@@ -269,9 +292,40 @@ impl CliStatus {
             unity_points: (unity_info >> Self::UNITY_POINTS_SHIFT) & Self::UNITY_POINTS_MASK,
             unity_points1: rd16(Self::UNITY_POINTS1_OFFSET),
             unity_points2: rd16(Self::UNITY_POINTS2_OFFSET),
+            title_id: rd16(Self::TITLE_ID_OFFSET),
+            conquest_rank: rd16(Self::CONQUEST_RANK_OFFSET),
+            conquest_rank_bar: rd16(Self::CONQUEST_RANK_BAR_OFFSET),
+            home_point_zone: rd16(Self::HOME_POINT_ZONE_OFFSET),
+            nation: body[Self::NATION_OFFSET],
         })
     }
 }
+
+pin_s2c_offset!(
+    CliStatus::TITLE_ID_OFFSET,
+    lsb::STATUSDATA_DESIGNATION,
+    "CLISTATUS.designation"
+);
+pin_s2c_offset!(
+    CliStatus::CONQUEST_RANK_OFFSET,
+    lsb::STATUSDATA_RANK,
+    "CLISTATUS.rank"
+);
+pin_s2c_offset!(
+    CliStatus::CONQUEST_RANK_BAR_OFFSET,
+    lsb::STATUSDATA_RANKBAR,
+    "CLISTATUS.rankbar"
+);
+pin_s2c_offset!(
+    CliStatus::HOME_POINT_ZONE_OFFSET,
+    lsb::STATUSDATA_BIND_ZONE_NO,
+    "CLISTATUS.BindZoneNo"
+);
+pin_s2c_offset!(
+    CliStatus::NATION_OFFSET,
+    lsb::STATUSDATA_NATION,
+    "CLISTATUS.nation"
+);
 
 pin_s2c_offset!(
     CliStatus::UNITY_INFO_OFFSET,
@@ -461,6 +515,13 @@ pub struct JobInfo {
     pub hp_max: i32,
     pub mp_max: i32,
     pub sjobflg: u8,
+    /// The tail of the packet, past the dancer block. Retail prints `Mastery Rank: n` and a
+    /// `Mentor:` marker in the Status Profile window from these two bytes; the third bit says whether
+    /// the character may give a mentor a thumbs-up
+    /// (vendor/server/src/map/packets/s2c/0x01b_job_info.h PacketData).
+    pub can_thumbs_up_mentor: bool,
+    pub mentor_rank: u8,
+    pub mastery_rank: u8,
 }
 
 impl JobInfo {
@@ -474,6 +535,10 @@ impl JobInfo {
     pub(crate) const MP_MAX_OFFSET: usize = 0x3C;
     pub(crate) const SJOBFLG_OFFSET: usize = 0x40;
     pub(crate) const JOB_LEVELS_OFFSET: usize = 0x44;
+    // Past the dancer block (0x5C) and `encumbrance`: three bytes of mentorship/rank state.
+    pub(crate) const CAN_THUMBS_UP_MENTOR_OFFSET: usize = 0x60;
+    pub(crate) const MENTOR_RANK_OFFSET: usize = 0x61;
+    pub(crate) const MASTERY_RANK_OFFSET: usize = 0x62;
     pub(crate) const MIN_LEN: usize = Self::JOB_LEVELS_OFFSET + Self::MAX_JOBTYPE;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
@@ -481,6 +546,9 @@ impl JobInfo {
             return Err(DecodeError::Truncated(Self::MIN_LEN, body.len()));
         }
         let rdi32 = |o: usize| i32::from_le_bytes([body[o], body[o + 1], body[o + 2], body[o + 3]]);
+        // The tail fields are optional for us, so they read zero on a short body instead of
+        // short-circuiting the decode the dancer block already satisfied.
+        let byte_or_zero = |o: usize| body.get(o).copied().unwrap_or(0);
         let unlocked = u32::from_le_bytes(
             body[Self::UNLOCKED_OFFSET..Self::UNLOCKED_OFFSET + 4]
                 .try_into()
@@ -499,9 +567,30 @@ impl JobInfo {
             hp_max: rdi32(Self::HP_MAX_OFFSET),
             mp_max: rdi32(Self::MP_MAX_OFFSET),
             sjobflg: body[Self::SJOBFLG_OFFSET],
+            // A body that stops at the dancer block keeps the ranks zero rather than failing the
+            // decode: the job list and Mog-menu law downstream never asked for the tail.
+            can_thumbs_up_mentor: byte_or_zero(Self::CAN_THUMBS_UP_MENTOR_OFFSET) != 0,
+            mentor_rank: byte_or_zero(Self::MENTOR_RANK_OFFSET),
+            mastery_rank: byte_or_zero(Self::MASTERY_RANK_OFFSET),
         })
     }
 }
+
+pin_s2c_offset!(
+    JobInfo::CAN_THUMBS_UP_MENTOR_OFFSET,
+    crate::s2c_layout::job_info::CAN_THUMBS_UP_MENTOR,
+    "JOB_INFO.can_thumbs_up_mentor"
+);
+pin_s2c_offset!(
+    JobInfo::MENTOR_RANK_OFFSET,
+    crate::s2c_layout::job_info::MENTOR_RANK,
+    "JOB_INFO.mentor_rank"
+);
+pin_s2c_offset!(
+    JobInfo::MASTERY_RANK_OFFSET,
+    crate::s2c_layout::job_info::MASTERY_RANK,
+    "JOB_INFO.mastery_rank"
+);
 
 pin_s2c_offset!(
     CliStatus::HP_MAX_OFFSET,

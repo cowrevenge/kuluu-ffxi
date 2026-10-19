@@ -390,6 +390,7 @@ pub fn update_menu_help_bar(
             Without<MenuHelpPaneSwitch>,
         ),
     >,
+    config_rows: Res<menu::ConfigDatRows>,
 ) {
     let Ok(mut node) = bar_q.single_mut() else {
         return;
@@ -452,7 +453,9 @@ pub fn update_menu_help_bar(
                             Some((used, capacity)) => format!("{used}/{capacity}"),
                             None => String::new(),
                         },
-                        hint: entry_help(l.kind, l.cursor, &dynamic),
+                        hint: profile_detail_help(&mode, &scene.snapshot)
+                            .or_else(|| dat_row_help(l.kind, l.cursor, &config_rows))
+                            .unwrap_or_else(|| entry_help(l.kind, l.cursor, &dynamic)),
                     },
                 }
             }),
@@ -567,6 +570,44 @@ fn focused_level(stack: &MenuStack) -> Option<&MenuLevel> {
         }
     }
     stack.active_level()
+}
+
+/// While retail's Status Profile window stands open this bar carries the words
+/// `Title: <worn title>` (owner ruling 2026-10-19: those words belong in the bar across the top of
+/// the screen, not on the window's own border). `None` everywhere else, and also while no title is
+/// known yet, so every other window keeps its own help line.
+fn profile_detail_help(mode: &InputMode, snap: &kuluu_snapshot::SceneSnapshot) -> Option<String> {
+    let stack = match &*mode {
+        InputMode::Menu(stack) => stack,
+        _ => return None,
+    };
+    let profile_row = crate::hud::status_panel::profile_entry_index();
+    if !stack.levels.iter().any(|lv| {
+        matches!(lv.kind, MenuKind::StatusDetail { entry } if usize::from(entry) == profile_row)
+    }) {
+        return None;
+    }
+    let stats = snap.stats.as_ref()?;
+    // One formatter of record for these words: `Title: <worn title>`.
+    ffxi_vocab::title_names::lookup(stats.title_id)?;
+    Some(crate::hud::status_panel::profile_caption(snap))
+}
+
+/// The DAT item a window's cursor row is, for windows whose rows are their record's items.
+fn dat_row_item_id(kind: MenuKind, cursor: usize) -> Option<i16> {
+    match kind {
+        MenuKind::Status => crate::hud::status_panel::STATCOM2_DISPLAY_ITEM_IDS
+            .get(cursor)
+            .copied(),
+        _ => None,
+    }
+}
+
+/// The help line the record gives the row under the cursor; `None` keeps kuluu's own line.
+fn dat_row_help(kind: MenuKind, cursor: usize, rows: &menu::ConfigDatRows) -> Option<String> {
+    let item_id = dat_row_item_id(kind, cursor)?;
+    rows.row_help(menu::registry_window(kind)?, item_id)
+        .map(str::to_string)
 }
 
 struct BarContent {
@@ -758,6 +799,149 @@ mod tests {
         assert_eq!(
             entry_help(MenuKind::EmoteList, 0, &dynamic),
             "Select an emote."
+        );
+    }
+
+    /// With Status focused the help line is the record's help text of the row under the cursor,
+    /// also while a display-only detail sits on top; rows without one keep kuluu's line.
+    #[test]
+    fn status_help_line_follows_the_focused_row() {
+        use crate::hud::status_panel::{STATCOM2_DISPLAY_ITEM_IDS, STATUS_ENTRIES};
+        use crate::input_mode::{MenuLevel, MenuStack};
+        const HELPED_ROW: usize = 2;
+        let mut rows = menu::ConfigDatRows::default();
+        rows.row_help.insert(
+            menu::STATUS_SELECTOR_WINDOW.into(),
+            [
+                (STATCOM2_DISPLAY_ITEM_IDS[0], "first row help".to_string()),
+                (
+                    STATCOM2_DISPLAY_ITEM_IDS[HELPED_ROW],
+                    "third row help".to_string(),
+                ),
+            ]
+            .into(),
+        );
+        assert_eq!(
+            dat_row_help(MenuKind::Status, 0, &rows).as_deref(),
+            Some("first row help")
+        );
+        assert_eq!(
+            dat_row_help(MenuKind::Status, HELPED_ROW, &rows).as_deref(),
+            Some("third row help")
+        );
+        assert_eq!(dat_row_help(MenuKind::Status, 1, &rows), None);
+        assert_eq!(
+            dat_row_help(MenuKind::Status, 0, &menu::ConfigDatRows::default()),
+            None,
+            "no install: kuluu's own line"
+        );
+
+        let mut stack = MenuStack::root();
+        stack
+            .levels
+            .push(MenuLevel::new(MenuKind::Status, HELPED_ROW));
+        let profile = STATUS_ENTRIES
+            .iter()
+            .position(|e| e.kind == crate::hud::status_panel::StatusEntryKind::Profile)
+            .unwrap();
+        stack.levels.push(MenuLevel::new(
+            MenuKind::StatusDetail {
+                entry: profile as u8,
+            },
+            0,
+        ));
+        let focused = focused_level(&stack).expect("a focused level");
+        assert_eq!(
+            (focused.kind, focused.cursor),
+            (MenuKind::Status, HELPED_ROW),
+            "the display-only detail leaves the keys on Status"
+        );
+
+        let mut app = App::new();
+        app.init_resource::<DynamicMenu>()
+            .init_resource::<crate::hud::item_screen::ItemScreenContainer>()
+            .init_resource::<ItemMenuFocus>()
+            .init_resource::<crate::hud::check_view::CheckTarget>()
+            .init_resource::<crate::hud::auction::AuctionScreenState>()
+            .init_resource::<crate::hud::auction::AuctionSellInventory>()
+            .init_resource::<crate::hud::shop::ShopScreenState>()
+            .init_resource::<crate::snapshot::SceneState>()
+            .insert_resource(rows)
+            .insert_resource(InputMode::Menu(stack));
+        app.add_systems(Startup, spawn_menu_help_bar);
+        app.add_systems(Update, update_menu_help_bar);
+        app.update();
+        let hint = app
+            .world_mut()
+            .query_filtered::<&Text, With<MenuHelpHint>>()
+            .single(app.world())
+            .unwrap()
+            .0
+            .clone();
+        assert_eq!(hint, "third row help");
+    }
+
+    /// The title law (owner ruling 2026-10-19): with the Profile window open, this bar shows
+    /// `Title: <worn title>`. With no title known it falls back through the usual chain, so the
+    /// selector's own line survives.
+    #[test]
+    fn profile_detail_puts_the_title_in_the_top_bar() {
+        use crate::hud::status_panel::{StatusEntryKind, STATUS_ENTRIES};
+        use crate::input_mode::{MenuLevel, MenuStack};
+
+        let hint_with_title = |title_id: u16| -> String {
+            let mut app = App::new();
+            app.init_resource::<DynamicMenu>()
+                .init_resource::<crate::hud::item_screen::ItemScreenContainer>()
+                .init_resource::<ItemMenuFocus>()
+                .init_resource::<crate::hud::check_view::CheckTarget>()
+                .init_resource::<crate::hud::auction::AuctionScreenState>()
+                .init_resource::<crate::hud::auction::AuctionSellInventory>()
+                .init_resource::<crate::hud::shop::ShopScreenState>()
+                .init_resource::<menu::ConfigDatRows>();
+            app.init_resource::<crate::snapshot::SceneState>();
+            {
+                let mut scene = app
+                    .world_mut()
+                    .resource_mut::<crate::snapshot::SceneState>();
+                scene.snapshot.stats = Some(kuluu_snapshot::CharStats {
+                    title_id,
+                    ..Default::default()
+                });
+            }
+            let profile_row = STATUS_ENTRIES
+                .iter()
+                .position(|entry| entry.kind == StatusEntryKind::Profile)
+                .expect("profile is a status row") as u8;
+            let mut stack = MenuStack::root();
+            stack.levels.push(MenuLevel::new(MenuKind::Status, 0));
+            stack.levels.push(MenuLevel::new(
+                MenuKind::StatusDetail { entry: profile_row },
+                0,
+            ));
+            app.insert_resource(InputMode::Menu(stack));
+            app.add_systems(Startup, spawn_menu_help_bar);
+            app.add_systems(Update, update_menu_help_bar);
+            for _ in 0..2 {
+                app.update();
+            }
+            app.world_mut()
+                .query_filtered::<&Text, With<MenuHelpHint>>()
+                .single(app.world())
+                .unwrap()
+                .0
+                .clone()
+        };
+
+        assert_eq!(
+            hint_with_title(120),
+            "Title: Star Onion Brigade Member",
+            "the words the owner capture shows, now on this bar"
+        );
+        assert_eq!(
+            hint_with_title(0),
+            entry_help(MenuKind::Status, 0, &DynamicMenu::default()),
+            "no title known: the selector's own line stays"
         );
     }
 

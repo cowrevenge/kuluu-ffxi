@@ -1886,6 +1886,11 @@ fn handle_sub_packet(
                         unity_points1: cs.unity_points1,
                         unity_points2: cs.unity_points2,
                         mjob_lv: cs.mjob_lv,
+                        title_id: cs.title_id,
+                        conquest_rank: cs.conquest_rank,
+                        conquest_rank_bar: cs.conquest_rank_bar,
+                        home_point_zone: cs.home_point_zone,
+                        nation: cs.nation,
                     },
                 });
             }

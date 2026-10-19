@@ -1425,9 +1425,7 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
 
         MenuKind::Equipment => EQUIPMENT_ENTRIES,
 
-        // Owner ruling 2026-10-19, x3: the Status selector list is deleted. `statcom2` was kuluu's
-        // own window, never retail's — Status opens persona and its level box and nothing else.
-        MenuKind::Status => &[],
+        MenuKind::Status => STATUS_LABELS,
 
         // The detail windows' rows are the live snapshot readout built by
         // refresh_dynamic_menu_rows (vault main_menu.md §59); nothing static stands here.
@@ -4650,6 +4648,9 @@ pub fn menu_row_disabled(
     snap: &kuluu_snapshot::SceneSnapshot,
 ) -> bool {
     match kind {
+        MenuKind::Status => crate::hud::status_panel::STATUS_ENTRIES
+            .get(index)
+            .is_some_and(|entry| !crate::hud::status_panel::status_row_enabled(entry.kind, snap)),
         MenuKind::RoomList => {
             index == ROOMLIST_PATIO_ROW_POSITION && !snap.key_items.contains(&PATIO_BELL_KEY_ITEM)
         }
@@ -4844,6 +4845,145 @@ pub struct MainMenu;
 #[derive(Component)]
 pub struct MainMenuTitle;
 
+/// The strip of pane fill behind a window title, breaking the frame's top line where the word sits.
+/// Same law as persona (`status_panel::StatusCaptionMask`): absolute children measure from the
+/// padding edge, so the band lies one border above them.
+#[derive(Component)]
+pub struct MainMenuTitleMask;
+
+/// Companion-side marker for that strip: the same treatment serves both windows.
+#[derive(Component)]
+pub struct CompanionTitleMask;
+
+const MENU_TITLE_FONT_PX: f32 = 14.0;
+/// The size the selector's rows draw at; `status_pane_width` sizes that window from it, so the two
+/// cannot drift apart.
+const MENU_ROW_FONT_PX: f32 = 14.0;
+const MENU_BORDER_PX: f32 = 1.0;
+/// Air inside a title's mask strip either side of the word, as in the persona caption.
+const MENU_TITLE_MASK_PAD_PX: f32 = 3.0;
+
+/// Left edges for a centered title band (word, then its strip), the strip width, and the top edge
+/// the WORD takes. Absolute children measure across the window minus both borders, not the padded
+/// content box, so the word lands dead center on the frame line; the strip stays one border above
+/// the padding edge (`-MENU_BORDER_PX`), which is where the frame line itself is.
+/// Its top edge puts half the line above that line and half below it.
+fn title_band(outer_width: f32, word_px: f32) -> (Val, Val, Val, Val) {
+    let band = (outer_width - 2.0 * MENU_BORDER_PX).max(0.0);
+    let strip_px = word_px + 2.0 * MENU_TITLE_MASK_PAD_PX;
+    (
+        Val::Px((band - word_px) / 2.0),
+        Val::Px((band - strip_px) / 2.0),
+        Val::Px(strip_px),
+        // Half a line above the padding edge plus half the border: centered on the frame itself.
+        Val::Px(-(crate::ui_font::line_height_px(MENU_TITLE_FONT_PX) / 2.0) - MENU_BORDER_PX / 2.0),
+    )
+}
+
+/// Puts every window's title band on that window's own top border: the word in the family's oblique
+/// cut, and behind it the one-border-tall strip of pane fill that breaks the frame line (the same
+/// law persona gives "Status"). Kept out of `update_main_menu`, which is already too wide for bevy
+/// to infer a system from; it reads the word that system set this frame (`hud/mod.rs` orders it
+/// after) and each window's width, which that system pins as an explicit pixel width. A strip is a
+/// sibling of its word, not the same node, so the words are measured first and both parts placed
+/// second.
+#[allow(clippy::type_complexity)]
+pub fn place_menu_title_bands(
+    italic_font: Res<crate::ui_font::UiFontItalic>,
+    // Two slots only: the pool keeps one focused pane plus its read-only mirror, so it has at most
+    // two words to measure. Slot 1 is the mirror.
+    word_q: Query<
+        (&Text, Option<&CompanionTitle>),
+        (With<MainMenuTitle>, Without<MainMenuTitleMask>),
+    >,
+    frame_q: Query<
+        (&Node, &ComputedNode),
+        (
+            Or<(With<MainMenuPane>, With<MainMenuCompanionFrame>)>,
+            Without<MainMenuTitle>,
+            Without<MainMenuTitleMask>,
+        ),
+    >,
+    mut band_q: Query<
+        (
+            &ChildOf,
+            &mut Node,
+            Option<&CompanionTitle>,
+            Option<&MainMenuTitle>,
+            Option<&mut TextFont>,
+        ),
+        (
+            Or<(With<MainMenuTitle>, With<MainMenuTitleMask>)>,
+            Without<MainMenuPane>,
+            Without<MainMenuCompanionFrame>,
+        ),
+    >,
+) {
+    let mut words = [0.0f32; 2];
+    let mut painted = [false; 2];
+    for (text, comp) in word_q.iter() {
+        let side = usize::from(comp.is_some());
+        painted[side] = !text.as_str().is_empty();
+        words[side] = crate::ui_font::text_width_px(text.as_str(), MENU_TITLE_FONT_PX);
+    }
+    // The word takes the family's oblique cut - slanted outlines, upright letters - and only once
+    // the face exists, so a front-end that spawns before font loading never draws it in tofu.
+    let italic_face = (italic_font.0 != Handle::default())
+        .then(|| bevy::text::FontSource::Handle(italic_font.0.clone()));
+
+    for (child_of, mut node, comp, word_node, font) in band_q.iter_mut() {
+        let side = usize::from(comp.is_some());
+        let Ok((frame_node, computed)) = frame_q.get(child_of.parent()) else {
+            continue;
+        };
+        let outer_width = match frame_node.width {
+            Val::Px(width) => width,
+            // A window still waiting for its first pixel width from `update_main_menu`: last
+            // frame's laid-out box stands in, and with no box at all the band stays where it is.
+            _ if computed.size().x > 0.0 => computed.size().x * computed.inverse_scale_factor(),
+            _ => continue,
+        };
+        // No word means nothing to write, and a floating strip alone on the frame line is worse
+        // than the plain frame: hide both parts until the window has a name.
+        let want_display = if painted[side] {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if node.display != want_display {
+            node.display = want_display;
+        }
+        let (title_left, mask_left, mask_width, top) = title_band(outer_width, words[side]);
+        if word_node.is_some() {
+            if let (Some(mut face), Some(source)) = (font, &italic_face) {
+                if face.font != *source {
+                    face.font = source.clone();
+                }
+            }
+            if node.top != top {
+                node.top = top;
+            }
+            if node.left != title_left {
+                node.left = title_left;
+            }
+        } else {
+            // The strip belongs ON the frame line, not on the word's centre: dropping it to `top`
+            // (as this did) moved it into the content area and left the border running through the
+            // glyphs (owner 2026-10-19: "you have the line going though the words").
+            let strip_top = Val::Px(-MENU_BORDER_PX);
+            if node.top != strip_top {
+                node.top = strip_top;
+            }
+            if node.left != mask_left {
+                node.left = mask_left;
+            }
+            if node.width != mask_width {
+                node.width = mask_width;
+            }
+        }
+    }
+}
+
 #[derive(Component)]
 pub struct MainMenuRow {
     pub slot: usize,
@@ -4987,11 +5127,9 @@ pub fn registry_window(kind: MenuKind) -> Option<&'static str> {
     if let Some(name) = record_window_name(kind) {
         return Some(name);
     }
-    if kind == MenuKind::Status {
-        return None;
-    }
     Some(match kind {
         MenuKind::Root => MAIN_MENU_WINDOW,
+        MenuKind::Status => STATUS_SELECTOR_WINDOW,
         MenuKind::StatusDetail { entry } => {
             return STATUS_DETAIL_WINDOW_NAMES
                 .get(usize::from(entry))
@@ -5142,15 +5280,15 @@ pub fn remembered_close_cursor(level: &MenuLevel) -> Option<Option<usize>> {
 /// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md, "Last item
 /// unselectable at creation").
 pub const LAST_ITEM_UNSELECTABLE_WINDOWS: &[&str] = &[
-    "ut_menu", "mgcmenu", "abimenu", "abiselec", "mp_abisc", "iuse", "prty1", "prty2", "prty3",
-    "prty4", "prty5", "prty5us", "prty5fr", "prty5de", "prty7", "prty8", "link1", "link2", "link3",
-    "link4", "link7", "link8", "link9", "link10", "link13", "searchma", "scoption", "acoption",
-    "scsibori", "searchjo", "searchle", "searchna", "searchra", "comgenre", "sccompar", "sccomite",
-    "sccomls", "commenu", "flistmai", "mes1rcv", "mes2frnd", "blkmain", "map0", "mapv2", "mapv3",
-    "mapscan", "auc1", "auc2", "auc3", "auc4", "aucweapo", "aucammo", "aucarmor", "aucmagic",
-    "aucmater", "aucfood", "aucmeals", "aucitem", "wepsort", "armsort", "mcrmenu", "mcrselec",
-    "mcrselop", "mcres20", "mcresmn", "configwi", "conf5m", "conf11m", "conf11l", "sortyn",
-    "bluesibo", "statpup",
+    "statcom", "statcom2", "ut_menu", "mgcmenu", "abimenu", "abiselec", "mp_abisc", "iuse",
+    "prty1", "prty2", "prty3", "prty4", "prty5", "prty5us", "prty5fr", "prty5de", "prty7", "prty8",
+    "link1", "link2", "link3", "link4", "link7", "link8", "link9", "link10", "link13", "searchma",
+    "scoption", "acoption", "scsibori", "searchjo", "searchle", "searchna", "searchra", "comgenre",
+    "sccompar", "sccomite", "sccomls", "commenu", "flistmai", "mes1rcv", "mes2frnd", "blkmain",
+    "map0", "mapv2", "mapv3", "mapscan", "auc1", "auc2", "auc3", "auc4", "aucweapo", "aucammo",
+    "aucarmor", "aucmagic", "aucmater", "aucfood", "aucmeals", "aucitem", "wepsort", "armsort",
+    "mcrmenu", "mcrselec", "mcrselop", "mcres20", "mcresmn", "configwi", "conf5m", "conf11m",
+    "conf11l", "sortyn", "bluesibo", "statpup",
 ];
 
 /// Whether a level is one of those windows whose rows kuluu builds from the window's own record,
@@ -5177,6 +5315,7 @@ pub fn last_item_row(
     unity: &crate::hud::unity_fp::UnityFpDat,
 ) -> Option<LastItemRow> {
     match kind {
+        MenuKind::Status => Some(LastItemRow::Undrawn),
         MenuKind::UnityMenu => unity.menu_last_item_row(),
         MenuKind::RetailConfig | MenuKind::RetailConfigPage(_) | MenuKind::RetailConfigSub(_) => {
             config_rows.last_item_row(registry_window(kind)?)
@@ -5210,9 +5349,10 @@ pub fn dock_placement(
     board.placement(window)
 }
 
-/// configwi sits over the main menu's page 2, so it hides the main menu under it.
+/// statcom2 sits exactly over the main menu's page 1 and configwi over its page 2, so either one
+/// hides the main menu under it.
 fn covers_main_menu(kind: MenuKind) -> bool {
-    kind == MenuKind::RetailConfig
+    matches!(kind, MenuKind::Status | MenuKind::RetailConfig)
 }
 
 /// Where one open window of the menu stack draws.
@@ -5269,28 +5409,25 @@ impl MenuStackLayout {
 /// sits at its record frame wherever that lies; any other window
 /// without a left-side record keeps kuluu's selector column: focused, it draws there with its
 /// opener framed beside it; under a focused record window, the newest such window holds the
-/// column. configwi covers the main menu, so nothing sits beside the Config hub.
+/// column. statcom2 and configwi cover the main menu, so nothing sits beside Status or the Config
+/// hub.
 pub fn menu_stack_layout(stack: &MenuStack, frames: &ConfigDatRows) -> MenuStackLayout {
     let levels = &stack.levels;
-    // Status and its details draw through the stats panel windows
-    // (`spawn_status_panel`, `update_status_detail_window`), the unity/merit windows draw
-    // themselves in `unity_fp_view`; none of them owns a seat here.
-    let draws_nothing = |level: &MenuLevel| {
-        matches!(level.kind, MenuKind::StatusDetail { .. })
-            || level.kind == MenuKind::Status
-            || draws_itself(level.kind)
-    };
-    let Some(focused) = levels.iter().rposition(|level| !draws_nothing(level)) else {
+    // Status details draw in their own window on the stats panel's spot
+    // (`update_status_detail_window`), and the windows that draw themselves do so in
+    // `unity_fp_view`.
+    let Some(focused) = levels
+        .iter()
+        .rposition(|level| {
+            !matches!(level.kind, MenuKind::StatusDetail { .. }) && !draws_itself(level.kind)
+        })
+        .or_else(|| levels.len().checked_sub(1))
+    else {
         return MenuStackLayout::default();
     };
-    let seated = |index: usize| index == focused || !draws_nothing(&levels[index]);
     let side = |index: usize| {
-        seated(index)
-            .then(|| {
-                side_record_frame(levels[index].kind, frames)
-                    .or_else(|| docked_record_frame(levels[index].kind, frames))
-            })
-            .flatten()
+        side_record_frame(levels[index].kind, frames)
+            .or_else(|| docked_record_frame(levels[index].kind, frames))
     };
     let focused_frame = side(focused);
     let records: Vec<(usize, RecordFrame)> = (0..focused)
@@ -5341,8 +5478,25 @@ pub const GRAPHICS_PANE_WIDTH: f32 = 320.0;
 fn pane_width_for(kind: MenuKind) -> f32 {
     match kind {
         MenuKind::Config | MenuKind::Graphics | MenuKind::GraphicsDlss => GRAPHICS_PANE_WIDTH,
+        MenuKind::Status => status_pane_width(),
         _ => MENU_PANE_WIDTH,
     }
+}
+
+/// The Status selector takes the width its own longest row needs rather than kuluu's standard
+/// column: retail's box hugs its text (its `statcom2` record is w=112 at retail's smaller glyphs),
+/// and 220 left a hand-width of empty pane to the right of "Alter Ego Points" (owner 2026-10-19:
+/// "the whole box has extra space on the right side"). The cursor costs two more characters. Clamped
+/// by the standard column, so this only ever narrows a menu.
+fn status_pane_width() -> f32 {
+    let cursor_px = crate::ui_font::text_width_px("> ", MENU_ROW_FONT_PX);
+    let widest_row = STATUS_LABELS
+        .iter()
+        .map(|label| crate::ui_font::text_width_px(label, MENU_ROW_FONT_PX))
+        .fold(0.0f32, f32::max);
+    (widest_row + cursor_px + 2.0 * style::WINDOW_PAD_X_PX)
+        .ceil()
+        .min(MENU_PANE_WIDTH)
 }
 
 /// Single-line rows: a wrapped row silently occupies two lines, which breaks
@@ -5399,7 +5553,7 @@ fn spawn_stacked_window(parent: &mut ChildSpawnerCommands, slot: usize) {
                 MenuStackWindowTitle { window: slot },
                 Text::new(""),
                 text_nowrap(),
-                style::text_font(14.0),
+                style::text_font(MENU_ROW_FONT_PX),
                 TextColor(theme::TITLE),
             ));
             for row in 0..DYNAMIC_VISIBLE_ROWS {
@@ -5414,7 +5568,7 @@ fn spawn_stacked_window(parent: &mut ChildSpawnerCommands, slot: usize) {
                     },
                     Text::new(""),
                     text_nowrap(),
-                    style::text_font(14.0),
+                    style::text_font(MENU_ROW_FONT_PX),
                     TextColor(theme::TEXT),
                 ));
             }
@@ -5438,11 +5592,30 @@ fn spawn_companion_frame(parent: &mut ChildSpawnerCommands) {
             // says which is which). They deliberately lack Button: only the
             // topmost interactive window takes mouse or keys (vault main_menu.md §59).
             c.spawn((
+                MainMenuTitleMask,
+                CompanionTitleMask,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(-MENU_BORDER_PX),
+                    left: Val::ZERO,
+                    height: Val::Px(MENU_BORDER_PX),
+                    ..default()
+                },
+                BackgroundColor(theme::FRAME_BG),
+            ));
+            c.spawn((
                 MainMenuTitle,
                 CompanionTitle,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(-MENU_BORDER_PX),
+                    left: Val::ZERO,
+                    ..default()
+                },
+                crate::ui_font::KeepOwnFont,
                 Text::new(""),
                 text_nowrap(),
-                style::text_font(14.0),
+                style::text_font(MENU_TITLE_FONT_PX),
                 TextColor(theme::TITLE),
             ));
             for slot in 0..MAX_ENTRY_COUNT {
@@ -5451,7 +5624,7 @@ fn spawn_companion_frame(parent: &mut ChildSpawnerCommands) {
                     CompanionRow { slot },
                     Text::new(""),
                     text_nowrap(),
-                    style::text_font(14.0),
+                    style::text_font(MENU_ROW_FONT_PX),
                     TextColor(theme::TEXT),
                     BackgroundColor(Color::NONE),
                 ));
@@ -5468,11 +5641,36 @@ fn spawn_pane_column(parent: &mut ChildSpawnerCommands) {
     parent
         .spawn((MainMenuPane, node, bg, border))
         .with_children(|c| {
+            // The title band: `place_menu_title_bands` writes the word in italic and centers it on
+            // this window's top border, with the strip masking the frame behind the glyphs as persona
+            // does for "Status". No line is kept in flow for the name, so the first row starts at the
+            // padding edge just under the band (retail leaves no gap there either).
+            c.spawn((
+                MainMenuTitleMask,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(-MENU_BORDER_PX),
+                    left: Val::ZERO,
+                    height: Val::Px(MENU_BORDER_PX),
+                    ..default()
+                },
+                // The pane's own fill, one border row tall.
+                BackgroundColor(theme::FRAME_BG),
+            ));
             c.spawn((
                 MainMenuTitle,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(-MENU_BORDER_PX),
+                    left: Val::ZERO,
+                    ..default()
+                },
+                // The word takes the family's oblique cut (`place_menu_title_bands` assigns it), so
+                // `apply_ui_font`, which stamps the regular face, passes this node by.
+                crate::ui_font::KeepOwnFont,
                 Text::new(""),
                 text_nowrap(),
-                style::text_font(14.0),
+                style::text_font(MENU_TITLE_FONT_PX),
                 TextColor(theme::TITLE),
             ));
 
@@ -5482,7 +5680,7 @@ fn spawn_pane_column(parent: &mut ChildSpawnerCommands) {
                     Button,
                     Text::new(""),
                     text_nowrap(),
-                    style::text_font(14.0),
+                    style::text_font(MENU_ROW_FONT_PX),
                     TextColor(theme::TEXT),
                     BackgroundColor(Color::NONE),
                 ));
@@ -6174,6 +6372,7 @@ pub fn refresh_dynamic_menu_rows(
     mut dynamic: ResMut<DynamicMenu>,
     mut unity_fp_dat: ResMut<crate::hud::unity_fp::UnityFpDat>,
     mut merit_dat: ResMut<crate::hud::merit_windows::MeritDat>,
+    zone_names: Option<Res<crate::hud::zone_flash::ZoneNameResolver>>,
 ) {
     // The remodel prompt's question is DAT text, so it rides in with every refresh (bead
     // kuluu-o9qt7.13.5.2) rather than being typed into the client.
@@ -6297,6 +6496,7 @@ pub fn refresh_dynamic_menu_rows(
                         &dynamic,
                         &unity_fp_dat,
                         &merit_dat,
+                        zone_names.as_deref(),
                     );
                     (level.kind, rows)
                 })
@@ -6330,6 +6530,7 @@ pub fn refresh_dynamic_menu_rows(
         &dynamic,
         &unity_fp_dat,
         &merit_dat,
+        zone_names.as_deref(),
     );
     if rows != dynamic.rows {
         dynamic.rows = rows;
@@ -6503,6 +6704,7 @@ fn dynamic_rows_for(
     dynamic: &DynamicMenu,
     unity_fp_dat: &crate::hud::unity_fp::UnityFpDat,
     merit_dat: &crate::hud::merit_windows::MeritDat,
+    zone_names: Option<&crate::hud::zone_flash::ZoneNameResolver>,
 ) -> Vec<DynamicMenuRow> {
     let kind = level.kind;
     let rows: Vec<DynamicMenuRow> = match kind {
@@ -6604,6 +6806,7 @@ fn dynamic_rows_for(
                 snap,
                 &config_rows.currency_labels_1,
                 &config_rows.currency_labels_2,
+                zone_names,
             )
             .into_iter()
             .enumerate()
@@ -6738,10 +6941,15 @@ fn order_dynamic_rows(
         // tables together (whether retail sections match the tables is an
         // open question, bead kuluu-h7x retail_unknowns). Emotes keep the
         // scraped-table (id) order.
+        // A Status detail window is a readout, not a list. Retail fills each one straight out of its
+        // source object in one fixed order (profile's allegiance block then its Monstrosity rows,
+        // skills by skill id, currencies by descriptor), so re-sorting moves data the player reads
+        // positionally, and profile's rank gauge hangs from a named row.
         MenuKind::ItemAction { .. }
         | MenuKind::KeyItems
         | MenuKind::EmoteList
-        | MenuKind::Arrange(_) => {}
+        | MenuKind::Arrange(_)
+        | MenuKind::StatusDetail { .. } => {}
         _ => rows.sort_by(|a, b| a.label.cmp(&b.label)),
     }
 }
@@ -7565,12 +7773,16 @@ pub fn update_main_menu(
     if node.display != Display::Flex {
         node.display = Display::Flex;
     }
-    let want_width = pane_width_for(top_kind);
     let layout = menu_stack_layout(stack, &config_rows);
     let Some((view_index, view_seat)) = layout.focused() else {
         hide(&mut node);
         return;
     };
+    // The width follows the level that actually draws in this window, not the top of the stack: a
+    // `statcom2` detail opens as its own framed window and leaves the list drawing here (`menu_stack_layout`
+    // picks that level), so sizing from `stack.current()` grew the box under the detail's feet
+    // (owner 2026-10-19: "selecting anything from the menu makes the menu grow larger").
+    let want_width = pane_width_for(stack.levels[view_index].kind);
     for (mut pane_node, mut z_index, computed) in pane_q.iter_mut() {
         let mut want = pane_node.clone();
         match view_seat {
@@ -8021,6 +8233,11 @@ pub fn update_menu_stack_windows(
 #[derive(Component)]
 pub struct StatusDetailWindow;
 
+/// The strip of pane fill that breaks the detail window's top border where its caption sits, the
+/// same law as the selector pane's `MainMenuTitleMask`.
+#[derive(Component)]
+pub struct StatusDetailTitleMask;
+
 #[derive(Component)]
 pub struct StatusDetailTitle;
 
@@ -8028,6 +8245,25 @@ pub struct StatusDetailTitle;
 pub struct StatusDetailLine {
     pub slot: usize,
 }
+
+/// The conquest-rank gauge the Profile window draws under its `Rank:` row. Retail shows a pale-blue
+/// bar with end caps one line below that row, starting under the label printed beside the rank
+/// (owner capture 2026-10-19). It mirrors persona's experience gauge in shape and colour, whose
+/// constants are reused until this bar gets its own measurement.
+#[derive(Component)]
+pub struct StatusDetailRankBar;
+
+/// The filled part: its width is s2c 0x061's `rankbar`, shown as a percentage of the track.
+#[derive(Component)]
+pub struct StatusDetailRankFill;
+
+const RANK_BAR_CAP_WIDTH_PX: f32 = 3.0;
+const RANK_BAR_CAP_HEIGHT_PX: f32 = 8.0;
+const RANK_BAR_TRACK_HEIGHT_PX: f32 = 6.0;
+/// The size every detail window's rows draw at, which the gauge placement has to match.
+const STATUS_DETAIL_ROW_FONT_PX: f32 = 13.0;
+/// The ceiling LSB keeps `profile.rankpoints` under, used as this bar's full mark.
+const RANK_POINTS_FULL: f32 = 4000.0;
 
 /// The DAT record each STATUS_ENTRIES row opens, by detail-table order — the
 /// table FFXiMain.dll retail-2026-09 RVA 0x148D00 dispatches statcom2 selects
@@ -8071,11 +8307,35 @@ pub fn spawn_status_detail_window(mut commands: Commands) {
             border,
         ))
         .with_children(|w| {
+            // The caption band, worn exactly as the selector pane wears its own: the word centered
+            // on the frame's top line in the family's oblique cut, with a strip of pane fill
+            // breaking the border behind the glyphs. Nothing is kept in flow for it, so the first
+            // row starts at the padding edge directly under the band.
+            w.spawn((
+                StatusDetailTitleMask,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(-MENU_BORDER_PX),
+                    left: Val::ZERO,
+                    height: Val::Px(MENU_BORDER_PX),
+                    ..default()
+                },
+                BackgroundColor(theme::FRAME_BG),
+            ));
             w.spawn((
                 StatusDetailTitle,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(-MENU_BORDER_PX),
+                    left: Val::ZERO,
+                    ..default()
+                },
+                // The word takes the oblique face, which `apply_ui_font` would stamp back to the
+                // regular cut.
+                crate::ui_font::KeepOwnFont,
                 Text::new(""),
                 text_nowrap(),
-                style::text_font(14.0),
+                style::text_font(MENU_TITLE_FONT_PX),
                 TextColor(theme::TITLE),
             ));
             for slot in 0..MAX_ENTRY_COUNT {
@@ -8088,11 +8348,62 @@ pub fn spawn_status_detail_window(mut commands: Commands) {
                     line_node,
                     Text::new(""),
                     text_nowrap(),
-                    style::text_font(13.0),
+                    style::text_font(STATUS_DETAIL_ROW_FONT_PX),
                     TextColor(theme::TEXT),
                     BackgroundColor(Color::NONE),
                 ));
             }
+            // The rank gauge, sized and placed by `update_status_detail_window`. Absolute so it
+            // never takes a line of the row flow: the empty spacer row Profile emits holds its slot.
+            w.spawn((
+                StatusDetailRankBar,
+                Node {
+                    position_type: PositionType::Absolute,
+                    display: Display::None,
+                    top: Val::ZERO,
+                    left: Val::ZERO,
+                    width: Val::Px(0.0),
+                    height: Val::Px(RANK_BAR_TRACK_HEIGHT_PX),
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                BackgroundColor(Color::NONE),
+            ))
+            .with_children(|g| {
+                g.spawn((
+                    Node {
+                        width: Val::Px(RANK_BAR_CAP_WIDTH_PX),
+                        height: Val::Px(RANK_BAR_CAP_HEIGHT_PX),
+                        ..default()
+                    },
+                    BackgroundColor(crate::hud::status_panel::LEVEL_GAUGE_CAP_COLOR),
+                ));
+                g.spawn((
+                    Node {
+                        flex_grow: 1.0,
+                        height: Val::Px(RANK_BAR_TRACK_HEIGHT_PX),
+                        ..default()
+                    },
+                    BackgroundColor(crate::hud::status_panel::LEVEL_GAUGE_TRACK_COLOR),
+                ))
+                .with_child((
+                    StatusDetailRankFill,
+                    Node {
+                        width: Val::Percent(0.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(crate::hud::status_panel::LEVEL_GAUGE_CAP_COLOR),
+                ));
+                g.spawn((
+                    Node {
+                        width: Val::Px(RANK_BAR_CAP_WIDTH_PX),
+                        height: Val::Px(RANK_BAR_CAP_HEIGHT_PX),
+                        ..default()
+                    },
+                    BackgroundColor(crate::hud::status_panel::LEVEL_GAUGE_CAP_COLOR),
+                ));
+            });
         });
 }
 
@@ -8105,15 +8416,57 @@ pub fn spawn_status_detail_window(mut commands: Commands) {
 pub fn update_status_detail_window(
     mode: Res<InputMode>,
     dynamic: Res<DynamicMenu>,
+    // Optional only so the window-level tests, which drive no world, can still run this system; a
+    // front end always has one.
+    scene: Option<Res<crate::snapshot::SceneState>>,
     dat_root: Option<Res<crate::dat_root::SharedDatRoot>>,
     mut config_rows: ResMut<ConfigDatRows>,
+    // Optional only so the window-level tests keep running this system; a front end always has it.
+    italic_font: Option<Res<crate::ui_font::UiFontItalic>>,
     mut frame_q: Query<&mut Node, With<StatusDetailWindow>>,
-    mut title_q: Query<&mut Text, (With<StatusDetailTitle>, Without<MainMenuTitle>)>,
+    // The caption band's two parts in one pass: whichever node also carries the Text is the word.
+    mut band_q: Query<
+        (&mut Node, Option<&mut Text>, Option<&mut TextFont>),
+        (
+            Or<(With<StatusDetailTitle>, With<StatusDetailTitleMask>)>,
+            Without<StatusDetailWindow>,
+            Without<StatusDetailLine>,
+            Without<StatusDetailRankBar>,
+            Without<StatusDetailRankFill>,
+            Without<crate::hud::status_panel::StatusPanel>,
+        ),
+    >,
     mut line_q: Query<
         (&StatusDetailLine, &mut Text, &mut Node),
         (
             Without<StatusDetailTitle>,
             Without<StatusDetailWindow>,
+            Without<StatusDetailRankBar>,
+            Without<StatusDetailRankFill>,
+            Without<crate::hud::status_panel::StatusPanel>,
+        ),
+    >,
+    mut bar_q: Query<
+        &mut Node,
+        (
+            With<StatusDetailRankBar>,
+            Without<StatusDetailWindow>,
+            Without<StatusDetailLine>,
+            Without<StatusDetailTitle>,
+            Without<StatusDetailTitleMask>,
+            Without<StatusDetailRankFill>,
+            Without<crate::hud::status_panel::StatusPanel>,
+        ),
+    >,
+    mut fill_q: Query<
+        &mut Node,
+        (
+            With<StatusDetailRankFill>,
+            Without<StatusDetailWindow>,
+            Without<StatusDetailLine>,
+            Without<StatusDetailTitle>,
+            Without<StatusDetailTitleMask>,
+            Without<StatusDetailRankBar>,
             Without<crate::hud::status_panel::StatusPanel>,
         ),
     >,
@@ -8124,7 +8477,10 @@ pub fn update_status_detail_window(
             (
                 Without<StatusDetailWindow>,
                 Without<StatusDetailTitle>,
+                Without<StatusDetailTitleMask>,
                 Without<StatusDetailLine>,
+                Without<StatusDetailRankBar>,
+                Without<StatusDetailRankFill>,
             ),
         ),
     >,
@@ -8158,6 +8514,11 @@ pub fn update_status_detail_window(
             for (_, _, mut line_node) in line_q.iter_mut() {
                 if line_node.display != Display::None {
                     line_node.display = Display::None;
+                }
+            }
+            for mut bar_node in bar_q.iter_mut() {
+                if bar_node.display != Display::None {
+                    bar_node.display = Display::None;
                 }
             }
             return;
@@ -8230,19 +8591,89 @@ pub fn update_status_detail_window(
         let (layout, height) = skill_window_layout(rows_len, false);
         (layout, Val::Px(height))
     } else {
+        // Owner ruling 2026-10-20: remove the padding at the bottom of these boxes. A detail with
+        // no item slots hugs its last row - width from the record frame as ever, height grown by
+        // content instead of pinned to it, and zero padding under the final row (see below). The
+        // 2026-10-19 experiment at pinning `profile` to its record height left a band of empty
+        // blue below the readout; that pin is gone.
         (None, Val::Auto)
     };
     node.height = window_height;
+    if node.padding.bottom != Val::ZERO {
+        node.padding.bottom = Val::ZERO;
+    }
+    // Retail packs a detail's readout rows tight: measured off the owner capture of `profile`, one
+    // line to the next is ~16 px against this family's 15.2 px line box, so the chrome's 2 px row
+    // gap would push every window past its record height.
+    node.row_gap = Val::Px(0.0);
     if node.display != Display::Flex {
         node.display = Display::Flex;
     }
-    let want_title = menu_title(MenuKind::StatusDetail {
-        entry: u8::try_from(idx).unwrap_or(u8::MAX),
-    })
-    .to_string();
-    if let Ok(mut title_text) = title_q.single_mut() {
-        if **title_text != want_title {
-            **title_text = want_title;
+    // Owner ruling 2026-10-19: the title belongs in the bar across the top of the screen (the help
+    // line reads `Title: <worn title>`), not on this window's own border. Profile keeps no caption
+    // there at all, because its first row inside the box is the `Profile` header itself; every other
+    // detail still wears its record name.
+    let want_title = match entry_kind {
+        Some(crate::hud::status_panel::StatusEntryKind::Profile) => String::new(),
+        _ => menu_title(MenuKind::StatusDetail {
+            entry: u8::try_from(idx).unwrap_or(u8::MAX),
+        })
+        .to_string(),
+    };
+    // The caption band, placed from the width this system just pinned, so it never waits a frame for
+    // layout to measure. Same law as `place_menu_title_bands` gives the selector pane.
+    let outer_width = match node.width {
+        Val::Px(width) => width,
+        _ => 0.0,
+    };
+    let (title_left, mask_left, mask_width, band_top) = title_band(
+        outer_width,
+        crate::ui_font::text_width_px(&want_title, MENU_TITLE_FONT_PX),
+    );
+    let italic_face = italic_font
+        .as_ref()
+        .filter(|face| face.0 != Handle::default())
+        .map(|face| bevy::text::FontSource::Handle(face.0.clone()));
+    // Nothing to write means no band: a bare strip floating on the frame line is worse than the
+    // plain border.
+    let want_band = if want_title.is_empty() {
+        Display::None
+    } else {
+        Display::Flex
+    };
+    for (mut band_node, title_text, title_font) in band_q.iter_mut() {
+        if band_node.display != want_band {
+            band_node.display = want_band;
+        }
+        if title_text.is_some() {
+            if let Some(mut text) = title_text {
+                if text.as_str() != want_title.as_str() {
+                    **text = want_title.clone();
+                }
+            }
+            if let (Some(mut face), Some(source)) = (title_font, &italic_face) {
+                if face.font != *source {
+                    face.font = source.clone();
+                }
+            }
+            if band_node.top != band_top {
+                band_node.top = band_top;
+            }
+            if band_node.left != title_left {
+                band_node.left = title_left;
+            }
+        } else {
+            // The strip belongs on the frame line itself, one border above the padding edge.
+            let strip_top = Val::Px(-MENU_BORDER_PX);
+            if band_node.top != strip_top {
+                band_node.top = strip_top;
+            }
+            if band_node.left != mask_left {
+                band_node.left = mask_left;
+            }
+            if band_node.width != mask_width {
+                band_node.width = mask_width;
+            }
         }
     }
     for (line, mut text, mut line_node) in line_q.iter_mut() {
@@ -8254,6 +8685,17 @@ pub fn update_status_detail_window(
         };
         if **text != row.label {
             **text = row.label.clone();
+        }
+        // The gauge row carries no text, and an empty text node measures nothing: without a height
+        // of its own the following row slides up under the bar (owner capture 2026-10-19, green
+        // arrow). It still needs the line box it replaced.
+        if row.label.is_empty() {
+            let want_height = Val::Px(crate::ui_font::line_height_px(STATUS_DETAIL_ROW_FONT_PX));
+            if line_node.height != want_height {
+                line_node.height = want_height;
+            }
+        } else if line_node.height != Val::Auto {
+            line_node.height = Val::Auto;
         }
         if let Some(slot) = row_slots.as_ref().and_then(|v| v.get(line.slot)).copied() {
             // Slot coords are record-frame relative; the window's own 1px chrome border is
@@ -8269,6 +8711,72 @@ pub fn update_status_detail_window(
         }
         if line_node.display != Display::Flex {
             line_node.display = Display::Flex;
+        }
+    }
+
+    // The rank gauge fills the empty row under `Rank:`. It needs that flow gap, so a window drawing
+    // its rows from DAT slot rects keeps no room for it and shows none.
+    let gauge_wanted = matches!(
+        entry_kind,
+        Some(crate::hud::status_panel::StatusEntryKind::Profile)
+    ) && slot_layout.is_none();
+    let rank_row = gauge_wanted.then(|| {
+        dynamic.rows.iter().position(|row| {
+            row.label
+                .starts_with(crate::hud::status_panel::PROFILE_RANK_ROW_PREFIX)
+        })
+    });
+    let Some(rank_index) = rank_row.flatten() else {
+        for mut bar_node in bar_q.iter_mut() {
+            if bar_node.display != Display::None {
+                bar_node.display = Display::None;
+            }
+        }
+        return;
+    };
+    // Its left edge sits under the `Rank Points` label, and its track runs to the window's right
+    // inset; vertically it is centered in the empty row that follows the rank line.
+    let rank_label = dynamic.rows[rank_index].label.as_str();
+    let indent = crate::ui_font::text_width_px(
+        &rank_label[..rank_label
+            .find(crate::hud::status_panel::PROFILE_RANK_BAR_LABEL)
+            .unwrap_or(0)],
+        STATUS_DETAIL_ROW_FONT_PX,
+    );
+    let row_pitch = crate::ui_font::line_height_px(STATUS_DETAIL_ROW_FONT_PX)
+        + match node.row_gap {
+            Val::Px(gap) => gap,
+            _ => 0.0,
+        };
+    let left = style::WINDOW_PAD_X_PX + indent;
+    let width = (outer_width - MENU_BORDER_PX - style::WINDOW_PAD_X_PX - left).max(16.0);
+    let top = style::WINDOW_PAD_Y_PX
+        + (rank_index + 1) as f32 * row_pitch
+        + (crate::ui_font::line_height_px(STATUS_DETAIL_ROW_FONT_PX) - RANK_BAR_CAP_HEIGHT_PX)
+            / 2.0;
+    for mut bar_node in bar_q.iter_mut() {
+        if bar_node.position_type != PositionType::Absolute {
+            bar_node.position_type = PositionType::Absolute;
+        }
+        bar_node.left = Val::Px(left);
+        bar_node.top = Val::Px(top);
+        bar_node.width = Val::Px(width);
+        if bar_node.display != Display::Flex {
+            bar_node.display = Display::Flex;
+        }
+    }
+    // `rankbar` is LSB's `profile.rankpoints`, which the server keeps under 4000
+    // (vendor/server/src/map/lua/lua_base_entity.cpp caps every write at that value). The client's
+    // own scale for this bar is not in anything vendored here, so kuluu shows a fraction of that cap.
+    let rank_points = scene
+        .as_ref()
+        .and_then(|scene| scene.snapshot.stats.as_ref())
+        .map_or(0, |stats| stats.conquest_rank_bar);
+    let fill_percent = f32::from(rank_points) / RANK_POINTS_FULL * 100.0;
+    for mut fill_node in fill_q.iter_mut() {
+        let want_width = Val::Percent(fill_percent.clamp(0.0, 100.0));
+        if fill_node.width != want_width {
+            fill_node.width = want_width;
         }
     }
 }
@@ -9048,10 +9556,13 @@ mod tests {
         }
     }
 
-    /// The Status flow opens no window of its own: the selector (`statcom2`) is deleted, no pool
-    /// window draws under it, and the Commands page stays on screen beneath the flow.
+    /// One list drawer only while the Status flow is open: with install-shaped records,
+    /// statcom2's stacked window draws its entries at the Command spot and the covered
+    /// main menu pool draws nothing. No dedicated copy exists any more at all — deleted
+    /// under this ruling ("why is there a 2nd menu UNDER here at all? that menu should
+    /// not exist here").
     #[test]
-    fn status_flow_opens_no_selector_window_of_its_own() {
+    fn status_list_covers_the_command_spot_without_a_mirror() {
         let mut app = root_menu_app(0);
         seed_covered_command_spot(&mut app);
         app.add_systems(Update, update_menu_stack_windows);
@@ -9062,9 +9573,13 @@ mod tests {
             app.update();
         }
         let (visible, _, _) = companion_frame_visible(&mut app);
-        assert!(!visible, "no mirror window joins the Status flow");
-        // Owner ruling 2026-10-19: the Status selector window is deleted, so no status-list row
-        // draws while the flow is open; the Commands page under it stays drawn and clickable.
+        assert!(
+            !visible,
+            "statcom2 covers menuwind's rect; retail shows only the list"
+        );
+        // No Commands label may linger once the flow opens — that stale copy is the
+        // "menu still visible behind Status" ghost (owner ruling 2026-10-19). Whatever
+        // draws carries statcom2's own rows only.
         let stale = visible_rows(&mut app);
         let commands_words: Vec<String> = static_entries(MenuKind::Root)
             .iter()
@@ -9072,23 +9587,19 @@ mod tests {
             .filter(|w| w != "Status")
             .collect();
         assert!(
-            stale.iter().any(|(_, t)| {
+            !stale.iter().any(|(_, t)| {
                 let body = t.trim_start_matches(['>', ' ']);
                 commands_words.iter().any(|w| w == body)
             }),
-            "the Commands page stays drawn through the Status flow: {stale:?}"
+            "no Commands row survives the flow opening: {stale:?}"
         );
-        // The deleted selector keeps its own labels out of the frame too.
-        let status_words: Vec<&str> = crate::hud::status_panel::STATUS_ENTRIES
-            .iter()
-            .map(|entry| entry.label)
-            .collect();
+        // Exactly one drawer: the focused list rides the selector (panes), and the stacked
+        // pool — which covers only the OPENERS under it — draws no rows at all here.
         assert!(
-            !stale.iter().any(|(_, t)| {
-                let body = t.trim_start_matches(['>', ' ']);
-                status_words.iter().any(|w| body.starts_with(w))
-            }),
-            "the deleted Status selector draws no row: {stale:?}"
+            visible_rows(&mut app).iter().any(|(_, t)| t
+                .trim_start_matches(['>', ' '])
+                .starts_with(crate::hud::status_panel::STATUS_ENTRIES[1].label)),
+            "the one focused list carries statcom2's entries"
         );
         let pool_rows = app
             .world_mut()
@@ -9180,7 +9691,19 @@ mod tests {
             .map(|(_, text)| text.0.clone())
             .next()
             .expect("detail window has a title node");
-        assert_eq!(title, menu_title(MenuKind::StatusDetail { entry: 0 }));
+        // Owner ruling 2026-10-19: the words `Title: <worn title>` belong in the bar across the top
+        // of the screen, so this window's own border carries no caption at all and its `Profile`
+        // header is a row inside the box.
+        assert_eq!(title, "");
+        let band_hidden = app
+            .world_mut()
+            .query_filtered::<&Node, With<StatusDetailTitleMask>>()
+            .iter(app.world())
+            .all(|band| band.display == Display::None);
+        assert!(
+            band_hidden,
+            "no strip floats on a border with nothing written on it"
+        );
 
         let mut line_q = app.world_mut().query::<(&StatusDetailLine, &Text, &Node)>();
         let mut lines: Vec<(usize, String)> = line_q
@@ -9195,10 +9718,14 @@ mod tests {
             "live readout, no cursor decoration"
         );
 
-        // Nothing of the deleted selector draws under a detail either, and no detail text leaks
-        // into what is left on screen.
+        // The statcom2 list keeps drawing under a detail — job levels and every skill
+        // window sit beside stats AND list (owner screenshots 2026-10-19). Details are
+        // self-drawn windows: the layout's focused level stays Status, so the one selector
+        // drawer carries the list at the Command spot even now — never detail text, and no
+        // second copy.
         seed_covered_command_spot(&mut app);
         let drawn: Vec<String> = visible_rows(&mut app).into_iter().map(|(_, l)| l).collect();
+        assert!(!drawn.is_empty(), "the list stays up under the detail");
         let status_words = crate::hud::status_panel::STATUS_ENTRIES
             .iter()
             .map(|e| e.label)
@@ -9206,9 +9733,9 @@ mod tests {
         assert!(
             drawn.iter().all(|t| {
                 let body = t.trim_start_matches(['>', ' ']);
-                !body.contains("Cowrevenge") && !status_words.iter().any(|w| body.starts_with(w))
+                !body.contains("Cowrevenge") && status_words.iter().any(|w| body.starts_with(w))
             }),
-            "neither the deleted list nor detail text draws: {drawn:?}"
+            "the list carries only its own entries: {drawn:?}"
         );
         let (mirror, _, _) = companion_frame_visible(&mut app);
         assert!(!mirror, "and no Commands mirror beside it either");
@@ -9517,8 +10044,10 @@ mod tests {
     /// FFXiMain.dll retail-2026-09 RVA 0x1D6B52 tests its style word zero and only
     /// refreshes/blips (.text 0x1D6B10), never arming a send — and every
     /// other row's action carries its Param2 style for the confirm→send chain.
-    /// One law decides dim rows: the roomlist gates only its patio row, on key item 3051
-    /// (dim word .text FFXiMain.dll retail-2026-09 0x1D6A1A; bell-only select 0x1D6B63).
+    /// One law decides dim rows for both gated windows: Status gates per entry kind (the
+    /// `statcom2` open code disables ids 3/4/5/12/13 at .text FFXiMain.dll retail-2026-09
+    /// 0x148B50 and content lifts it), and the roomlist gates only its patio row, on key item
+    /// 3051 (dim word .text 0x1D6A1A; bell-only select .text 0x1D6B63).
     #[test]
     fn disabled_rows_track_their_own_gate() {
         let plain = kuluu_snapshot::SceneSnapshot::default();
@@ -9542,6 +10071,10 @@ mod tests {
             !menu_row_disabled(MenuKind::RoomList, ROOMLIST_PATIO_ROW_POSITION, &with_bell),
             "owning the bell lifts the row"
         );
+
+        // Status keeps its own gate through the same door: Combat Skill (row 3) is dim until
+        // s2c 0x062 brings a visible word.
+        assert!(menu_row_disabled(MenuKind::Status, 3, &plain));
     }
 
     #[test]
@@ -10044,8 +10577,8 @@ mod tests {
     }
 
     /// Windows with no side record keep the seats kuluu gave them: the focused one in the
-    /// column with its opener beside it; a Status flow contributes no seat at all, and the
-    /// Config hub stands alone because configwi covers the main menu.
+    /// column with its opener beside it, and Status and the Config hub alone because statcom2 and
+    /// configwi cover the main menu.
     #[test]
     fn windows_without_a_side_record_keep_their_column_seats() {
         let frames = ConfigDatRows::default();
@@ -10069,13 +10602,12 @@ mod tests {
             ],
             "only the opener sits beside the column"
         );
-        // Status and its detail own no window seat, so only the Commands page is seated.
         let mut status = MenuStack::root();
         status.push(MenuKind::Status);
         status.push(MenuKind::StatusDetail { entry: 0 });
         assert_eq!(
             menu_stack_layout(&status, &frames).windows,
-            vec![(0, MenuWindowSeat::Column)]
+            vec![(1, MenuWindowSeat::Column)]
         );
         let mut config = MenuStack::root();
         config.push(MenuKind::RetailConfig);
@@ -14739,6 +15271,7 @@ mod tests {
     fn cursor_rules_follow_the_window_name() {
         for (kind, rule) in [
             (MenuKind::Root, OpenCursor::Remembered),
+            (MenuKind::Status, OpenCursor::Remembered),
             (MenuKind::QuestList, OpenCursor::FirstItem),
             (MenuKind::UnityChat, OpenCursor::FirstItem),
             (MenuKind::UnityMenu, OpenCursor::Remembered),
@@ -14763,9 +15296,6 @@ mod tests {
             "every school lists in the one `magic` window"
         );
         for kind in [
-            // The Status selector window is deleted: the level owns no registry window and draws
-            // nothing itself — persona and its level box carry the flow.
-            MenuKind::Status,
             MenuKind::Controls,
             MenuKind::Debug,
             MenuKind::Magic,
@@ -14845,9 +15375,14 @@ mod tests {
             panic!("menu");
         };
         let level = status.current().unwrap();
-        // The Status selector window is deleted: its level owns no record, so nothing locks.
-        assert!(level.last_item_lock.is_none(), "Status owns no window");
-        assert!((0..STATUS_LABELS.len()).all(|row| !level.row_locked(row)));
+        assert!(
+            level.last_item_lock.is_some(),
+            "statcom2 is in the record's table"
+        );
+        assert!(
+            (0..STATUS_LABELS.len()).all(|row| !level.row_locked(row)),
+            "its last item is the trailing dummy block, no drawn row"
+        );
     }
 
     fn locked_hub(row: usize) -> MenuStack {
@@ -15191,6 +15726,110 @@ mod tests {
                 Val::Px(60.0),
                 Val::Px(f32::from(PROFILE_FRAME.2))
             )
+        );
+    }
+
+    /// The rank gauge law (owner capture 2026-10-19): the Profile window fills the empty row under
+    /// its `Rank:` line with the conquest bar, sized from s2c 0x061's `rankbar` against LSB's 4000
+    /// ceiling, and no other Status detail ever shows it.
+    #[test]
+    fn profile_window_hangs_the_rank_gauge_under_its_rank_row() {
+        use crate::hud::status_panel::{
+            profile_entry_index, status_detail_lines, StatusEntryKind, PROFILE_RANK_ROW_PREFIX,
+        };
+        use crate::snapshot::SceneState;
+
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        snap.stats = Some(kuluu_snapshot::CharStats {
+            title_id: 120,
+            nation: 1,
+            conquest_rank: 3,
+            conquest_rank_bar: 2_000,
+            ..Default::default()
+        });
+        let profile_entry = profile_entry_index();
+        let rows: Vec<DynamicMenuRow> = status_detail_lines(profile_entry, &snap, &[], &[], None)
+            .into_iter()
+            .map(|label| DynamicMenuRow {
+                tint: None,
+                label,
+                action: DynamicMenuAction::DisplayInfo,
+            })
+            .collect();
+        let rank_row = rows
+            .iter()
+            .position(|row| row.label.starts_with(PROFILE_RANK_ROW_PREFIX))
+            .expect("the Profile readout carries a Rank row");
+        assert!(
+            matches!(rows[rank_row + 1].label.as_str(), ""),
+            "the row under the rank stays empty for the gauge"
+        );
+
+        let mut app = App::new();
+        app.init_resource::<DynamicMenu>()
+            .init_resource::<ConfigDatRows>()
+            .init_resource::<SceneState>();
+        {
+            let mut scene = app.world_mut().resource_mut::<SceneState>();
+            scene.snapshot = snap;
+        }
+        app.world_mut().resource_mut::<DynamicMenu>().rows = rows;
+        let open_detail = |app: &mut App, entry: usize| {
+            let mut stack = MenuStack::root();
+            stack.push(MenuKind::Status);
+            stack.push(MenuKind::StatusDetail {
+                entry: u8::try_from(entry).unwrap_or(u8::MAX),
+            });
+            app.insert_resource(InputMode::Menu(stack));
+        };
+        app.add_systems(Startup, spawn_status_detail_window);
+        app.add_systems(Update, update_status_detail_window);
+
+        open_detail(&mut app, profile_entry);
+        app.update();
+        app.update();
+
+        let bar = app
+            .world_mut()
+            .query_filtered::<&Node, With<StatusDetailRankBar>>()
+            .single(app.world())
+            .expect("the detail window carries a gauge");
+        assert_ne!(bar.display, Display::None, "Profile draws the rank bar");
+        assert!(matches!(bar.width, Val::Px(width) if width > 0.0));
+        // Under the `Rank Points` label rather than at the window edge: a four-character indent.
+        let Val::Px(bar_left) = bar.left else {
+            panic!("the gauge is placed in pixels");
+        };
+        assert!(
+            bar_left > style::WINDOW_PAD_X_PX,
+            "indented under its label"
+        );
+        let fill = app
+            .world_mut()
+            .query_filtered::<&Node, With<StatusDetailRankFill>>()
+            .single(app.world())
+            .expect("the gauge has a filled part");
+        assert_eq!(
+            fill.width,
+            Val::Percent(50.0),
+            "2000 rank points against LSB's 4000 ceiling"
+        );
+
+        let job_levels = crate::hud::status_panel::STATUS_ENTRIES
+            .iter()
+            .position(|entry| entry.kind == StatusEntryKind::JobLevels)
+            .expect("job levels is a status row");
+        open_detail(&mut app, job_levels);
+        app.update();
+        let bar = app
+            .world_mut()
+            .query_filtered::<&Node, With<StatusDetailRankBar>>()
+            .single(app.world())
+            .expect("the detail window carries a gauge");
+        assert_eq!(
+            bar.display,
+            Display::None,
+            "no other detail window shows the rank bar"
         );
     }
 }

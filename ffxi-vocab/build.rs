@@ -13,6 +13,10 @@ const LSB_MSG_BASIC_H: &str = "../vendor/server/src/map/enums/msg_basic.h";
 const LSB_MSG_LUA: &str = "../vendor/server/scripts/enum/msg.lua";
 const LSB_KEY_ITEM_LUA: &str = "../vendor/server/scripts/enum/key_item.lua";
 const LSB_JOB_NAME_LUA: &str = "../vendor/server/scripts/enum/job_name.lua";
+/// The `xi.title` enum: every title id the server knows (`profile.title`, which s2c 0x061 sends as
+/// `designation`). Its values are identifiers, not retail's display text, so they go through
+/// `prettify_snake_case`; punctuation the identifiers cannot carry (apostrophes) is lost.
+const LSB_TITLE_LUA: &str = "../vendor/server/scripts/enum/title.lua";
 const LSB_SPELL_LIST_SQL: &str = "../vendor/server/sql/spell_list.sql";
 const LSB_ABILITIES_SQL: &str = "../vendor/server/sql/abilities.sql";
 const LSB_WEAPON_SKILLS_SQL: &str = "../vendor/server/sql/weapon_skills.sql";
@@ -76,6 +80,42 @@ mod floor {
     pub const SYNTH_RECIPE: usize = scrape_floor(4390);
     pub const SYNTH_CRYSTAL_GROUP: usize = scrape_floor(8);
     pub const QUEST_ENTRY: usize = scrape_floor(1084);
+    pub const TITLE: usize = scrape_floor(1094);
+}
+
+/// Title Case for the title names: every word capitalized apart from the small connectors, so
+/// `STAR_ONION_BRIGADE_MEMBER` reads "Star Onion Brigade Member" the way retail's own caption does.
+/// `lsb_scrape::parse_xi_ident_table` runs identifiers through its own prettifier first, which
+/// leaves later words lowercase (right for item-ish names, wrong for titles), so this re-cases a
+/// token string that arrives either underscore-separated or spaced. Roman rank markers (`ii`, `xiv`)
+/// are put back to capitals, which the upstream prettifier flattens.
+fn title_case(ident: &str) -> String {
+    const CONNECTORS: &[&str] = &["of", "the", "a", "an", "in", "on", "and", "to", "for"];
+    // Roman rank markers stay capitals; the prettifier upstream lowercases them.
+    const ROMAN: &[&str] = &[
+        "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii", "xiii", "xiv",
+        "xv",
+    ];
+    ident
+        .split(['_', ' '])
+        .filter(|w| !w.is_empty())
+        .enumerate()
+        .map(|(idx, word)| {
+            let lower = word.to_ascii_lowercase();
+            if ROMAN.contains(&lower.as_str()) {
+                return lower.to_uppercase();
+            }
+            if idx > 0 && CONNECTORS.contains(&lower.as_str()) {
+                return lower;
+            }
+            let mut out = String::with_capacity(word.len());
+            for (n, ch) in lower.chars().enumerate() {
+                out.push(if n == 0 { ch.to_ascii_uppercase() } else { ch });
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn main() -> Result<()> {
@@ -87,6 +127,7 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed={LSB_MSG_LUA}");
     println!("cargo:rerun-if-changed={LSB_KEY_ITEM_LUA}");
     println!("cargo:rerun-if-changed={LSB_JOB_NAME_LUA}");
+    println!("cargo:rerun-if-changed={LSB_TITLE_LUA}");
     println!("cargo:rerun-if-changed={LSB_SPELL_LIST_SQL}");
     println!("cargo:rerun-if-changed={LSB_ABILITIES_SQL}");
     println!("cargo:rerun-if-changed={LSB_WEAPON_SKILLS_SQL}");
@@ -199,6 +240,25 @@ fn main() -> Result<()> {
         LSB_KEY_ITEM_LUA,
         key_item_entries.len(),
         floor::KEY_ITEM,
+    )?;
+
+    let title_src =
+        fs::read_to_string(LSB_TITLE_LUA).with_context(|| format!("reading {LSB_TITLE_LUA}"))?;
+    let title_entries: Vec<(u32, String)> = parse_xi_ident_table(&title_src, "xi.title")?
+        .into_iter()
+        .map(|(id, ident)| (id, title_case(&ident)))
+        .collect();
+    write_u16_table(
+        &out_dir.join("title_names_table.rs"),
+        "TITLE_NAMES",
+        LSB_TITLE_LUA,
+        &title_entries,
+    )?;
+    check_scrape_count(
+        "title entries",
+        LSB_TITLE_LUA,
+        title_entries.len(),
+        floor::TITLE,
     )?;
 
     let job_src = fs::read_to_string(LSB_JOB_NAME_LUA)

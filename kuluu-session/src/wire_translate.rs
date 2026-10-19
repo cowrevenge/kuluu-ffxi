@@ -180,6 +180,13 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         job_points_received: s.job_points_received,
         job_points: s.job_points,
         homepoints: s.homepoints,
+        // The two rank rows of the Status Profile window ride in 0x01B JOB_INFO, which the session
+        // kept only for the Mog menus until now.
+        job_ranks: s.job_info.map(|j| wire::JobRanks {
+            mastery_rank: j.mastery_rank,
+            mentor_rank: j.mentor_rank,
+            can_thumbs_up_mentor: j.can_thumbs_up_mentor,
+        }),
     }
 }
 
@@ -373,6 +380,11 @@ fn char_stats_to_wire(c: crate::state::CharStatsRaw) -> wire::CharStats {
         unity_points1: c.unity_points1,
         unity_points2: c.unity_points2,
         mjob_lv: c.mjob_lv,
+        title_id: c.title_id,
+        conquest_rank: c.conquest_rank,
+        conquest_rank_bar: c.conquest_rank_bar,
+        home_point_zone: c.home_point_zone,
+        nation: c.nation,
     }
 }
 
@@ -1687,6 +1699,9 @@ mod tests {
                 l[4] = 24;
                 l
             },
+            can_thumbs_up_mentor: false,
+            mentor_rank: 0,
+            mastery_rank: 3,
         });
         let snap = state_to_snapshot(&s);
         let jobs = snap.jobs.expect("roster folds through");

@@ -1155,6 +1155,9 @@ mod tests {
             unlocked: 0b1_1011,
             sub_job_unlocked: true,
             job_levels,
+            can_thumbs_up_mentor: false,
+            mentor_rank: 0,
+            mastery_rank: 0,
         }
     }
 

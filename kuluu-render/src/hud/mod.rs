@@ -410,6 +410,15 @@ impl Plugin for HudPlugin {
             Update,
             menu::refresh_dynamic_menu_rows.before(menu::update_main_menu),
         );
+        // The window title bands: they need the word and the pixel width `update_main_menu` picks
+        // for this frame, so they place immediately after it. They also write text faces, so they go
+        // behind the face-stamping system to keep one writer per node in a frame.
+        app.add_systems(
+            Update,
+            menu::place_menu_title_bands
+                .after(menu::update_main_menu)
+                .after(crate::ui_font::apply_ui_font),
+        );
         app.add_systems(
             Update,
             (

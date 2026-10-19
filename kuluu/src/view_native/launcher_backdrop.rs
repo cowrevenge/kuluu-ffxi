@@ -189,24 +189,26 @@ const LOADER_FONT_PX: f32 = 12.0;
 const LOADER_BOTTOM_INSET_PX: f32 = 44.0;
 const LOADER_SIDE_INSET_PX: f32 = 16.0;
 
-/// The dots live in a box already wide enough for all of them, so the word
-/// before them never shifts as they come and go.
-const LOADER_DOTS_SLOT_PX: f32 = 18.0;
+/// Three dot entities that exist the whole time and only change colour, so the
+/// loader's box is exactly as wide in every frame and the word cannot shift.
+const LOADER_DOT_COUNT: usize = 3;
 
 const VEIL_COLOR: Color = Color::BLACK;
 const LOADER_TEXT: &str = "Loading background";
-const LOADER_DOTS: [&str; 4] = ["", ".", "..", "..."];
 const LOADER_TEXT_COLOR: Color = Color::srgb(0.62, 0.66, 0.70);
 
 #[derive(Component)]
 struct StartupVeil;
 
-/// The corner loader's root node: word plus a fixed-width slot for the dots.
+/// The corner loader's root node: the word and [`LOADER_DOT_COUNT`] dot glyphs.
 #[derive(Component)]
 struct StartupLoaderRoot;
 
+/// One of the three dots. Lit while its `order` is below the current phase.
 #[derive(Component)]
-struct StartupLoaderDots;
+struct StartupLoaderDot {
+    order: usize,
+}
 
 /// `-cpu-mode` registers the backdrop with `background: false`: the screens stay
 /// on their own and no zone is streamed for them.
@@ -308,18 +310,18 @@ fn spawn_startup_stage(mut commands: Commands, background: Res<LauncherBackgroun
         loader.spawn((
             Text::new(LOADER_TEXT),
             TextFont::from_font_size(LOADER_FONT_PX),
+            TextColor(LOADER_TEXT_COLOR),
         ));
-        // Fixed width: the dots that appear and vanish inside it cannot push
-        // anything else along.
-        loader.spawn((Node {
-            width: Val::Px(LOADER_DOTS_SLOT_PX),
-            ..default()
-        },));
-        loader.spawn((
-            StartupLoaderDots,
-            Text::new(LOADER_DOTS[0]),
-            TextFont::from_font_size(LOADER_FONT_PX),
-        ));
+        for order in 0..LOADER_DOT_COUNT {
+            loader.spawn((
+                StartupLoaderDot { order },
+                Text::new("."),
+                TextFont::from_font_size(LOADER_FONT_PX),
+                // Off dots keep their glyph (and so their width) and merely go
+                // clear; that is what stops the row from resizing.
+                TextColor(LOADER_TEXT_COLOR.with_alpha(0.0)),
+            ));
+        }
     });
 }
 
@@ -407,19 +409,25 @@ fn advance_startup_stage(
     }
 }
 
+/// Lights dots one at a time and then drops them all, without ever changing
+/// what is laid out: an unlit dot still occupies its glyph.
 fn update_startup_loader(
     stage: Res<StartupStage>,
     time: Res<Time>,
-    mut q_dots: Query<&mut Text, With<StartupLoaderDots>>,
+    mut q_dots: Query<(&StartupLoaderDot, &mut TextColor)>,
 ) {
     if matches!(stage.phase, StartupPhase::Done) {
         return;
     }
-    let dot = ((time.elapsed_secs() * LOADER_DOTS_PER_SEC) as usize) % LOADER_DOTS.len();
-    let want = LOADER_DOTS[dot];
-    for mut text in q_dots.iter_mut() {
-        if text.as_str() != want {
-            *text = Text::new(want);
+    let lit = (time.elapsed_secs() * LOADER_DOTS_PER_SEC) as usize % (LOADER_DOT_COUNT + 1);
+    for (dot, mut color) in q_dots.iter_mut() {
+        let want = if dot.order < lit {
+            LOADER_TEXT_COLOR
+        } else {
+            LOADER_TEXT_COLOR.with_alpha(0.0)
+        };
+        if **color != want {
+            **color = want;
         }
     }
 }

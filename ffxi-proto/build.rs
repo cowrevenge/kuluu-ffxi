@@ -133,6 +133,13 @@ const S2C_LAYOUTS: &[(&str, &str, &str)] = &[
         "0x063_miscdata_homepoints.h",
         "GP_SERV_COMMAND_MISCDATA::HOMEPOINTS::PacketData",
     ),
+    // The mentor/mastery ranks the Status Profile window reads live past the dancer block of this
+    // packet, so its tail fields are pinned too.
+    (
+        "job_info",
+        "0x01b_job_info.h",
+        "GP_SERV_COMMAND_JOB_INFO::PacketData",
+    ),
 ];
 
 /// Headers that declare a type a layout header uses without including it in the scan:

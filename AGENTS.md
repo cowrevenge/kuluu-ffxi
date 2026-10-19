@@ -2,6 +2,41 @@
 
 Guidance for AI coding agents working in this repository. `CLAUDE.md` is a symlink to this file, so Claude Code and any AGENTS.md-aware tool read the same instructions.
 
+## Output language: ASD-STE100
+
+Use ASD-STE100 Simplified Technical English for all English prose you write.
+This includes chat replies, progress reports, questions, plans, reviews, issue text,
+commit messages, documentation, and permitted code comments.
+Follow [ASD-STE100 Issue 9](https://www.asd-ste100.org/assets/files/ASD-STE100_ISSUE9.pdf).
+
+- Use approved words with their approved meanings and parts of speech.
+  Use technical names and technical verbs where the standard permits them.
+  Keep one term for each concept. Explain an unfamiliar technical term on first use.
+- Write direct sentences. Use active voice in instructions and where possible in descriptions.
+- Give one instruction per sentence. Use the imperative form for instructions.
+  Put a condition before the instruction that depends on it.
+- Limit instructions to 20 words per sentence and descriptions to 25 words per sentence.
+  Split long sentences without removing necessary facts, conditions, or evidence.
+- Keep each paragraph on one topic, with no more than six sentences.
+  Use a list for a sequence or several related items.
+- Avoid idioms, figurative language, unnecessary words, and ambiguous pronouns.
+  Keep articles and other words needed for correct grammar.
+- Before you send or save prose, check its meaning, terminology, sentence length, and grammar.
+  Check the standard when unsure. Do not claim full compliance without a full review.
+
+Preserve exact quotations, retail text, identifiers, commands, paths, URLs, and machine-readable data.
+Do not change code behavior or required output formats to satisfy a prose rule.
+Keep the repository's comment restrictions and source requirements.
+An explicit user request for another language or writing style takes precedence.
+
+Use `python3 scripts/check-prose.py` to check draft prose from standard input.
+Pass file paths to check Markdown or text files. Add `--procedures` for instructions.
+See [.vale/README.md](.vale/README.md) for setup and check limits.
+Correct warnings before sending or saving prose, while preserving exact text and technical meaning.
+
+The hooks repeat these rules; they do not certify dictionary or grammar compliance.
+Harnesses without hooks must follow this section directly.
+
 ## What this is
 
 Kuluu is a faithful, open-source FINAL FANTASY XI **client** rebuilt in Rust + Bevy. It speaks the FFXI wire protocol to community-run private servers (LandSandBoat / Phoenix), **not** retail. It is **not a server**, and it **ships no game assets** — geometry/textures/audio/animation come from a user-provided retail install read at runtime (the registry's `default` install, or `FFXI_DAT_PATH`). Tables derived from LSB/POLUtils are baked in as compile-time constants, never as game content.

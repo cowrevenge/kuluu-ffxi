@@ -10,6 +10,7 @@ Preserve existing profiles, database contents, and unrelated workloads.
 `scripts/lsb-stack.sh` controls the default Colima profile and these configured containers.
 It starts existing containers; it does not install Docker or create a new server.
 Use it only when its runtime and container assumptions match the selected stack.
+On another host, inspect available runtimes and server configuration before using the helper.
 Before `up`, confirm that no unrelated workload needs the default VM.
 The helper starts an idle reaper that can stop the entire VM.
 If ownership is unknown, use explicit Docker commands or an isolated project.
@@ -72,6 +73,8 @@ Keep this work local to the development task.
 - For a Linux system Docker service, use `sudo systemctl start docker` when the host uses systemd.
 - For rootless Docker, use its installed user service and socket instead of the system service.
 
+Inspect runtime status, mount availability, container state, and forwarding logs before selecting a repair.
+A stale shared filesystem is one possible cause.
 After startup, repeat the explicit-context `docker info` check.
 If host access still fails, compare host and guest access before selecting a repair:
 

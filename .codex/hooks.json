@@ -58,6 +58,15 @@
           }
         ],
         "matcher": "startup|resume|clear"
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.agents/hooks/ste100-reminder.py\"",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [
@@ -78,6 +87,15 @@
             "command": "bd codex-hook UserPromptSubmit",
             "statusMessage": "Refreshing Beads context",
             "type": "command"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.agents/hooks/ste100-reminder.py\"",
+            "timeout": 10
           }
         ]
       }

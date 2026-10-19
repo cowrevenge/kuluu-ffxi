@@ -26,6 +26,19 @@ def configured(data):
             group["matcher"] = matcher
         kept.append(group)
         hooks[event] = kept
+    for event in ("SessionStart", "UserPromptSubmit"):
+        groups = hooks.setdefault(event, [])
+        kept = []
+        for group in groups:
+            handlers = [h for h in group.get("hooks", []) if "ste100-reminder.py" not in h.get("command", "")]
+            if handlers:
+                kept.append({**group, "hooks": handlers})
+        kept.append({"hooks": [{
+            "type": "command",
+            "command": 'python3 "$(git rev-parse --show-toplevel)/.agents/hooks/ste100-reminder.py"',
+            "timeout": 10,
+        }]})
+        hooks[event] = kept
     return data
 
 
@@ -39,7 +52,7 @@ def main():
     wanted = configured(json.loads(json.dumps(current)))
     if args.check:
         if current != wanted:
-            print("Codex runtime verification hooks missing or stale; run .agents/hooks/install-codex-project-hooks.py", file=sys.stderr)
+            print("Codex project hooks missing or stale; run .agents/hooks/install-codex-project-hooks.py", file=sys.stderr)
             return 1
     else:
         path.write_text(json.dumps(wanted, indent=2) + "\n")

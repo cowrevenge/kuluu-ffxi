@@ -80,12 +80,12 @@ build legs (linux / linux-arm / macos / windows / windows-arm / wasm) →
 `publish`. The arm legs build natively on GitHub's hosted `ubuntu-24.04-arm`
 and `windows-11-arm` runners (free for public repos) — no cross toolchain.
 
-**Rehearse workflow changes before burning a release on them.** A new or
-edited build leg can be dry-run without publishing: branch, add `if: false` to
-the `publish` job, `gh workflow run release.yml --ref <branch> -f
-tag=vX.Y.Z-armtest` (the setup validator admits suffixed tags), watch the
-legs, delete the branch. Cheaper than the delete-tag/fix/re-push recovery loop,
-and it caught the windows-arm Cranelift failure before v0.5.1 shipped.
+**Rehearse workflow changes before publication.** Inspect the workflow at the
+exact candidate commit for a supported `publish=false` input.
+After applicable approval, dispatch that candidate branch with the selected tag and `publish=false`.
+Verify the workflow commit, CI, bundle, and hashes.
+If build-only controls are absent, report that blocker before dispatch.
+Keep branch push, build-only dispatch, and publication approval separate.
 
 **Both Windows legs set `RUSTFLAGS: -C target-feature=+crt-static`.** Rust's
 MSVC targets link the C runtime dynamically by default, so without it the exe
@@ -140,18 +140,23 @@ gh release view vX.Y.Z -R jondwillis/kuluu-ffxi \
    invalidates the linker's ad-hoc signature, and an unsigned arm64 binary dies
    with `killed: 9`. `release.yml` re-signs with `codesign --force --sign -`
    after stripping; this check is what confirms it survived.
-5. **The aarch64-linux binary launches in colima** (the VM is arm64 Linux).
-   The bind mount must live under `/Users` — macOS `mktemp -d` paths aren't
-   mounted into the VM — and the bare ubuntu image needs the runtime libs:
-   ```bash
-   docker run --rm --platform linux/arm64 -v /Users/.../dir:/k ubuntu:24.04 \
-     bash -c "apt-get update -q >/dev/null && apt-get install -y -q \
-       libwayland-client0 libxkbcommon0 libx11-6 libxcursor1 libxrandr2 \
-       libxi6 libasound2t64 libudev1 libdbus-1-3 libgl1 >/dev/null; \
-       /k/kuluu --help"
-   ```
-   The aarch64-windows zip has no local run-proof while the Parallels VMs are
-   down; note it as checksum-verified-only in the report.
+5. **Exercise each artifact with an available compatible runtime.** Use
+   [platform verification](references/platform-verification.md) to select the
+   host procedure. Use Wine for Windows compatibility checks on macOS and Linux.
+   Discover the runner and install paths on the current host.
+   Record the artifact architecture, runtime version, command, exit status, and hashes.
+   A Wine result establishes Wine compatibility. It does not establish native Windows behavior.
+   Keep an unsupported architecture as an explicit coverage gap.
+   Do not require a named VM, private volume, or a particular container engine.
+
+For each substantive scheduled assessment, show a draft release card for each candidate.
+Include player-facing changes, compatibility notes, known limitations, exact commit, checks, and inspected candidate media.
+Show media when it helps explain a visible change. Explain a capture blocker when media is required but unavailable.
+Save the card content with the structured release evidence.
+Provide an approval action that names the exact candidate and operation.
+Use separate actions for a build-only rehearsal and publication.
+Offer publication approval after the required evidence and artifacts are reviewable.
+Preserve existing quiet exits when there is no meaningful change or pending action.
 
 ## When it goes wrong
 

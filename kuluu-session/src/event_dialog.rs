@@ -3849,7 +3849,7 @@ pub(crate) mod tests {
 
     #[test]
     fn substitutes_key_item_and_item_markers_with_scraped_names() {
-        // Key item 1 = Zeruhn Report (vendor/server/scripts/enum/key_item.lua),
+        // Key item 1 = Zeruhn Report (vendor/server/data/enums/key_item.yaml),
         // item 4509 = Flask of Distilled Water (vendor/server/sql/item_basic.sql).
         let text = "Obtained key item: {KeyItem:0}. Also {Item:1}.".to_string();
         assert_eq!(

@@ -29,13 +29,8 @@ pub mod input;
 pub mod key_drive;
 pub mod key_items;
 pub mod launcher_backdrop;
-// 0.19 deprecated the feathers `*_bundle` spawn fns in favor of BSN scenes;
-// the launcher screens migrate to BSN in kuluu-dnr5, so tolerate the shims
-// until then.
-#[allow(deprecated)]
 pub mod launcher_ui;
 pub mod locked_camera;
-#[allow(deprecated)]
 pub mod model_viewer;
 pub mod nameplate_occlude;
 pub mod navmesh_overlay;
@@ -48,7 +43,6 @@ pub mod sun_occlusion;
 pub mod target_list_hud;
 pub mod text_input;
 pub mod walker;
-#[allow(deprecated)]
 pub mod widgets;
 pub mod zone_transition;
 
@@ -84,9 +78,9 @@ use self::launcher_ui::{LoginErrorMsg, PendingConnect};
 
 fn drive_feathers_cursor(
     style: Res<CursorStyle>,
-    mut default_cursor: ResMut<bevy::feathers::cursor::DefaultCursor>,
+    mut default_cursor: ResMut<bevy::picking::cursor::DefaultCursor>,
 ) {
-    let want = bevy::feathers::cursor::EntityCursor::System(system_cursor_icon(*style));
+    let want = bevy::picking::cursor::EntityCursor::System(system_cursor_icon(*style));
     if default_cursor.0 != want {
         default_cursor.0 = want;
     }
@@ -489,7 +483,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     // submit). Default to the CPU mesh-batching path (Bevy 0.18-style) on macOS;
     // FFXI_GPU_PREPROCESS=1 opts back in. Two prongs are required to force the CPU path:
     // (1) insert before dependent plugins' finish() bake their CPU-vs-GPU choice
-    //     (vendor/bevy_pbr render/mesh.rs reads it in finish), and
+    //     (the mesh renderer reads it in finish), and
     // (2) re-assert in RenderStartup because bevy_render's BatchingPlugin re-creates the
     //     resource there via init_gpu_resource.
     if cfg!(target_os = "macos") && std::env::var_os("FFXI_GPU_PREPROCESS").is_none() {
@@ -548,7 +542,9 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
                 stamp_render_graph_done
                     .after(RenderSystems::Render)
                     .before(RenderSystems::Cleanup),
-                stamp_render_total.in_set(RenderSystems::PostCleanup),
+                stamp_render_total
+                    .in_set(RenderSystems::PostCleanup)
+                    .after(RenderSystems::Cleanup),
             ),
         );
     }

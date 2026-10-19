@@ -8,10 +8,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bevy::ecs::system::SystemParam;
+use bevy::picking::{
+    events::{PointerPress, PointerState},
+    hover::Hovered,
+    pointer::PointerButton,
+};
 use bevy::prelude::*;
 use bevy::ui::{ComputedNode, UiGlobalTransform};
 use bevy::window::PrimaryWindow;
 use kuluu_render::components::{InGameEntity, WorldEntity};
+use kuluu_render::cursor::primary_pointer_is_held;
 use kuluu_render::dat_mzb::{LastAutoLoadedZone, LoadMzbRequest, ZONE_SLOT_MAIN};
 use kuluu_render::ffxi_actor_render::{
     ActorSubject, FfxiActorMeshChild, FfxiRenderRoot, LoadActorRequest,
@@ -577,10 +583,6 @@ struct ShadowSnapshot {
     volumetric_fog: Option<bevy::light::VolumetricFog>,
 }
 
-// Hand-rolled lantern-alpha slider, styled like the rest of the panel. The track carries a Button
-// so its Interaction tracks the whole mouse-hold (same mechanism as the case buttons), and
-// drive_lamp_alpha_slider maps the held cursor through ComputedNode::normalize_point, which is the
-// same physical-pixel space bevy_ui's own focus pass hit-tests in.
 #[derive(Component)]
 struct LampSliderTrack;
 #[derive(Component)]
@@ -856,8 +858,19 @@ fn run_room_world_setup(world: &mut World) {
     }
 }
 
+fn primary_press_entities(
+    presses: &mut MessageReader<PointerPress>,
+    parents: &Query<&ChildOf>,
+) -> bevy::ecs::entity::EntityHashSet {
+    presses
+        .read()
+        .filter(|press| press.button == PointerButton::Primary)
+        .flat_map(|press| std::iter::once(press.entity).chain(parents.iter_ancestors(press.entity)))
+        .collect()
+}
+
 fn handle_close_press(
-    q_close: Query<&Interaction, (With<CloseBox>, With<bevy::ui::widget::Button>)>,
+    q_close: Query<Entity, (With<CloseBox>, With<bevy::ui_widgets::Button>)>,
     q_scoped: Query<Entity, With<TestSceneScoped>>,
     q_ui: Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
     mut commands: Commands,
@@ -866,11 +879,19 @@ fn handle_close_press(
     mut tracked: ResMut<TrackedEntities>,
     mut scene: ResMut<SceneState>,
     mut log: ResMut<TestLog>,
+    mut presses: MessageReader<PointerPress>,
+    pointers: Option<Res<PointerState>>,
+    parents: Query<&ChildOf>,
 ) {
-    let Ok(interaction) = q_close.single() else {
+    let pressed_entities = primary_press_entities(&mut presses, &parents);
+    let Ok(entity) = q_close.single() else {
         return;
     };
-    if !matches!(interaction, Interaction::Pressed) {
+    if !(pressed_entities.contains(&entity)
+        || pointers
+            .as_ref()
+            .is_some_and(|pointers| primary_pointer_is_held(entity, pointers, &parents)))
+    {
         return;
     }
     tear_down(
@@ -1059,7 +1080,8 @@ fn activate_test_scene(
                 ..default()
             },
             BackgroundColor(Color::srgba(0.35, 0.12, 0.12, 0.9)),
-            bevy::ui::widget::Button,
+            bevy::ui_widgets::Button,
+            Hovered::default(),
         ))
         .with_child((
             Text::new("X"),
@@ -1291,7 +1313,8 @@ fn spawn_panel(commands: &mut Commands) {
                     ..default()
                 },
                 BackgroundColor(Color::srgb(0.16, 0.2, 0.3)),
-                bevy::ui::widget::Button,
+                bevy::ui_widgets::Button,
+                Hovered::default(),
                 CaseButton(case),
             ))
             .with_child((
@@ -1352,7 +1375,8 @@ fn spawn_panel(commands: &mut Commands) {
                 ..default()
             },
             BackgroundColor(Color::srgb(0.13, 0.15, 0.2)),
-            bevy::ui::widget::Button,
+            bevy::ui_widgets::Button,
+            Hovered::default(),
         ))
         .id();
     commands.entity(track).add_child(knob);
@@ -1407,7 +1431,8 @@ fn spawn_panel(commands: &mut Commands) {
                 ..default()
             },
             BackgroundColor(Color::srgb(0.13, 0.15, 0.2)),
-            bevy::ui::widget::Button,
+            bevy::ui_widgets::Button,
+            Hovered::default(),
         ))
         .id();
     commands.entity(wash_track).add_child(wash_knob);
@@ -1426,7 +1451,8 @@ fn spawn_panel(commands: &mut Commands) {
                 ..default()
             },
             BackgroundColor(Color::srgb(0.16, 0.2, 0.3)),
-            bevy::ui::widget::Button,
+            bevy::ui_widgets::Button,
+            Hovered::default(),
             Text::new("[x] shadows"),
             TextFont {
                 font_size: 13.0.into(),
@@ -1455,7 +1481,8 @@ fn spawn_panel(commands: &mut Commands) {
                     ..default()
                 },
                 BackgroundColor(Color::srgb(0.16, 0.2, 0.3)),
-                bevy::ui::widget::Button,
+                bevy::ui_widgets::Button,
+                Hovered::default(),
                 Text::new(format!("[x] {}", field.label())),
                 TextFont {
                     font_size: 13.0.into(),
@@ -1479,7 +1506,8 @@ fn spawn_panel(commands: &mut Commands) {
                 ..default()
             },
             BackgroundColor(Color::srgb(0.16, 0.2, 0.3)),
-            bevy::ui::widget::Button,
+            bevy::ui_widgets::Button,
+            Hovered::default(),
             Text::new("[x] lamps"),
             TextFont {
                 font_size: 13.0.into(),
@@ -1503,7 +1531,8 @@ fn spawn_panel(commands: &mut Commands) {
                 ..default()
             },
             BackgroundColor(Color::srgb(0.16, 0.2, 0.3)),
-            bevy::ui::widget::Button,
+            bevy::ui_widgets::Button,
+            Hovered::default(),
             Text::new("[x] wall glow"),
             TextFont {
                 font_size: 13.0.into(),
@@ -1611,12 +1640,20 @@ fn watch_wires(
 }
 
 fn handle_case_presses(
-    q_buttons: Query<(&CaseButton, &Interaction)>,
+    q_buttons: Query<(Entity, &CaseButton)>,
     mut pending: ResMut<PendingCase>,
     lock: Res<CaseLock>,
+    mut presses: MessageReader<PointerPress>,
+    pointers: Option<Res<PointerState>>,
+    parents: Query<&ChildOf>,
 ) {
-    for (case_button, interaction) in q_buttons.iter() {
-        if !matches!(interaction, Interaction::Pressed) {
+    let pressed_entities = primary_press_entities(&mut presses, &parents);
+    for (entity, case_button) in q_buttons.iter() {
+        if !(pressed_entities.contains(&entity)
+            || pointers
+                .as_ref()
+                .is_some_and(|pointers| primary_pointer_is_held(entity, pointers, &parents)))
+        {
             continue;
         }
         // Bevy holds Pressed for the whole mouse-down, so a locked press is ignored silently
@@ -2303,18 +2340,23 @@ fn arm_lamp_room(
     }
 }
 
-// One flip per mouse-down (Button holds Interaction for the whole hold, same reason the case
-// buttons edge-detect through CaseLock); filled box = shadows on.
 fn toggle_shadows_checkbox(
-    mut q_check: Query<(&Interaction, &mut BackgroundColor, &mut Text), With<ShadowsCheckbox>>,
+    mut q_check: Query<(Entity, &mut BackgroundColor, &mut Text), With<ShadowsCheckbox>>,
     mut shadows: ResMut<ShadowsOff>,
     mut log: ResMut<TestLog>,
     mut was_pressed: Local<bool>,
+    mut presses: MessageReader<PointerPress>,
+    pointers: Option<Res<PointerState>>,
+    parents: Query<&ChildOf>,
 ) {
-    let Ok((interaction, mut bg, mut text)) = q_check.single_mut() else {
+    let pressed_entities = primary_press_entities(&mut presses, &parents);
+    let Ok((entity, mut bg, mut text)) = q_check.single_mut() else {
         return;
     };
-    let pressed = matches!(interaction, Interaction::Pressed);
+    let pressed = pressed_entities.contains(&entity)
+        || pointers
+            .as_ref()
+            .is_some_and(|pointers| primary_pointer_is_held(entity, pointers, &parents));
     if pressed && !*was_pressed {
         shadows.0 = !shadows.0;
         log_line(
@@ -2337,20 +2379,21 @@ fn toggle_shadows_checkbox(
 // One flip per mouse-down for all four sky-effect rows (edge-detect is per row: a hold over one
 // row must not repeat); filled box = on. Labels mirror the override every frame cheaply.
 fn toggle_sky_checkboxes(
-    mut q_rows: Query<(
-        Entity,
-        &Interaction,
-        &mut BackgroundColor,
-        &mut Text,
-        &SkyCheckbox,
-    )>,
+    mut q_rows: Query<(Entity, &mut BackgroundColor, &mut Text, &SkyCheckbox)>,
     mut ov: ResMut<kuluu_render::sun_moon::SkyFxOverride>,
     mut log: ResMut<TestLog>,
     mut was_pressed: Local<std::collections::HashMap<bevy::ecs::entity::Entity, bool>>,
+    mut presses: MessageReader<PointerPress>,
+    pointers: Option<Res<PointerState>>,
+    parents: Query<&ChildOf>,
 ) {
+    let pressed_entities = primary_press_entities(&mut presses, &parents);
     let changed = ov.is_changed();
-    for (row_entity, interaction, mut bg, mut text, cx) in q_rows.iter_mut() {
-        let pressed = matches!(interaction, Interaction::Pressed);
+    for (row_entity, mut bg, mut text, cx) in q_rows.iter_mut() {
+        let pressed = pressed_entities.contains(&row_entity)
+            || pointers
+                .as_ref()
+                .is_some_and(|pointers| primary_pointer_is_held(row_entity, pointers, &parents));
         if pressed && !was_pressed.get(&row_entity).copied().unwrap_or(false) {
             let field = cx.0;
             let flag = field.set(&mut ov);
@@ -2379,15 +2422,22 @@ fn toggle_sky_checkboxes(
 
 // Same one-flip-per-mouse-down pattern; flips the halo kill switch (the tick purges live halos).
 fn toggle_lamps_checkbox(
-    mut q_check: Query<(&Interaction, &mut BackgroundColor, &mut Text), With<LampsCheckbox>>,
+    mut q_check: Query<(Entity, &mut BackgroundColor, &mut Text), With<LampsCheckbox>>,
     mut off: ResMut<kuluu_render::particle_sim::LampHalosOff>,
     mut log: ResMut<TestLog>,
     mut was_pressed: Local<bool>,
+    mut presses: MessageReader<PointerPress>,
+    pointers: Option<Res<PointerState>>,
+    parents: Query<&ChildOf>,
 ) {
-    let Ok((interaction, mut bg, mut text)) = q_check.single_mut() else {
+    let pressed_entities = primary_press_entities(&mut presses, &parents);
+    let Ok((entity, mut bg, mut text)) = q_check.single_mut() else {
         return;
     };
-    let pressed = matches!(interaction, Interaction::Pressed);
+    let pressed = pressed_entities.contains(&entity)
+        || pointers
+            .as_ref()
+            .is_some_and(|pointers| primary_pointer_is_held(entity, pointers, &parents));
     if pressed && !*was_pressed {
         off.0 = !off.0;
         log_line(
@@ -2409,15 +2459,22 @@ fn toggle_lamps_checkbox(
 
 // Same one-flip-per-mouse-down pattern; shows/hides the wash volumes live.
 fn toggle_wall_glow_checkbox(
-    mut q_check: Query<(&Interaction, &mut BackgroundColor, &mut Text), With<WallGlowCheckbox>>,
+    mut q_check: Query<(Entity, &mut BackgroundColor, &mut Text), With<WallGlowCheckbox>>,
     mut off: ResMut<kuluu_render::particle_sim::WallWashOff>,
     mut log: ResMut<TestLog>,
     mut was_pressed: Local<bool>,
+    mut presses: MessageReader<PointerPress>,
+    pointers: Option<Res<PointerState>>,
+    parents: Query<&ChildOf>,
 ) {
-    let Ok((interaction, mut bg, mut text)) = q_check.single_mut() else {
+    let pressed_entities = primary_press_entities(&mut presses, &parents);
+    let Ok((entity, mut bg, mut text)) = q_check.single_mut() else {
         return;
     };
-    let pressed = matches!(interaction, Interaction::Pressed);
+    let pressed = pressed_entities.contains(&entity)
+        || pointers
+            .as_ref()
+            .is_some_and(|pointers| primary_pointer_is_held(entity, pointers, &parents));
     if pressed && !*was_pressed {
         off.0 = !off.0;
         log_line(
@@ -2516,15 +2573,23 @@ fn sync_shadow_override(
 
 fn drive_lamp_alpha_slider(
     windows: Query<&Window, With<PrimaryWindow>>,
-    q_track: Query<(&ComputedNode, &UiGlobalTransform, &Interaction), With<LampSliderTrack>>,
+    q_track: Query<(Entity, &ComputedNode, &UiGlobalTransform), With<LampSliderTrack>>,
     mut sim: ResMut<kuluu_render::particle_sim::ParticleSimulator>,
     mut q_knob: Query<&mut Node, With<LampSliderKnob>>,
     mut q_label: Query<&mut Text, With<LampSliderLabel>>,
+    mut presses: MessageReader<PointerPress>,
+    pointers: Option<Res<PointerState>>,
+    parents: Query<&ChildOf>,
 ) {
-    let Ok((node, xform, interaction)) = q_track.single() else {
+    let pressed_entities = primary_press_entities(&mut presses, &parents);
+    let Ok((entity, node, xform)) = q_track.single() else {
         return;
     };
-    if !matches!(interaction, Interaction::Pressed) {
+    if !(pressed_entities.contains(&entity)
+        || pointers
+            .as_ref()
+            .is_some_and(|pointers| primary_pointer_is_held(entity, pointers, &parents)))
+    {
         return;
     }
     let Ok(window) = windows.single() else {
@@ -2549,15 +2614,23 @@ fn drive_lamp_alpha_slider(
 // Wall-wash slider: full track width spans 0..WASH_ALPHA_LIFT_MAX (unlike the lamp lift's 0..1).
 fn drive_wash_alpha_slider(
     windows: Query<&Window, With<PrimaryWindow>>,
-    q_track: Query<(&ComputedNode, &UiGlobalTransform, &Interaction), With<WashSliderTrack>>,
+    q_track: Query<(Entity, &ComputedNode, &UiGlobalTransform), With<WashSliderTrack>>,
     mut sim: ResMut<kuluu_render::particle_sim::ParticleSimulator>,
     mut q_knob: Query<&mut Node, With<WashSliderKnob>>,
     mut q_label: Query<&mut Text, With<WashSliderLabel>>,
+    mut presses: MessageReader<PointerPress>,
+    pointers: Option<Res<PointerState>>,
+    parents: Query<&ChildOf>,
 ) {
-    let Ok((node, xform, interaction)) = q_track.single() else {
+    let pressed_entities = primary_press_entities(&mut presses, &parents);
+    let Ok((entity, node, xform)) = q_track.single() else {
         return;
     };
-    if !matches!(interaction, Interaction::Pressed) {
+    if !(pressed_entities.contains(&entity)
+        || pointers
+            .as_ref()
+            .is_some_and(|pointers| primary_pointer_is_held(entity, pointers, &parents)))
+    {
         return;
     }
     let Ok(window) = windows.single() else {
@@ -2926,9 +2999,28 @@ mod tests {
 
     fn close_app() -> App {
         let mut app = teardown_app();
-        app.add_systems(Update, handle_close_press);
-        app.world_mut()
-            .spawn((CloseBox, bevy::ui::widget::Button, Interaction::Pressed));
+        app.add_message::<PointerPress>()
+            .add_systems(Update, handle_close_press);
+        let entity = app
+            .world_mut()
+            .spawn((CloseBox, bevy::ui_widgets::Button))
+            .id();
+        app.world_mut().write_message(PointerPress {
+            entity,
+            pointer: bevy::picking::events::Pointer::new(
+                bevy::picking::pointer::PointerId::Mouse,
+                bevy::picking::pointer::Location {
+                    target: bevy::camera::NormalizedRenderTarget::None {
+                        width: 1,
+                        height: 1,
+                    },
+                    position: Vec2::ZERO,
+                },
+            ),
+            button: PointerButton::Primary,
+            hit: bevy::picking::backend::HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+            count: 1,
+        });
         app
     }
 

@@ -1,5 +1,5 @@
-use bevy::ecs::spawn::Spawn;
-use bevy::feathers::controls::{button_bundle, ButtonBundleProps, ButtonVariant};
+use bevy::feathers::controls::{ButtonVariant, FeathersButton};
+use bevy::feathers::font_styles::InheritableFont;
 use bevy::feathers::theme::ThemedText;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::ButtonState;
@@ -147,16 +147,29 @@ fn build_ui(commands: &mut Commands, form: &ServerEditForm, server: &ServerInfo)
             });
             panel.spawn((hint(&form.error), ServerEditError));
             panel.spawn(row()).with_children(|r| {
-                r.spawn(button_bundle(
-                    ButtonBundleProps { variant: ButtonVariant::Primary, ..default() },
-                    DefaultFocusTarget,
-                    Spawn((Text::new("Save"), ThemedText)),
-                )).observe(|_ev: On<Activate>, mut form: ResMut<ServerEditForm>, mut next: ResMut<NextState<LauncherState>>| {
+                r.spawn_empty().apply_scene(bsn! {
+                    @FeathersButton {
+                        @variant: ButtonVariant::Primary,
+                        @caption: bsn! {
+                            Text::new("Save")
+                            ThemedText
+                        },
+                    }
+                    Node { flex_grow: 1.0 }
+                    InheritableFont { font: {Handle::<Font>::default()} }
+                }).insert(DefaultFocusTarget).observe(|_ev: On<Activate>, mut form: ResMut<ServerEditForm>, mut next: ResMut<NextState<LauncherState>>| {
                     save_form(&mut form, &mut next);
                 });
-                r.spawn(button_bundle(
-                    ButtonBundleProps::default(), (), Spawn((Text::new("Cancel"), ThemedText)),
-                )).observe(|_ev: On<Activate>, mut next: ResMut<NextState<LauncherState>>| {
+                r.spawn_empty().apply_scene(bsn! {
+                    @FeathersButton {
+                        @caption: bsn! {
+                            Text::new("Cancel")
+                            ThemedText
+                        },
+                    }
+                    Node { flex_grow: 1.0 }
+                    InheritableFont { font: {Handle::<Font>::default()} }
+                }).observe(|_ev: On<Activate>, mut next: ResMut<NextState<LauncherState>>| {
                     next.set(LauncherState::ServerSelect);
                 });
             });
@@ -169,19 +182,25 @@ fn spawn_template_row(panel: &mut ChildSpawnerCommands) {
     panel.spawn(row()).with_children(|r| {
         for template in launcher_store::server_templates() {
             let profile = template.profile;
-            r.spawn(button_bundle(
-                ButtonBundleProps::default(),
-                (),
-                Spawn((Text::new(template.label), ThemedText)),
-            ))
-            .observe(
-                move |_ev: On<Activate>,
-                      mut form: ResMut<ServerEditForm>,
-                      mut dirty: ResMut<ServerEditUiDirty>| {
-                    *form = ServerEditForm::from_profile(&profile);
-                    dirty.0 = true;
-                },
-            );
+            r.spawn_empty()
+                .apply_scene(bsn! {
+                    @FeathersButton {
+                        @caption: bsn! {
+                            Text::new(template.label)
+                            ThemedText
+                        },
+                    }
+                    Node { flex_grow: 1.0 }
+                    InheritableFont { font: {Handle::<Font>::default()} }
+                })
+                .observe(
+                    move |_ev: On<Activate>,
+                          mut form: ResMut<ServerEditForm>,
+                          mut dirty: ResMut<ServerEditUiDirty>| {
+                        *form = ServerEditForm::from_profile(&profile);
+                        dirty.0 = true;
+                    },
+                );
         }
     });
 }
@@ -193,11 +212,17 @@ fn spawn_advanced_toggle(panel: &mut ChildSpawnerCommands, show_advanced: bool) 
         "Advanced settings..."
     };
     panel
-        .spawn(button_bundle(
-            ButtonBundleProps::default(),
-            (),
-            Spawn((Text::new(label), ThemedText)),
-        ))
+        .spawn_empty()
+        .apply_scene(bsn! {
+            @FeathersButton {
+                @caption: bsn! {
+                    Text::new(label)
+                    ThemedText
+                },
+            }
+            Node { flex_grow: 1.0 }
+            InheritableFont { font: {Handle::<Font>::default()} }
+        })
         .observe(
             |_ev: On<Activate>,
              mut form: ResMut<ServerEditForm>,
@@ -462,20 +487,26 @@ fn spawn_flavor_button(
     kind: AuthFlavorKind,
     current: AuthFlavorKind,
 ) {
+    let label = label.to_string();
     let variant = if kind == current {
         ButtonVariant::Primary
     } else {
         ButtonVariant::Normal
     };
     parent
-        .spawn((button_bundle(
-            ButtonBundleProps {
-                variant,
-                ..default()
-            },
-            FlavorButton(kind),
-            Spawn((Text::new(label.to_string()), ThemedText)),
-        ),))
+        .spawn_empty()
+        .apply_scene(bsn! {
+            @FeathersButton {
+                @variant: variant,
+                @caption: bsn! {
+                    Text::new(label.clone())
+                    ThemedText
+                },
+            }
+            Node { flex_grow: 1.0 }
+            InheritableFont { font: {Handle::<Font>::default()} }
+        })
+        .insert(FlavorButton(kind))
         .observe(
             move |_ev: On<Activate>,
                   mut form: ResMut<ServerEditForm>,
@@ -494,15 +525,21 @@ fn spawn_ver_lock_button(
     value: Option<u8>,
     current: Option<u8>,
 ) {
+    let label = label.to_string();
     parent
-        .spawn((button_bundle(
-            ButtonBundleProps {
-                variant: chip_variant(value == current),
-                ..default()
-            },
-            VerLockButton(value),
-            Spawn((Text::new(label.to_string()), ThemedText)),
-        ),))
+        .spawn_empty()
+        .apply_scene(bsn! {
+            @FeathersButton {
+                @variant: chip_variant(value == current),
+                @caption: bsn! {
+                    Text::new(label.clone())
+                    ThemedText
+                },
+            }
+            Node { flex_grow: 1.0 }
+            InheritableFont { font: {Handle::<Font>::default()} }
+        })
+        .insert(VerLockButton(value))
         .observe(move |_ev: On<Activate>, mut form: ResMut<ServerEditForm>| {
             form.ver_lock = value;
         });
@@ -514,16 +551,22 @@ fn spawn_preferred_client_button(
     value: Option<String>,
     current: Option<&str>,
 ) {
+    let label = label.to_string();
     let selected = value.as_deref() == current;
     parent
-        .spawn((button_bundle(
-            ButtonBundleProps {
-                variant: chip_variant(selected),
-                ..default()
-            },
-            PreferredClientButton(value.clone()),
-            Spawn((Text::new(label.to_string()), ThemedText)),
-        ),))
+        .spawn_empty()
+        .apply_scene(bsn! {
+            @FeathersButton {
+                @variant: chip_variant(selected),
+                @caption: bsn! {
+                    Text::new(label.clone())
+                    ThemedText
+                },
+            }
+            Node { flex_grow: 1.0 }
+            InheritableFont { font: {Handle::<Font>::default()} }
+        })
+        .insert(PreferredClientButton(value.clone()))
         .observe(move |_ev: On<Activate>, mut form: ResMut<ServerEditForm>| {
             form.preferred_client = value.clone();
         });

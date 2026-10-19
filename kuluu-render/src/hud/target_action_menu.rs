@@ -1,4 +1,7 @@
+use bevy::picking::events::PointerPress;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::ui_widgets::Button;
 
 use crate::hud::action_model::{ActionEntry, ActionEntryKind, TargetActionId};
 use crate::hud::overlay::ActiveOverlay;
@@ -115,6 +118,7 @@ fn spawn_target_action_rows(p: &mut ChildSpawnerCommands) {
         p.spawn((
             TargetActionRow { slot },
             Button,
+            Hovered::default(),
             Node::default(),
             Text::new(""),
             style::text_font(13.0),
@@ -353,7 +357,7 @@ pub fn update_target_action_menu(
 pub fn target_action_mouse_hover_system(
     mut mode: ResMut<InputMode>,
     overlay: Res<ActiveOverlay>,
-    rows: Query<(&Interaction, &TargetActionRow), Changed<Interaction>>,
+    rows: Query<(&Hovered, &TargetActionRow), Changed<Hovered>>,
 ) {
     let limit = entry_count(&mode, &overlay);
     let InputMode::TargetAction(state) = &mut *mode else {
@@ -366,10 +370,7 @@ pub fn target_action_mouse_hover_system(
     let start = viewport_start(limit, state.cursor);
     for (interaction, row) in &rows {
         let idx = start + row.slot;
-        if matches!(interaction, Interaction::Hovered | Interaction::Pressed)
-            && idx < limit
-            && state.cursor != idx
-        {
+        if interaction.0 && idx < limit && state.cursor != idx {
             state.cursor = idx;
         }
     }
@@ -378,9 +379,12 @@ pub fn target_action_mouse_hover_system(
 pub fn target_action_mouse_click_system(
     mode: Res<InputMode>,
     overlay: Res<ActiveOverlay>,
-    rows: Query<(&Interaction, &TargetActionRow), Changed<Interaction>>,
+    rows: Query<&TargetActionRow>,
     mut out: MessageWriter<TargetActionActivated>,
+    mut presses: MessageReader<PointerPress>,
+    parents: Query<&ChildOf>,
 ) {
+    let pressed_rows = super::primary_pressed_rows(&mut presses, &rows, &parents);
     let limit = entry_count(&mode, &overlay);
     let InputMode::TargetAction(state) = &*mode else {
         return;
@@ -389,9 +393,9 @@ pub fn target_action_mouse_click_system(
         return;
     }
     let start = viewport_start(limit, state.cursor);
-    for (interaction, row) in &rows {
+    for row in pressed_rows {
         let idx = start + row.slot;
-        if *interaction == Interaction::Pressed && idx < limit {
+        if idx < limit {
             out.write(TargetActionActivated { slot: idx });
         }
     }

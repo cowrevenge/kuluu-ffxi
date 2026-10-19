@@ -1437,6 +1437,11 @@ mod tests {
 
     fn screen_app() -> App {
         let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            bevy::scene::ScenePlugin,
+        ));
         app.insert_resource(ServerInfo {
             server: "127.0.0.1".into(),
             profile_name: None,

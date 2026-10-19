@@ -14,8 +14,11 @@
 //! parented over a ware list and a per-side confirm box modelled here.
 
 use bevy::input::mouse::MouseWheel;
+use bevy::picking::events::PointerPress;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
+use bevy::ui_widgets::Button;
 use kuluu_snapshot::{SceneSnapshot, ShopItem, ShopSale};
 
 use crate::hud::bazaar_view::{group_digits, item_name};
@@ -540,6 +543,7 @@ pub(crate) fn spawn_shop_panel(mut commands: Commands, mut images: ResMut<Assets
                                         slot: i,
                                     },
                                     Button,
+                                    Hovered::default(),
                                     list_view::row_node(),
                                 ))
                                 .with_children(|row| {
@@ -597,6 +601,7 @@ pub(crate) fn spawn_shop_panel(mut commands: Commands, mut images: ResMut<Assets
                         dock.spawn((
                             ShopText(ShopTextRole::MenuRow(i)),
                             Button,
+                            Hovered::default(),
                             ShopHotRow {
                                 region: ShopRegion::Menu,
                                 slot: i,
@@ -638,6 +643,7 @@ pub(crate) fn spawn_shop_panel(mut commands: Commands, mut images: ResMut<Assets
                         g.spawn((
                             ShopText(ShopTextRole::ConfirmChoice(yes)),
                             Button,
+                            Hovered::default(),
                             ShopHotRow {
                                 region: ShopRegion::Confirm,
                                 slot,
@@ -913,7 +919,7 @@ pub(crate) fn record_shop_appraisals(state: Res<SceneState>, mut screen: ResMut<
 pub(crate) fn shop_mouse_hover_system(
     state: Res<SceneState>,
     mut screen: ResMut<ShopScreenState>,
-    hot: Query<(&Interaction, &ShopHotRow), Changed<Interaction>>,
+    hot: Query<(&Hovered, &ShopHotRow), Changed<Hovered>>,
 ) {
     if !shop_open(&state, &screen) {
         return;
@@ -921,7 +927,7 @@ pub(crate) fn shop_mouse_hover_system(
     let len = rows_for(screen.mode, &state.snapshot).len();
     let start = screen.viewport.start;
     for (interaction, row) in &hot {
-        if !matches!(interaction, Interaction::Hovered | Interaction::Pressed) {
+        if !interaction.0 {
             continue;
         }
         match (row.region, screen.focus) {
@@ -948,14 +954,17 @@ pub const CONFIRM_YES_SLOT: usize = 0;
 pub(crate) fn shop_mouse_click_system(
     state: Res<SceneState>,
     screen: Res<ShopScreenState>,
-    hot: Query<(&Interaction, &ShopHotRow), Changed<Interaction>>,
+    hot: Query<&ShopHotRow>,
     mut out: MessageWriter<ShopRowActivated>,
+    mut presses: MessageReader<PointerPress>,
+    parents: Query<&ChildOf>,
 ) {
+    let pressed_rows = super::primary_pressed_rows(&mut presses, &hot, &parents);
     if !shop_open(&state, &screen) {
         return;
     }
-    for (interaction, row) in &hot {
-        if *interaction == Interaction::Pressed {
+    for row in pressed_rows {
+        {
             out.write(ShopRowActivated {
                 region: row.region,
                 slot: row.slot,

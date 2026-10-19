@@ -53,7 +53,26 @@ pub mod vana_clock;
 pub mod weather_icon;
 pub mod zone_flash;
 
+use bevy::picking::{events::PointerPress, pointer::PointerButton};
 use bevy::prelude::*;
+
+pub(crate) fn primary_pressed_rows<'a, T: Component>(
+    presses: &mut MessageReader<PointerPress>,
+    rows: &'a Query<&T>,
+    parents: &Query<&ChildOf>,
+) -> Vec<&'a T> {
+    let mut seen = bevy::platform::collections::HashSet::<Entity>::default();
+    presses
+        .read()
+        .filter(|press| press.button == PointerButton::Primary)
+        .filter_map(|press| {
+            std::iter::once(press.entity)
+                .chain(parents.iter_ancestors(press.entity))
+                .find_map(|entity| rows.get(entity).ok().map(|row| (entity, row)))
+        })
+        .filter_map(|(entity, row)| seen.insert(entity).then_some(row))
+        .collect()
+}
 
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct HudVerbosity {

@@ -8291,10 +8291,12 @@ pub fn spawn_status_detail_window(mut commands: Commands) {
     // coding stray surfaces/rows hidden — not a different fill alpha.
     let (mut node, bg, border) = style::window_frame();
     node.position_type = PositionType::Absolute;
-    // The same seat `update_status_detail_window` re-asserts: beside the stats column, hanging
-    // at the command bar's bottom-left anchor (2026-10-20 owner ruling, capture ur/29).
-    node.left = Val::Px(130.0);
-    node.top = Val::Px(crate::hud::menu_help_bar::help_line_bottom_left().y);
+    // The same seat `update_status_detail_window` re-asserts: hanging at the command bar's
+    // bottom-left anchor in BOTH axes - no magic constants to drift (2026-10-20 owner rulings,
+    // captures ur/29-30).
+    let corner = crate::hud::menu_help_bar::help_line_bottom_left();
+    node.left = Val::Px(corner.x);
+    node.top = Val::Px(corner.y);
     node.width = Val::Px(252.0);
     node.display = Display::None;
     commands
@@ -8546,16 +8548,14 @@ pub fn update_status_detail_window(
         node.top = Val::Px(frame.y);
         node.width = Val::Px(frame.width.max(120.0));
     } else {
-        const SIDE_X: f32 = 130.0;
         const SIDE_W: f32 = 252.0;
-        // The box hangs under the command bar at the very anchor `help_line_bottom_left()`
-        // publishes for such windows (bar top + height). A magic y of 48 sat it 6 px below
-        // that line - a visible gap nothing else wears, and the drift itself is why this kept
-        // reading wrong (owner ruling 2026-10-20, capture ur/29: "gap still too big... match
-        // the other windows" - about the BOX, not its words).
-        let side_y = crate::hud::menu_help_bar::help_line_bottom_left().y;
-        node.left = Val::Px(SIDE_X);
-        node.top = Val::Px(side_y);
+        // The box hangs under the command bar at the very corner `help_line_bottom_left()`
+        // publishes for such windows - x AND y from one anchor, never magic numbers. A lone y
+        // of 48 floated it 6 px down (ur/29), and keeping SIDE_X=130 left it 2 px off the
+        // column line every other window shares (ur/30: "still off by 2 pixels").
+        let corner = crate::hud::menu_help_bar::help_line_bottom_left();
+        node.left = Val::Px(corner.x);
+        node.top = Val::Px(corner.y);
         node.width = Val::Px(SIDE_W);
     }
     // A window whose visible rows count equals its DAT item-slot count draws each row at its
@@ -9704,13 +9704,11 @@ mod tests {
         // No install record readable here → the side-window fallback beside stats, hanging at
         // the command bar's bottom-left anchor - flush like every other window under that bar
         // (owner ruling 2026-10-20, capture ur/29).
+        let corner = crate::hud::menu_help_bar::help_line_bottom_left();
         assert_eq!(
             (left, top),
-            (
-                Val::Px(130.0),
-                Val::Px(crate::hud::menu_help_bar::help_line_bottom_left().y)
-            ),
-            "beside the stats column, over the Status-caption strip"
+            (Val::Px(corner.x), Val::Px(corner.y)),
+            "hangs at the command bar's bottom-left corner - one anchor, both axes"
         );
         assert_eq!(
             width,

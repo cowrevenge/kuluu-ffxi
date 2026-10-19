@@ -366,9 +366,9 @@ confirm the log tail ends with exit-watchdog checkpoints; the map side records t
 - Raw stdio credentials are positional; env vars feed only the interactive launcher, which blocks
   on `Username:`.
 - Coordinate swap bites twice — in commands *and* events, `y` is ground and `z` is vertical.
-- colima dead / one-way UDP / login stuck at "Authenticating": the VM slept and virtiofs went
-  stale → `colima restart`, then `docker start` the server containers. If login succeeds and map
-  traffic goes silent, check the stack's DNAT sidecar before theorising about the client.
+- If Colima or Docker is unavailable, follow [stack recovery](stack.md#recover-the-installed-runtime).
+  Diagnose the endpoint and workload ownership before restarting a shared runtime.
+  If login succeeds but map traffic stops, inspect UDP publication and forwarding before attributing the failure to the client.
 
 **Offscreen/pixel surfaces (§A–§C)**
 

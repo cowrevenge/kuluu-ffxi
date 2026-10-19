@@ -53,7 +53,7 @@ missing hook adapter from matching trusted project content and check its
 registration; do not execute hook or skill changes from an untrusted PR.
 
 ```
-1. Stack up      → scripts/lsb-stack.sh up   (references/stack.md: env gotchas)
+1. Stack up      → references/stack.md; select the runtime and start the stack
 2. Pick surface  → table below
 3. Drive + observe → references/drive-headless.md | references/drive-gui.md
                      (mechanical drive loops → haiku subagent, see below)
@@ -61,6 +61,15 @@ registration; do not execute hook or skill changes from an untrusted PR.
 5. Record it     → scripts/record-evidence.sh (feeds the stop-hook verify gate)
 6. Stack down    → scripts/lsb-stack.sh down (once nothing else needs it)
 ```
+
+## Stack availability
+
+Before reporting a Docker blocker, follow [stack startup, recovery, and provisioning](references/stack.md).
+Before startup, check runtime ownership and the selected Docker endpoint.
+Start stopped services, diagnose endpoint failures, and provision an isolated local stack when necessary and permitted.
+Preserve existing databases and unrelated workloads.
+After recovery, resume the affected client check before recording a pass.
+If recovery or provisioning remains blocked, retain the exact diagnostic and keep verification open.
 
 ## Picking the surface
 

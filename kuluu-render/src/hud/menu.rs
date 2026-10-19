@@ -5362,9 +5362,14 @@ pub fn dock_placement(
 }
 
 /// statcom2 sits exactly over the main menu's page 1 and configwi over its page 2, so either one
-/// hides the main menu under it.
+/// hides the main menu under it. ur/60 adds the Missions law ("missions should open a new child
+/// menu in the same place AS commands. (commands closes)") : when the missions list focuses,
+/// Commands does not linger beside it as an opener - the list takes its column.
 fn covers_main_menu(kind: MenuKind) -> bool {
-    matches!(kind, MenuKind::Status | MenuKind::RetailConfig)
+    matches!(
+        kind,
+        MenuKind::Status | MenuKind::RetailConfig | MenuKind::MissionList
+    )
 }
 
 /// Where one open window of the menu stack draws.
@@ -11076,8 +11081,8 @@ mod tests {
     }
 
     /// Windows with no side record keep the seats kuluu gave them: the focused one in the
-    /// column with its opener beside it, and Status and the Config hub alone because statcom2 and
-    /// configwi cover the main menu.
+    /// column with its opener beside it; Status, the Config hub, and the Missions list (ur/60)
+    /// alone - statcom2 and configwi cover the main menu, and Commands must close for missions.
     #[test]
     fn windows_without_a_side_record_keep_their_column_seats() {
         let frames = ConfigDatRows::default();
@@ -11113,6 +11118,17 @@ mod tests {
         assert_eq!(
             menu_stack_layout(&config, &frames).windows,
             vec![(1, MenuWindowSeat::Column)]
+        );
+
+        // ur/60 ("missions should open a new child menu in the same place AS commands.
+        // (commands closes)"): the missions list takes the column and Commands does not
+        // linger beside it as an opener.
+        let mut missions = MenuStack::root();
+        missions.push(MenuKind::MissionList);
+        assert_eq!(
+            menu_stack_layout(&missions, &frames).windows,
+            vec![(1, MenuWindowSeat::Column)],
+            "Commands closes; the Missions list wears its place"
         );
     }
 

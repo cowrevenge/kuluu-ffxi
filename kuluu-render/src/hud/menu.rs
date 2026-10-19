@@ -8594,7 +8594,44 @@ pub fn update_status_detail_window(
         // Owner ruling 2026-10-20 (ur/33): Job Levels is retail's TWO-COLUMN grid - the server
         // roster fills column one then runs to column two; it shares combat/magic's record slot
         // metrics (x 8 and 134, y start 19, pitch 14), first-half-left fill.
+        // Owner ruling 2026-10-20 (ur/38): the box fits those two columns - column two sits right
+        // behind column one's widest row and the frame closes just after it; nothing like the
+        // record width of air when the roster is short. Still never WIDER than the record.
+        let half = rows_len.div_ceil(2);
+        let col_w = |from: usize, to: usize| {
+            dynamic.rows[from..to]
+                .iter()
+                .map(|row| {
+                    crate::ui_font::text_width_px(row.label.as_str(), STATUS_DETAIL_ROW_FONT_PX)
+                })
+                .fold(0.0f32, f32::max)
+        };
         let (layout, height) = skill_window_layout(rows_len, true);
+        let layout = layout.map(|slots| {
+            let mut slots = slots;
+            for (i, slot) in slots.iter_mut().enumerate() {
+                let column = usize::from(i >= half);
+                slot.0 = if column == 0 {
+                    8
+                } else {
+                    // column two's left edge: one gutter past column one's widest row.
+                    (16.0 + col_w(0, half) + 12.0) as i16
+                };
+            }
+            slots
+        });
+        let wide = crate::ui_font::text_width_px(
+            menu_title(MenuKind::StatusDetail {
+                entry: u8::try_from(idx).unwrap_or(u8::MAX),
+            }),
+            STATUS_DETAIL_ROW_FONT_PX,
+        ) + 20.0;
+        let fit =
+            (16.0 + col_w(0, half) + 12.0 + col_w(half.min(rows_len), rows_len) + MENU_BORDER_PX)
+                .max(wide);
+        // The fit wins even where an install supplies the record frame: this branch is the
+        // fallback-drawn two-column mode itself, and its whole width is the dead air of ur/38.
+        node.width = Val::Px(fit.clamp(96.0, 252.0));
         (layout, Val::Px(height))
     } else if matches!(
         entry_kind,
@@ -9925,7 +9962,16 @@ mod tests {
         let (height, placed) = run(crate::hud::status_panel::StatusEntryKind::CombatSkill, 5);
         assert_eq!(height, Val::Px(64.0), "22 + 14 * ceil(5/2)");
         assert_eq!(placed.len(), 5);
-        assert_eq!((placed[3].1, placed[3].2), (Val::Px(133.0), Val::Px(18.0)));
+        // Owner ruling 2026-10-20 (ur/38): column two packs behind column one's widest row
+        // instead of the record's fixed x=134.
+        let Val::Px(col_two) = placed[3].1 else {
+            panic!("column two is placed at an explicit pixel");
+        };
+        assert!(
+            col_two > 50.0 && col_two < 120.0,
+            "column two packs against column one (ur/38), got {col_two}"
+        );
+        assert_eq!(placed[3].2, Val::Px(18.0));
         assert_eq!((placed[2].1, placed[2].2), (Val::Px(7.0), Val::Px(46.0)));
 
         let (height, placed) = run(crate::hud::status_panel::StatusEntryKind::CraftSkill, 4);
@@ -15768,9 +15814,10 @@ mod tests {
     }
 
     /// Owner ruling 2026-10-20 (ur/33): Job Levels draws retail's TWO-COLUMN grid without
-    /// waiting for a slot census - the roster fills column one, then runs to column two. Seven
-    /// jobs put rows 1-4 at x=8 and rows 5-7 at x=134 (minus the window's 1 px chrome border),
-    /// pitch 14, first row at y=19.
+    /// waiting for a slot census - the roster fills column one, then runs to column two, pitch
+    /// 14, first row at y=19. Owner ruling 2026-10-20 (ur/38): the box FITS those columns -
+    /// column two sits a gutter behind column one's widest row (not the record's fixed x=134),
+    /// and the frame closes right after column two instead of carrying dead air.
     #[test]
     fn job_levels_window_fills_two_columns_from_the_roster() {
         use crate::snapshot::SceneState;
@@ -15828,10 +15875,29 @@ mod tests {
             Val::Px(7.0),
             "row four still closes column one"
         );
-        assert_eq!(
-            (placed[4].1, placed[4].2),
-            (Val::Px(133.0), Val::Px(18.0)),
-            "row five runs over to column two"
+        let Val::Px(col_two) = placed[4].1 else {
+            panic!("column two is placed at an explicit pixel");
+        };
+        let widest_col_one = crate::ui_font::text_width_px("WAR 30", 13.0);
+        assert!(
+            (placed[4].2) == Val::Px(18.0),
+            "row five opens column two on the first grid line"
+        );
+        assert!(
+            col_two > widest_col_one + 7.0 && col_two < 133.0,
+            "column two packs against column one (ur/38), got {col_two}"
+        );
+        let frame_node = app
+            .world_mut()
+            .query_filtered::<&Node, With<StatusDetailWindow>>()
+            .single(app.world())
+            .expect("the detail window exists");
+        let Val::Px(frame_w) = frame_node.width else {
+            panic!("the fitted box carries an explicit pixel width");
+        };
+        assert!(
+            frame_w < 200.0,
+            "the Job Levels box hugs its two columns, no dead air (ur/38), got {frame_w}"
         );
     }
 

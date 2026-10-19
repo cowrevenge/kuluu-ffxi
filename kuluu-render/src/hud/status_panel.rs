@@ -1563,7 +1563,10 @@ pub fn status_detail_lines(
                     .filter(|(job_id, _)| *job_id != 0)
                     .filter(|(_, &level)| level > 0)
                     .map(|(job_id, &level)| {
-                        format!("{:<16} {}", job_abbrev(job_id as u8), level)
+                        // One space after the code (owner ruling 2026-10-20, ur/33: the old
+                        // `{:<16}` field was the "LARGE gap" - it overshot whole slots now that
+                        // rows sit in retail's two-column grid).
+                        format!("{:<4}{}", job_abbrev(job_id as u8), level)
                     })
                     .collect();
                 if lines.is_empty() {

@@ -622,10 +622,26 @@ fn dat_row_item_id(kind: MenuKind, cursor: usize) -> Option<i16> {
 }
 
 /// The help line the record gives the row under the cursor; `None` keeps kuluu's own line.
+/// DAT text is normalized to ONE line at this single choke point (owner ruling 2026-10-20,
+/// capture ur/33: "the top text is outside the box... all 4 have this error"): the four
+/// record-driven help sentences carry CR/LF padding in config.dat, and a multi-line hint drew
+/// below the bar's frame instead of inside it. Newlines become spaces; outer air is trimmed.
 fn dat_row_help(kind: MenuKind, cursor: usize, rows: &menu::ConfigDatRows) -> Option<String> {
     let item_id = dat_row_item_id(kind, cursor)?;
     rows.row_help(menu::registry_window(kind)?, item_id)
-        .map(str::to_string)
+        .map(|help| {
+            help.chars()
+                .map(|c| {
+                    if matches!(c, '\r' | '\n' | '\0') {
+                        ' '
+                    } else {
+                        c
+                    }
+                })
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
 }
 
 struct BarContent {
@@ -796,6 +812,27 @@ mod tests {
         assert_eq!(buff_bar_content(&snap, 9).unwrap().hint, "Protect");
         let empty = SceneSnapshot::default();
         assert!(buff_bar_content(&empty, 0).is_none());
+    }
+
+    /// Owner ruling 2026-10-20 (capture ur/33): all four record-driven help sentences arrived
+    /// with embedded newlines and drew below their bar box; `dat_row_help` collapses CR/LF/NUL
+    /// to spaces and trims, so a DAT string can never be multi-line.
+    #[test]
+    fn dat_row_help_collapses_record_newlines_to_one_line() {
+        use crate::hud::status_panel::STATCOM2_DISPLAY_ITEM_IDS;
+        let mut rows = menu::ConfigDatRows::default();
+        rows.row_help.insert(
+            menu::STATUS_SELECTOR_WINDOW.into(),
+            [(
+                STATCOM2_DISPLAY_ITEM_IDS[0],
+                "View all job levels achieved so far.\r\n\0  ".to_string(),
+            )]
+            .into(),
+        );
+        assert_eq!(
+            dat_row_help(MenuKind::Status, 0, &rows).as_deref(),
+            Some("View all job levels achieved so far.")
+        );
     }
 
     /// Help-line replacement law (bead kuluu-o9qt7.34): while the emote window's swap

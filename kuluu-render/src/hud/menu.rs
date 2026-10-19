@@ -8588,7 +8588,11 @@ pub fn update_status_detail_window(
         entry_kind,
         Some(crate::hud::status_panel::StatusEntryKind::CombatSkill)
             | Some(crate::hud::status_panel::StatusEntryKind::MagicSkill)
+            | Some(crate::hud::status_panel::StatusEntryKind::JobLevels)
     ) {
+        // Owner ruling 2026-10-20 (ur/33): Job Levels is retail's TWO-COLUMN grid - the server
+        // roster fills column one then runs to column two; it shares combat/magic's record slot
+        // metrics (x 8 and 134, y start 19, pitch 14), first-half-left fill.
         let (layout, height) = skill_window_layout(rows_len, true);
         (layout, Val::Px(height))
     } else if matches!(
@@ -15758,6 +15762,68 @@ mod tests {
                 Val::Px(60.0),
                 Val::Px(f32::from(PROFILE_FRAME.2))
             )
+        );
+    }
+
+    /// Owner ruling 2026-10-20 (ur/33): Job Levels draws retail's TWO-COLUMN grid without
+    /// waiting for a slot census - the roster fills column one, then runs to column two. Seven
+    /// jobs put rows 1-4 at x=8 and rows 5-7 at x=134 (minus the window's 1 px chrome border),
+    /// pitch 14, first row at y=19.
+    #[test]
+    fn job_levels_window_fills_two_columns_from_the_roster() {
+        use crate::snapshot::SceneState;
+
+        let mut app = App::new();
+        app.init_resource::<GraphicsSettings>()
+            .init_resource::<crate::hud::HudPanels>()
+            .init_resource::<NetStatusVisible>()
+            .init_resource::<SceneState>()
+            .init_resource::<DynamicMenu>()
+            .init_resource::<ConfigDatRows>();
+        #[cfg(not(target_arch = "wasm32"))]
+        app.init_resource::<crate::audio::AudioMuteState>();
+        let job_idx = crate::hud::status_panel::STATUS_ENTRIES
+            .iter()
+            .position(|e| e.kind == crate::hud::status_panel::StatusEntryKind::JobLevels)
+            .expect("Job Levels is a Status row") as u8;
+        {
+            let mut d = app.world_mut().resource_mut::<DynamicMenu>();
+            d.rows = ["WAR 30", "MNK 1", "WHM 1", "BLM 1", "RDM 1", "THF 1", "BST 1"]
+                .into_iter()
+                .map(|label| DynamicMenuRow {
+                    tint: None,
+                    label: label.to_string(),
+                    action: DynamicMenuAction::DisplayInfo,
+                })
+                .collect();
+        }
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        stack.push(MenuKind::StatusDetail { entry: job_idx });
+        app.insert_resource(InputMode::Menu(stack));
+        app.add_systems(Startup, spawn_status_detail_window);
+        app.add_systems(Update, update_status_detail_window);
+        app.update();
+        app.update();
+
+        let mut placed: Vec<(usize, Val, Val)> = app
+            .world_mut()
+            .query::<(&StatusDetailLine, &Node)>()
+            .iter(app.world())
+            .filter(|(_, n)| {
+                n.display != Display::None && n.position_type == PositionType::Absolute
+            })
+            .map(|(line, n)| (line.slot, n.left, n.top))
+            .collect();
+        placed.sort_by_key(|(slot, _, _)| *slot);
+        assert_eq!(placed.len(), 7, "every roster row is placed on the grid");
+        // Column one takes rows 1-4 (first-half-left fill); column two starts at row 5.
+        assert_eq!((placed[0].1, placed[0].2), (Val::Px(7.0), Val::Px(18.0)));
+        assert_eq!(placed[3].1, Val::Px(7.0), "row four still closes column one");
+        assert_eq!(
+            (placed[4].1, placed[4].2),
+            (Val::Px(133.0), Val::Px(18.0)),
+            "row five runs over to column two"
         );
     }
 

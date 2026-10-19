@@ -19,6 +19,28 @@ Session behavior requires a real session against the server; cosmetic widgets
 can use the production fixture described below. Tests and source inspection
 alone do not establish the visible result.
 
+## Required behavior evidence
+
+Before collection, derive the required cases from the reported problem and the final change.
+Record each case in the bead with its configuration, trigger, expected result, and required evidence.
+Include the reported failure, the intended successful operation, and affected behavior that must continue to work.
+
+For compatibility claims, use a real server or device that supports the advertised configuration.
+Record the server revision, client build, protocol, version, and effective settings as applicable.
+An incompatible server's rejection verifies rejection handling only.
+It cannot establish successful operation with the supported configuration.
+For example, Binary `1.1.5` support requires successful authentication against a legacy LSB server that accepts that version.
+Verify the returned ticket through the real lobby when claiming a usable login.
+JSON login against current LSB and local TLS fixtures cannot replace that check.
+
+Compare the collected evidence with every required case before recording the overall verdict.
+Record a pass only when all required cases have sufficient evidence.
+Keep partial results separate from the overall verdict.
+If a required case fails, correct the defect and repeat that case.
+If a concrete blocker prevents collection, record blocked and keep the bead open.
+State the exact missing case and its diagnostic.
+Do not recommend merge while a decisive case remains unverified.
+
 For UI work, choose the drive and expected visible result before editing.
 Completion requires the changed build, an affected-view capture, and opening
 that capture with `view_image` (Codex) or `Read` (Claude) to inspect the pixels.

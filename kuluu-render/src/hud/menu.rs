@@ -8326,20 +8326,19 @@ pub fn spawn_status_detail_window(mut commands: Commands) {
                 },
                 BackgroundColor(theme::FRAME_BG),
             ));
+            // Owner ruling 2026-10-20 (ur/36): the word sits INSIDE the box at the row size, in
+            // the regular cut like every other line here - `update_status_detail_window` places it.
             w.spawn((
                 StatusDetailTitle,
                 Node {
                     position_type: PositionType::Absolute,
-                    top: Val::Px(-MENU_BORDER_PX),
+                    top: Val::ZERO,
                     left: Val::ZERO,
                     ..default()
                 },
-                // The word takes the oblique face, which `apply_ui_font` would stamp back to the
-                // regular cut.
-                crate::ui_font::KeepOwnFont,
                 Text::new(""),
                 text_nowrap(),
-                style::text_font(MENU_TITLE_FONT_PX),
+                style::text_font(STATUS_DETAIL_ROW_FONT_PX),
                 TextColor(theme::TITLE),
             ));
             for slot in 0..MAX_ENTRY_COUNT {
@@ -8426,7 +8425,9 @@ pub fn update_status_detail_window(
     dat_root: Option<Res<crate::dat_root::SharedDatRoot>>,
     mut config_rows: ResMut<ConfigDatRows>,
     // Optional only so the window-level tests keep running this system; a front end always has it.
-    italic_font: Option<Res<crate::ui_font::UiFontItalic>>,
+    // Details wear their name in the REGULAR cut at row size (owner ruling 2026-10-20, ur/36),
+    // so this is the same face every other text in the box draws with - not the selector's italic.
+    ui_font: Option<Res<crate::ui_font::UiFont>>,
     mut frame_q: Query<&mut Node, With<StatusDetailWindow>>,
     // The caption band's two parts in one pass: whichever node also carries the Text is the word.
     mut band_q: Query<
@@ -8612,13 +8613,10 @@ pub fn update_status_detail_window(
     // Owner ruling 2026-10-19: the title belongs in the bar across the top of the screen (the help
     // line reads `Title: <worn title>`), not on this window's own border. Profile keeps no caption
     // there at all, because its first row inside the box is the `Profile` header itself.
-    // Owner ruling 2026-10-20 (ur/34-35): Job Levels wears ITS OWN name INSIDE the box, like
-    // Profile's header - never a word straddling the top border and no mask strip at all - which
-    // also eats the band's air that read as "way too much padding on top".
-    let title_inside_box = matches!(
-        entry_kind,
-        Some(crate::hud::status_panel::StatusEntryKind::JobLevels)
-    );
+    // Owner ruling 2026-10-20 (ur/34-36): EVERY detail child menu wears its name INSIDE the box,
+    // same size as the rest of that box - never a word straddling the top border, no mask strip
+    // at all - which also eats the band's air that read as "way too much padding on top". The
+    // Status selector pane itself keeps its own treatment; only these child menus changed.
     let want_title = match entry_kind {
         Some(crate::hud::status_panel::StatusEntryKind::Profile) => String::new(),
         _ => menu_title(MenuKind::StatusDetail {
@@ -8652,76 +8650,58 @@ pub fn update_status_detail_window(
     if node.display != Display::Flex {
         node.display = Display::Flex;
     }
-    // The caption band, placed from the width this system just pinned, so it never waits a frame for
-    // layout to measure. Same law as `place_menu_title_bands` gives the selector pane.
     let outer_width = match node.width {
         Val::Px(width) => width,
         _ => 0.0,
     };
-    let (title_left, mask_left, mask_width, band_top) = title_band(
-        outer_width,
-        crate::ui_font::text_width_px(&want_title, MENU_TITLE_FONT_PX),
-    );
     // In-box caption: same x as the first column of rows once the chrome border is subtracted
     // (slot x 8 - 1), three px below the padding edge. The frame line stays whole behind it.
     const INBOX_TITLE_LEFT_PX: f32 = 6.0;
     const INBOX_TITLE_TOP_PX: f32 = 3.0;
-    let italic_face = italic_font
-        .as_ref()
-        .filter(|face| face.0 != Handle::default())
-        .map(|face| bevy::text::FontSource::Handle(face.0.clone()));
-    // Nothing to write means no band: a bare strip floating on the frame line is worse than the
-    // plain border.
-    let want_band = if want_title.is_empty() {
+    // Nothing to write means no word at all (Profile's header is a row inside the box).
+    let inbox_word = if want_title.is_empty() {
         Display::None
     } else {
         Display::Flex
     };
     for (mut band_node, title_text, title_font) in band_q.iter_mut() {
-        if band_node.display != want_band {
-            band_node.display = want_band;
+        let Some(mut text) = title_text else {
+            // The mask strip: details keep the frame line whole now, so it never draws.
+            if band_node.display != Display::None {
+                band_node.display = Display::None;
+            }
+            continue;
+        };
+        if band_node.display != inbox_word {
+            band_node.display = inbox_word;
         }
-        if title_text.is_some() {
-            if let Some(mut text) = title_text {
-                if text.as_str() != want_title.as_str() {
-                    **text = want_title.clone();
+        if text.as_str() != want_title.as_str() {
+            **text = want_title.clone();
+        }
+        // The regular cut, at the size the rows in this box draw (owner ruling ur/36: "make teh
+        // font same size as rest of the box") - only once the face exists, so a front end that
+        // spawned before font loading never draws tofu.
+        if let Some(mut face) = title_font {
+            if let Some(ui_font) = ui_font.as_ref().filter(|f| f.0 != Handle::default()) {
+                let source = bevy::text::FontSource::Handle(ui_font.0.clone());
+                if face.font != source {
+                    face.font = source;
                 }
             }
-            if let (Some(mut face), Some(source)) = (title_font, &italic_face) {
-                if face.font != *source {
-                    face.font = source.clone();
-                }
+            let want_size = bevy::text::FontSize::Px(STATUS_DETAIL_ROW_FONT_PX);
+            if face.font_size != want_size {
+                face.font_size = want_size;
             }
-            if title_inside_box {
-                // In-box: absolute below the padding edge; no centering, no band-top math.
-                let (inbox_left, inbox_top) =
-                    (Val::Px(INBOX_TITLE_LEFT_PX), Val::Px(INBOX_TITLE_TOP_PX));
-                if band_node.left != inbox_left {
-                    band_node.left = inbox_left;
-                }
-                if band_node.top != inbox_top {
-                    band_node.top = inbox_top;
-                }
-                continue;
-            }
-            if band_node.top != band_top {
-                band_node.top = band_top;
-            }
-            if band_node.left != title_left {
-                band_node.left = title_left;
-            }
-        } else {
-            // The strip belongs on the frame line itself, one border above the padding edge.
-            let strip_top = Val::Px(-MENU_BORDER_PX);
-            if band_node.top != strip_top {
-                band_node.top = strip_top;
-            }
-            if band_node.left != mask_left {
-                band_node.left = mask_left;
-            }
-            if band_node.width != mask_width {
-                band_node.width = mask_width;
-            }
+        }
+        if band_node.position_type != PositionType::Absolute {
+            band_node.position_type = PositionType::Absolute;
+        }
+        let (inbox_left, inbox_top) = (Val::Px(INBOX_TITLE_LEFT_PX), Val::Px(INBOX_TITLE_TOP_PX));
+        if band_node.left != inbox_left {
+            band_node.left = inbox_left;
+        }
+        if band_node.top != inbox_top {
+            band_node.top = inbox_top;
         }
     }
     for (line, mut text, mut line_node) in line_q.iter_mut() {

@@ -5490,9 +5490,27 @@ pub const GRAPHICS_PANE_WIDTH: f32 = 320.0;
 fn pane_width_for(kind: MenuKind) -> f32 {
     match kind {
         MenuKind::Config | MenuKind::Graphics | MenuKind::GraphicsDlss => GRAPHICS_PANE_WIDTH,
+        // ur/59 ("the 3 command menus are too wide, make them same size as status"):
+        // all three Commands pages take literally the Status selector's box width,
+        // not the standard column.
+        MenuKind::Root => status_pane_width(),
         MenuKind::Status => status_pane_width(),
         _ => MENU_PANE_WIDTH,
     }
+}
+
+/// The box hugs its longest row: cursor costs two characters, chrome padding the rest,
+/// clamped by the standard column - it only ever narrows a menu (the Status law of
+/// 2026-10-19, shared by Commands per ur/59).
+fn fit_pane_width(labels: &[&str]) -> f32 {
+    let cursor_px = crate::ui_font::text_width_px("> ", MENU_ROW_FONT_PX);
+    let widest_row = labels
+        .iter()
+        .map(|label| crate::ui_font::text_width_px(label, MENU_ROW_FONT_PX))
+        .fold(0.0f32, f32::max);
+    (widest_row + cursor_px + 2.0 * style::WINDOW_PAD_X_PX)
+        .ceil()
+        .min(MENU_PANE_WIDTH)
 }
 
 /// The Status selector takes the width its own longest row needs rather than kuluu's standard
@@ -5501,14 +5519,7 @@ fn pane_width_for(kind: MenuKind) -> f32 {
 /// "the whole box has extra space on the right side"). The cursor costs two more characters. Clamped
 /// by the standard column, so this only ever narrows a menu.
 fn status_pane_width() -> f32 {
-    let cursor_px = crate::ui_font::text_width_px("> ", MENU_ROW_FONT_PX);
-    let widest_row = STATUS_LABELS
-        .iter()
-        .map(|label| crate::ui_font::text_width_px(label, MENU_ROW_FONT_PX))
-        .fold(0.0f32, f32::max);
-    (widest_row + cursor_px + 2.0 * style::WINDOW_PAD_X_PX)
-        .ceil()
-        .min(MENU_PANE_WIDTH)
+    fit_pane_width(STATUS_LABELS)
 }
 
 /// Single-line rows: a wrapped row silently occupies two lines, which breaks
@@ -9896,7 +9907,9 @@ mod tests {
                 .next()
                 .expect("pane exists")
         };
-        assert_eq!(pane_width(&mut app), Val::Px(MENU_PANE_WIDTH));
+        // ur/59 ("the 3 command menus are too wide, make them same size as status"):
+        // the Commands pages take the Status selector's box.
+        assert_eq!(pane_width(&mut app), Val::Px(status_pane_width()));
 
         // Push Graphics on top: the pane retargets to the wide width.
         let mut stack = MenuStack::root();
@@ -9905,10 +9918,10 @@ mod tests {
         app.update();
         assert_eq!(pane_width(&mut app), Val::Px(GRAPHICS_PANE_WIDTH));
 
-        // Back on the root, it narrows again.
+        // Back on the root, it narrows to the Status selector's box again (ur/59).
         app.insert_resource(InputMode::Menu(MenuStack::root()));
         app.update();
-        assert_eq!(pane_width(&mut app), Val::Px(MENU_PANE_WIDTH));
+        assert_eq!(pane_width(&mut app), Val::Px(status_pane_width()));
 
         // Rows and title must never wrap: a wrapped row breaks the
         // DYNAMIC_VISIBLE_ROWS viewport math.

@@ -8652,9 +8652,12 @@ pub fn update_status_detail_window(
                 .max(wide);
         // The fit wins even where an install supplies the record frame: this branch is the
         // fallback-drawn two-column mode itself, and its whole width is the dead air of ur/38.
-        // Only when a roster actually draws - an empty window keeps its plain chrome box.
+        // Owner ruling 2026-10-20 (ur/42): the box gets the width the padded columns actually
+        // need - holding it to the old record's 252 cut Combat Skill's right-hand numbers under
+        // the frame. The cap is a screen-side bound now, not a content lie.
+        const ROSTER_FIT_MAX_PX: f32 = 460.0;
         if rows_len > 0 {
-            node.width = Val::Px(fit.clamp(96.0, 252.0));
+            node.width = Val::Px(fit.clamp(96.0, ROSTER_FIT_MAX_PX));
         }
         (layout, Val::Px(height))
     } else if matches!(
@@ -16014,6 +16017,16 @@ mod tests {
             frame_w < 200.0,
             "the Job Levels box hugs its two columns, no dead air (ur/38), got {frame_w}"
         );
+        // The drawn strings themselves reserve the two digit slots (ur/39-42): a single-digit
+        // level carries a leading pad so every number in the column ends on the same edge.
+        let mnk = app
+            .world_mut()
+            .query::<(&StatusDetailLine, &Text)>()
+            .iter(app.world())
+            .map(|(_, t)| t.0.clone())
+            .find(|t| t.starts_with("MNK"))
+            .expect("the MNK row is drawn");
+        assert_eq!(mnk, "MNK  1", "two digit slots always reserved (ur/39)");
     }
 
     /// Owner ruling 2026-10-20 (ur/41): roster columns put the name flush left, only invisible

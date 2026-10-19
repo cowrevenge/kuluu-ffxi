@@ -8982,14 +8982,43 @@ fn pad_numbers_column(rows: &[DynamicMenuRow], from: usize, to: usize) -> Vec<St
         .max()
         .unwrap_or(0)
         .max(2);
-    // The shared right edge in chars: the widest stem plus its gap plus its digits wins
-    // (the parens ride along outside it, so craft's `)`s line up too).
+    // Craft rows are THREE real columns (owner ruling 2026-10-20, ur/47: "spacing is shit..
+    // needs 3 real columns") - name column padded to its widest entry, the rank word starting
+    // a fixed second column after it, and `(level)` right-aligned as the third. The stem splits
+    // at its last whitespace into (name, rank).
+    fn split_rank(stem: &str) -> (&str, &str) {
+        match stem.rfind(char::is_whitespace) {
+            Some(p) => {
+                let r = stem[p + 1..].trim_start();
+                (&stem[..p], r)
+            }
+            None => (stem, ""),
+        }
+    }
+    let name_w = (from..to)
+        .filter_map(|k| split_num(rows[k].label.as_str()))
+        .filter(|(_, _, paren)| *paren)
+        .map(|(stem, _, _)| split_rank(stem.as_str()).0.chars().count())
+        .max()
+        .unwrap_or(0);
+    let rank_w = (from..to)
+        .filter_map(|k| split_num(rows[k].label.as_str()))
+        .filter(|(_, _, paren)| *paren)
+        .map(|(stem, _, _)| split_rank(stem.as_str()).1.chars().count())
+        .max()
+        .unwrap_or(0);
+    // Shared right edge: plain rows keep the old rule (widest stem + gap + digits); craft's
+    // three-column structure sets its own edge when it is present.
     let edge = (from..to).fold(0usize, |acc, k| {
         let Some((stem, num, paren)) = split_num(rows[k].label.as_str()) else {
             return acc;
         };
-        let tail = num.chars().count().max(digit_w) + usize::from(paren) * 2;
-        acc.max(stem.chars().count() + 1 + tail)
+        if paren {
+            let three = name_w + 1 + rank_w + 1 + num.chars().count().max(digit_w) + 2;
+            acc.max(three)
+        } else {
+            acc.max(stem.chars().count() + 1 + num.chars().count().max(digit_w))
+        }
     });
     (from..to)
         .map(|k| {
@@ -8998,11 +9027,16 @@ fn pad_numbers_column(rows: &[DynamicMenuRow], from: usize, to: usize) -> Vec<St
                 return label.to_string();
             };
             let token_w = num.chars().count().max(digit_w);
-            let parens = usize::from(paren) * 2;
-            let gap = (edge - stem.chars().count() - token_w - parens).max(1);
             if paren {
-                format!("{stem}{}({num:>token_w$})", " ".repeat(gap))
+                let (name, rank) = split_rank(stem.as_str());
+                let gap = (edge - name_w - 1 - rank.chars().count() - token_w - 2).max(1);
+                format!(
+                    "{:<name_w$} {rank}{}({num:>token_w$})",
+                    name,
+                    " ".repeat(gap)
+                )
             } else {
+                let gap = (edge - stem.chars().count() - token_w).max(1);
                 format!("{stem}{}{num:>token_w$}", " ".repeat(gap))
             }
         })
@@ -16105,7 +16139,9 @@ mod tests {
         // inside them keep the two-slot minimum.
         let craft = vec![row("Fishing Amateur (7)"), row("Bonecraft Journeyman (10)")];
         let padded = pad_column_numbers(&craft);
-        assert_eq!(padded[0], "Fishing Amateur      ( 7)");
+        // Three real columns: names padded to the widest, ranks starting one fixed column
+        // after it, `(level)` right-aligned at the shared edge.
+        assert_eq!(padded[0], "Fishing   Amateur    ( 7)");
         assert_eq!(padded[1], "Bonecraft Journeyman (10)");
     }
 

@@ -8545,10 +8545,15 @@ pub fn update_status_detail_window(
         node.width = Val::Px(frame.width.max(120.0));
     } else {
         const SIDE_X: f32 = 130.0;
-        const SIDE_Y: f32 = 48.0;
         const SIDE_W: f32 = 252.0;
+        // The box hangs under the command bar at the very anchor `help_line_bottom_left()`
+        // publishes for such windows (bar top + height). A magic y of 48 sat it 6 px below
+        // that line - a visible gap nothing else wears, and the drift itself is why this kept
+        // reading wrong (owner ruling 2026-10-20, capture ur/29: "gap still too big... match
+        // the other windows" - about the BOX, not its words).
+        let side_y = crate::hud::menu_help_bar::help_line_bottom_left().y;
         node.left = Val::Px(SIDE_X);
-        node.top = Val::Px(SIDE_Y);
+        node.top = Val::Px(side_y);
         node.width = Val::Px(SIDE_W);
     }
     // A window whose visible rows count equals its DAT item-slot count draws each row at its

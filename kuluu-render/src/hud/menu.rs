@@ -16204,7 +16204,7 @@ mod tests {
             row("Parrying 140"),
             row("(no such skill yet)"),
         ];
-        let padded = pad_column_numbers(&rows);
+        let padded = pad_numbers_column(&rows, 0, rows.len(), None);
         // Widest stem (Hand-to-Hand, 12) + a gap + the widest digits (3) sets the edge at 16.
         assert_eq!(
             padded[0], "Hand-to-Hand   0",
@@ -16228,7 +16228,7 @@ mod tests {
         // Craft's `(level)` group right-aligns too (ur/45): parens share the edge, digits
         // inside them keep the two-slot minimum.
         let craft = vec![row("Fishing Amateur (7)"), row("Bonecraft Journeyman (10)")];
-        let padded = pad_column_numbers(&craft);
+        let padded = pad_numbers_column(&craft, 0, craft.len(), None);
         // Three real columns: names padded to the widest, ranks starting one fixed column
         // after it, `(level)` right-aligned at the shared edge.
         // No pad inside the parens; the `)`s carry the right alignment instead (ur/49).

@@ -1564,9 +1564,10 @@ pub fn status_detail_lines(
                     .filter(|(_, &level)| level > 0)
                     .map(|(job_id, &level)| {
                         // One space after the code (owner ruling 2026-10-20, ur/33: the old
-                        // `{:<16}` field was the "LARGE gap" - it overshot whole slots now that
-                        // rows sit in retail's two-column grid).
-                        format!("{:<4}{}", job_abbrev(job_id as u8), level)
+                        // `{:<16}` field was the "LARGE gap"), and the level reserves TWO digit
+                        // slots always (owner ruling 2026-10-20, ur/39: "lets assume 2 digits
+                        // always for space") so single-digit levels keep column two steady.
+                        format!("{:<4}{:>2}", job_abbrev(job_id as u8), level)
                     })
                     .collect();
                 if lines.is_empty() {
@@ -1743,46 +1744,14 @@ pub fn skill_detail_rows(
         }
     }
 
-    // Two columns means the entries pair up, left column first (retail walks its
-    // array by column: `.text 0x1485FA` adds the 14px pitch only on every other
-    // entry, and the height law counts ceil(n/2) rows).
-    let columns = family.columns();
-    if columns == 1 {
-        return visible
-            .into_iter()
-            .map(|(text, capped)| SkillDetailRow { text, capped })
-            .collect();
-    }
-    let rows = visible.len().div_ceil(columns);
-    let left_width = visible
-        .iter()
-        .take(rows)
-        .map(|(t, _)| t.chars().count())
-        .max()
-        .unwrap_or(0);
-    (0..rows)
-        .map(|row| {
-            let left = &visible[row];
-            let right = visible.get(row + rows);
-            match right {
-                // One text node per display line, so the blue-paint flag is the pair's:
-                // a bit-15 word in either column lights kuluu's whole row (retail tints
-                // each entry — `.text 0x148564`; merged-line honesty).
-                Some((right_text, right_capped)) => SkillDetailRow {
-                    text: format!(
-                        "{:<left_width$}  {}",
-                        left.0,
-                        right_text,
-                        left_width = left_width + 2
-                    ),
-                    capped: left.1 || *right_capped,
-                },
-                None => SkillDetailRow {
-                    text: left.0.clone(),
-                    capped: left.1,
-                },
-            }
-        })
+    // One row PER ENTRY (owner ruling 2026-10-20, ur/40): combat/magic get the same two-column
+    // treatment Job Levels gets - `update_status_detail_window` splits the roster across packed,
+    // fitted columns (first-half-left) rather than the old merged pair-lines, which sprawled off
+    // a fitted box. The blue-paint flag stays per entry (retail tints each entry, `.text 0x148564`).
+    let _columns = family.columns();
+    visible
+        .into_iter()
+        .map(|(text, capped)| SkillDetailRow { text, capped })
         .collect()
 }
 
@@ -2777,9 +2746,10 @@ mod tests {
 
     /// Combat and magic share one encoding: a word equal to the hidden sentinel is
     /// not drawn at all, a bit-15 word keeps its level (only its colour changes), and
-    /// two columns means `ceil(n/2)` lines.
+    /// (owner ruling 2026-10-20, ur/40) each ENTRY is its own row - like Job Levels - so the
+    /// window's packed two-column grid can place them; pairing into merged lines sprawled.
     #[test]
-    fn noncraft_skill_window_applies_the_word_law_and_pairs_columns() {
+    fn noncraft_skill_window_applies_the_word_law_one_row_per_entry() {
         use ffxi_proto::decode::CharSkillLevels;
         let snap = snap_with_skills(
             &[
@@ -2792,39 +2762,40 @@ mod tests {
         );
 
         let rows = skill_detail_rows(&snap, SkillFamily::Noncraft(1..=4));
-        // Id 2 is the sentinel and drops out first, so three visible ids pair into
-        // two lines with ids 3 and 4 landing as the right column.
-        assert_eq!(rows.len(), 2);
-        let left_of_line1 = rows[0]
-            .text
-            .split_whitespace()
-            .take(2)
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert_eq!(left_of_line1, "Hand-to-Hand 301", "{}", rows[0].text);
-        assert!(rows[0].text.contains(' '), "two columns on one line");
+        // Id 2 is the sentinel and drops out; the three remaining ids each get a row.
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows[0].text.starts_with("Hand-to-Hand") && rows[0].text.contains("301"),
+            "{}",
+            rows[0].text
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.text.contains("Hand") && r.text.contains("Club")),
+            "no merged pair-lines anymore (ur/40)"
+        );
 
         // The capped word is drawn with its level and flagged for the blue paint.
         let capped = skill_detail_rows(&snap, SkillFamily::Noncraft(3..=4));
-        assert_eq!(capped.len(), 1);
-        assert!(capped[0].capped, "bit-15 marks a capped row");
-        assert!(
-            capped[0].text.contains("125") && capped[0].text.contains("88"),
-            "both levels survive on one line: {}",
-            capped[0].text
-        );
+        assert_eq!(capped.len(), 2);
+        assert!(capped[0].capped, "bit-15 marks its own row");
+        assert!(!capped[1].capped, "the plain entry keeps a clear flag");
     }
 
-    /// One text node per display line means a right-column bit-15 word lights the
-    /// whole row's blue paint too (retail tints each entry; kuluu merged the pair).
+    /// Retail tints EACH entry: with one row per entry (ur/40) a bit-15 word flags its
+    /// own row and only that one.
     #[test]
-    fn a_right_column_capped_word_lights_its_display_row() {
+    fn a_capped_word_flags_only_its_own_entry_row() {
         use ffxi_proto::decode::CharSkillLevels;
         let snap = snap_with_skills(&[(4, 88), (5, CharSkillLevels::SKILL_CAP_BIT | 140)], false);
         let rows = skill_detail_rows(&snap, SkillFamily::Noncraft(4..=5));
-        assert_eq!(rows.len(), 1);
-        assert!(!rows[0].text.contains("301"), "range starts at id 4");
-        assert!(rows[0].capped, "right-column bit-15 propagates");
+        assert_eq!(rows.len(), 2);
+        assert!(
+            !rows[0].capped && !rows[0].text.contains("301"),
+            "range starts at id 4"
+        );
+        assert!(rows[1].capped, "bit-15 lights its own row only");
     }
 
     /// The tint mask walks the same rows as the drawn lines — aligned by construction.

@@ -8565,7 +8565,21 @@ pub fn update_status_detail_window(
     // transcribed; without an install match kuluu keeps its flow layout and content height.
     let slots = config_rows.row_xyw.get(window_name).cloned();
     let rows_len = dynamic.rows.len();
-    let slot_layout = slots.as_ref().filter(|s| s.len() == rows_len);
+    // Roster windows never take DAT item-slot rects (owner ruling 2026-10-20, ur/40): their rows
+    // are server entries the install's block count cannot predict, and retail's wide fixed grid
+    // is what sprawled off the fitted box. They always draw packed two-column grids instead.
+    let roster_window = matches!(
+        crate::hud::status_panel::STATUS_ENTRIES
+            .get(idx)
+            .map(|entry| entry.kind),
+        Some(crate::hud::status_panel::StatusEntryKind::CombatSkill)
+            | Some(crate::hud::status_panel::StatusEntryKind::MagicSkill)
+            | Some(crate::hud::status_panel::StatusEntryKind::CraftSkill)
+            | Some(crate::hud::status_panel::StatusEntryKind::JobLevels)
+    );
+    let slot_layout = slots
+        .as_ref()
+        .filter(|s| !roster_window && s.len() == rows_len);
     // The three skill windows carry no DAT item blocks at all, so their columns come from
     // the openers' height law instead: combat (ids 1..31) and magic (ids 32..47) draw TWO
     // columns with window height = 22 + 14 * ceil(n/2) (FFXiMain.dll retail-2026-09
@@ -8576,6 +8590,10 @@ pub fn update_status_detail_window(
     let entry_kind = crate::hud::status_panel::STATUS_ENTRIES
         .get(idx)
         .map(|entry| entry.kind);
+    // Per-slot DISPLAY text for roster windows once columns right-align their trailing numbers
+    // (owner ruling 2026-10-20, ur/41: "Thing (left align) invis space Number Right align <- apply
+    // to all"); empty outside rosters, the line drawer falls through to the raw label.
+    let mut roster_display: Vec<String> = Vec::new();
     let (row_slots, window_height) = if slot_layout.is_some() {
         let height = match config_rows.record_frame(window_name) {
             Some(frame) => match frame.height {
@@ -8598,11 +8616,14 @@ pub fn update_status_detail_window(
         // behind column one's widest row and the frame closes just after it; nothing like the
         // record width of air when the roster is short. Still never WIDER than the record.
         let half = rows_len.div_ceil(2);
+        // Pad each column's numbers to a shared right edge BEFORE measuring, so the packed
+        // columns and the fitted box account for the invisible spaces too.
+        roster_display = pad_column_numbers_split(&dynamic.rows, half);
         let col_w = |from: usize, to: usize| {
-            dynamic.rows[from..to]
+            roster_display[from..to]
                 .iter()
-                .map(|row| {
-                    crate::ui_font::text_width_px(row.label.as_str(), STATUS_DETAIL_ROW_FONT_PX)
+                .map(|label| {
+                    crate::ui_font::text_width_px(label.as_str(), STATUS_DETAIL_ROW_FONT_PX)
                 })
                 .fold(0.0f32, f32::max)
         };
@@ -8631,12 +8652,17 @@ pub fn update_status_detail_window(
                 .max(wide);
         // The fit wins even where an install supplies the record frame: this branch is the
         // fallback-drawn two-column mode itself, and its whole width is the dead air of ur/38.
-        node.width = Val::Px(fit.clamp(96.0, 252.0));
+        // Only when a roster actually draws - an empty window keeps its plain chrome box.
+        if rows_len > 0 {
+            node.width = Val::Px(fit.clamp(96.0, 252.0));
+        }
         (layout, Val::Px(height))
     } else if matches!(
         entry_kind,
         Some(crate::hud::status_panel::StatusEntryKind::CraftSkill)
     ) {
+        // One column, same right-aligned numbers law (ur/41).
+        roster_display = pad_column_numbers(&dynamic.rows);
         let (layout, height) = skill_window_layout(rows_len, false);
         (layout, Val::Px(height))
     } else {
@@ -8748,8 +8774,14 @@ pub fn update_status_detail_window(
             }
             continue;
         };
-        if **text != row.label {
-            **text = row.label.clone();
+        // Roster windows show the column-padded label (right-aligned numbers, ur/41); everyone
+        // else draws their raw row text.
+        let shown: &str = roster_display
+            .get(line.slot)
+            .map(String::as_str)
+            .unwrap_or(row.label.as_str());
+        if text.as_str() != shown {
+            **text = shown.to_string();
         }
         // The gauge row carries no text, and an empty text node measures nothing: without a height
         // of its own the following row slides up under the bar (owner capture 2026-10-19, green
@@ -8887,6 +8919,71 @@ fn skill_window_layout(rows_len: usize, two_columns: bool) -> (Option<Vec<(i16, 
             f32::from(ROW_Y0) + 3.0 + f32::from(ROW_PITCH) * rows_len as f32,
         )
     }
+}
+
+/// Owner ruling 2026-10-20 (ur/41): "Thing (left align) invis space Number Right align <- apply
+/// to all". Within one roster column every row's trailing numeric token is padded so its last
+/// digit lands on the column's shared right edge: names stay flush left, only spaces sit between,
+/// and numbers line up. The HUD font is monospace, so char-count padding places them exactly.
+/// Digits reserve at least two slots (ur/39 "lets assume 2 digits always for space"); rows that
+/// do not end in a separated number pass through untouched.
+fn pad_numbers_column(rows: &[DynamicMenuRow], from: usize, to: usize) -> Vec<String> {
+    let split_num = |label: &str| -> Option<(String, String)> {
+        let chars: Vec<char> = label.chars().collect();
+        let n = chars.len();
+        let mut i = n;
+        while i > 0 && chars[i - 1].is_ascii_digit() {
+            i -= 1;
+        }
+        if i == n || i == 0 {
+            return None;
+        }
+        if !chars[i - 1].is_whitespace() {
+            return None;
+        }
+        let num = chars[i..].iter().collect::<String>();
+        // The stem keeps no trailing whitespace of its own; the gap is (re)drawn below.
+        let stem = chars[..i].iter().collect::<String>().trim_end().to_string();
+        Some((stem, num))
+    };
+    let digit_w = (from..to)
+        .filter_map(|k| split_num(rows[k].label.as_str()).map(|(_, n)| n.chars().count()))
+        .max()
+        .unwrap_or(0)
+        .max(2);
+    // The shared right edge in chars: the widest stem plus its gap plus its digits wins.
+    let edge = (from..to).fold(0usize, |acc, k| {
+        let Some((stem, num)) = split_num(rows[k].label.as_str()) else {
+            return acc;
+        };
+        acc.max(stem.chars().count() + 1 + num.chars().count().max(digit_w))
+    });
+    (from..to)
+        .map(|k| {
+            let label = rows[k].label.as_str();
+            let Some((stem, num)) = split_num(label) else {
+                return label.to_string();
+            };
+            let token_w = num.chars().count().max(digit_w);
+            let gap = (edge - stem.chars().count() - token_w).max(1);
+            format!("{stem}{}{num:>token_w$}", " ".repeat(gap))
+        })
+        .collect()
+}
+
+/// The one-column law: the whole list is a single column.
+fn pad_column_numbers(rows: &[DynamicMenuRow]) -> Vec<String> {
+    let n = rows.len();
+    pad_numbers_column(rows, 0, n)
+}
+
+/// Same law per half of the two-column grid - each half's edge is its own so column one is
+/// never stretched for column two's sake. Returns slot-indexed strings (first half then second).
+fn pad_column_numbers_split(rows: &[DynamicMenuRow], first_half: usize) -> Vec<String> {
+    let first_half = first_half.min(rows.len());
+    let mut out = pad_numbers_column(rows, 0, first_half);
+    out.extend(pad_numbers_column(rows, first_half, rows.len()));
+    out
 }
 
 /// The pane title, with a `‹1/2›` page marker appended for the Root Command
@@ -9816,11 +9913,12 @@ mod tests {
         assert!(!mirror, "and no Commands mirror beside it either");
     }
 
-    /// The `joblevel`/`masterle` record carries 22 item slots in two columns of 11 (x 8 and
-    /// 134); once kuluu's row count equals the slot count each row lands on its own slot rect
-    /// inside the record-height box — retail's two-column job list, read from the DAT.
+    /// Owner ruling 2026-10-20 (ur/40): roster windows never take the `joblevel` record's item-slot
+    /// rects. Even an install seeding 22 slots at x 8/134 leaves the roster on its own packed,
+    /// content-fitted two-column grid - the seat still comes from the record frame, but the grid,
+    /// height law and fitted width are the roster's.
     #[test]
-    fn joblevel_rows_land_on_their_dat_item_slots() {
+    fn joblevel_roster_ignores_dat_item_slots_and_keeps_packed_columns() {
         use crate::hud::network_status::NetStatusVisible;
         use crate::snapshot::SceneState;
 
@@ -9876,7 +9974,11 @@ mod tests {
             .single(app.world())
             .expect("the detail window");
         assert_eq!(node.left, Val::Px(130.0), "the record frame's x");
-        assert_eq!(node.height, Val::Px(182.0), "the record height box");
+        assert_eq!(
+            node.height,
+            Val::Px(176.0),
+            "the roster's own height law (22 + 14 * 11), not the record's 182"
+        );
 
         let mut placed: Vec<(usize, Val, Val)> = app
             .world_mut()
@@ -9888,13 +9990,26 @@ mod tests {
             .map(|(line, n)| (line.slot, n.left, n.top))
             .collect();
         placed.sort_by_key(|(slot, _, _)| *slot);
-        assert_eq!(placed.len(), 22, "every row is on a slot");
-        // Slot coords minus the window's own chrome border.
+        assert_eq!(placed.len(), 22, "every row is on the packed grid");
         assert_eq!((placed[0].1, placed[0].2), (Val::Px(7.0), Val::Px(18.0)));
-        assert_eq!(
-            (placed[11].1, placed[11].2),
-            (Val::Px(133.0), Val::Px(18.0)),
-            "the twelfth row starts the second column"
+        let Val::Px(col_two) = placed[11].1 else {
+            panic!("column two is placed at an explicit pixel");
+        };
+        assert!(
+            col_two < 133.0,
+            "the twelfth row starts a PACKED second column, not the DAT's x=134 (ur/40): {col_two}"
+        );
+        let frame = app
+            .world_mut()
+            .query_filtered::<&Node, With<StatusDetailWindow>>()
+            .single(app.world())
+            .expect("the detail window");
+        let Val::Px(frame_w) = frame.width else {
+            panic!("the fitted box carries an explicit pixel width");
+        };
+        assert!(
+            frame_w < 252.0,
+            "fitted to its columns, not the record's 252: {frame_w}"
         );
     }
 
@@ -15898,6 +16013,44 @@ mod tests {
         assert!(
             frame_w < 200.0,
             "the Job Levels box hugs its two columns, no dead air (ur/38), got {frame_w}"
+        );
+    }
+
+    /// Owner ruling 2026-10-20 (ur/41): roster columns put the name flush left, only invisible
+    /// spaces between, and the trailing number right-aligned on a shared edge (two digit slots
+    /// minimum). Non-number rows pass through.
+    #[test]
+    fn roster_columns_right_align_their_trailing_numbers() {
+        let row = |label: &str| DynamicMenuRow {
+            tint: None,
+            label: label.to_string(),
+            action: DynamicMenuAction::DisplayInfo,
+        };
+        let rows = vec![
+            row("Hand-to-Hand 0"),
+            row("Club 13"),
+            row("Parrying 140"),
+            row("(no such skill yet)"),
+        ];
+        let padded = pad_column_numbers(&rows);
+        // Widest stem (Hand-to-Hand, 12) + a gap + the widest digits (3) sets the edge at 16.
+        assert_eq!(
+            padded[0], "Hand-to-Hand   0",
+            "stem + gap to the two-slot minimum + digits"
+        );
+        // Every padded line shares the edge, and each keeps its digits flush right.
+        assert!(padded[1].starts_with("Club ") && padded[1].ends_with(" 13"));
+        assert!(padded[2].starts_with("Parrying ") && padded[2].ends_with("140"));
+        for line in &padded[..3] {
+            assert_eq!(
+                line.chars().count(),
+                16,
+                "numbers share the right edge: {line}"
+            );
+        }
+        assert_eq!(
+            padded[3], "(no such skill yet)",
+            "non-number rows pass through"
         );
     }
 

@@ -28,6 +28,7 @@ pub const SELECT_DLL_HASH_SEED: u32 = 0xFF16_00AF;
 pub enum LobbyWire {
     LandSandBoat {
         session_hash: [u8; SESSION_HASH_LEN],
+        md5_key: u32,
     },
     PlayOnline {
         passwd: [u8; SESSION_HASH_LEN],
@@ -47,6 +48,7 @@ impl LobbyWire {
         } else {
             Self::LandSandBoat {
                 session_hash: auth.session_hash,
+                md5_key: 0,
             }
         }
     }
@@ -66,7 +68,7 @@ impl LobbyWire {
     /// (vendor/server/src/login/data_session.cpp data_session::read_func).
     pub fn data_identifier(&self) -> [u8; SESSION_HASH_LEN] {
         match self {
-            Self::LandSandBoat { session_hash } => *session_hash,
+            Self::LandSandBoat { session_hash, .. } => *session_hash,
             Self::PlayOnline { passwd, .. } => *passwd,
         }
     }
@@ -75,7 +77,7 @@ impl LobbyWire {
     pub fn seal(&self, packet: &mut [u8]) {
         let field = HEADER_IDENTIFIER_OFFSET..HEADER_IDENTIFIER_OFFSET + HEADER_IDENTIFIER_LEN;
         match self {
-            Self::LandSandBoat { session_hash } => packet[field].copy_from_slice(session_hash),
+            Self::LandSandBoat { session_hash, .. } => packet[field].copy_from_slice(session_hash),
             Self::PlayOnline { .. } => {
                 packet[field.clone()].fill(0);
                 let digest = md5(packet);
@@ -87,17 +89,15 @@ impl LobbyWire {
     /// research/XIClient LobbyClient.cpp ntLoginAnalyzePacket
     /// LOBBY_IN_LOGIN_GOOD: the 0x05 reply's key seeds the md5key, advanced once.
     pub fn on_login_good(&mut self, key: u32) {
-        if let Self::PlayOnline { md5_key, .. } = self {
-            *md5_key = next_md5_key(key);
-        }
+        let (Self::PlayOnline { md5_key, .. } | Self::LandSandBoat { md5_key, .. }) = self;
+        *md5_key = next_md5_key(key);
     }
 
     /// research/XIClient LobbyClient.cpp ntLoginAnalyzePacket advances the
     /// md5key on every 0x03, 0x0B, 0x20 and 0x23 reply.
     pub fn on_key_advancing_reply(&mut self) {
-        if let Self::PlayOnline { md5_key, .. } = self {
-            *md5_key = next_md5_key(*md5_key);
-        }
+        let (Self::PlayOnline { md5_key, .. } | Self::LandSandBoat { md5_key, .. }) = self;
+        *md5_key = next_md5_key(*md5_key);
     }
 
     /// The `passwd` field of a packet that carries one, or `None` when the
@@ -106,7 +106,10 @@ impl LobbyWire {
     /// rapMakeMD5.
     pub fn next_passwd(&mut self) -> Option<[u8; SESSION_HASH_LEN]> {
         match self {
-            Self::LandSandBoat { .. } => None,
+            Self::LandSandBoat { md5_key, .. } => {
+                *md5_key = next_md5_key(*md5_key);
+                None
+            }
             Self::PlayOnline {
                 passwd, md5_key, ..
             } => {
@@ -114,6 +117,27 @@ impl LobbyWire {
                 *md5_key = next_md5_key(*md5_key);
                 Some(field)
             }
+        }
+    }
+
+    // vendor/server/src/login/data_session.cpp data_session::read_func
+    pub fn map_key_seed(&self, fallback: [u8; 20]) -> [u8; 20] {
+        const ZONE_CONNECT_COUNTER_STEPS: u32 = 3;
+        match self {
+            Self::LandSandBoat {
+                session_hash,
+                md5_key,
+            } => {
+                let mut seed = [0; 20];
+                seed[..SESSION_HASH_LEN].copy_from_slice(&md5(session_hash));
+                seed[SESSION_HASH_LEN..].copy_from_slice(
+                    &md5_key
+                        .wrapping_add(ZONE_CONNECT_COUNTER_STEPS)
+                        .to_le_bytes(),
+                );
+                seed
+            }
+            Self::PlayOnline { .. } => fallback,
         }
     }
 
@@ -247,6 +271,43 @@ mod tests {
         let mut wire = LobbyWire::for_session(&pol_session());
         wire.on_login_good(u32::MAX);
         assert_eq!(wire.next_passwd().unwrap(), passwd_field(&PASSWD, 0));
+    }
+
+    #[test]
+    fn lsb_map_seed_tracks_login_and_character_operations() {
+        const INITIAL_COUNTER: u32 = 100;
+        const SELECT_COUNTER: u32 = 106;
+        const CREATED_SELECT_COUNTER: u32 = 111;
+        const HASH: [u8; SESSION_HASH_LEN] = [
+            0xda, 0x3e, 0x47, 0xef, 0xef, 0x64, 0x09, 0x70, 0x73, 0x0e, 0x56, 0xd1, 0xaa, 0x4a,
+            0xa9, 0xc1,
+        ];
+        const WRAPPED_SELECT_COUNTER: u32 = 5;
+        let mut wire = LobbyWire::for_session(&lsb_session());
+        wire.on_login_good(INITIAL_COUNTER);
+        wire.on_key_advancing_reply();
+        let mut created = wire.clone();
+        assert_eq!(wire.next_passwd(), None);
+        let seed = wire.map_key_seed([0; 20]);
+        assert_eq!(&seed[..SESSION_HASH_LEN], &HASH);
+        assert_eq!(&seed[SESSION_HASH_LEN..], &SELECT_COUNTER.to_le_bytes());
+        created.next_passwd();
+        created.on_key_advancing_reply();
+        created.next_passwd();
+        created.on_key_advancing_reply();
+        created.on_key_advancing_reply();
+        created.next_passwd();
+        assert_eq!(
+            &created.map_key_seed([0; 20])[SESSION_HASH_LEN..],
+            &CREATED_SELECT_COUNTER.to_le_bytes(),
+        );
+        created.on_login_good(u32::MAX);
+        created.on_key_advancing_reply();
+        created.next_passwd();
+        assert_eq!(
+            &created.map_key_seed([0; 20])[SESSION_HASH_LEN..],
+            &WRAPPED_SELECT_COUNTER.to_le_bytes(),
+        );
     }
 
     #[test]

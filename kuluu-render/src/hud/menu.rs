@@ -2255,7 +2255,7 @@ mod tests {
     #[test]
     fn key_item_rows_sorted_by_id_with_unseen_suffix() {
         // Key items 1/8 = Zeruhn Report / Airship Pass
-        // (vendor/server/scripts/enum/key_item.lua).
+        // (vendor/server/data/enums/key_item.yaml).
         let snap = kuluu_snapshot::SceneSnapshot {
             key_items: vec![8, 1],
             key_items_seen: vec![8],

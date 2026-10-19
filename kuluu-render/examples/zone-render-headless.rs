@@ -64,6 +64,7 @@ struct P {
     /// The zone's own timed auto-run emitters (lantern flames/glows, chimney
     /// smoke); --no-zone-particles leaves them out for an A/B frame-time read.
     zone_particles: bool,
+    lamp_halos: bool,
     /// Some(n): Enhanced Dynamic Lights with n shadowed lamps, zone geometry casting.
     enhanced_lights: Option<u32>,
     /// Skinned NPC actors placed in the zone (needs --sky), for reading how the
@@ -113,6 +114,7 @@ fn main() {
         client_sun: false,
         weather: None,
         zone_particles: true,
+        lamp_halos: true,
         enhanced_lights: None,
         npcs: Vec::new(),
         no_receive: false,
@@ -191,6 +193,10 @@ fn main() {
                 p.zone_particles = false;
                 i += 1;
             }
+            "--no-lamp-halos" => {
+                p.lamp_halos = false;
+                i += 1;
+            }
             "--npc" | "--pc" => {
                 let subject = if a[i] == "--npc" {
                     ActorSubject::Npc(a[i + 1].parse().unwrap())
@@ -224,6 +230,9 @@ fn main() {
             .expect("an FFXI install (kuluu install use NAME, or FFXI_DAT_PATH)"),
     );
     let mut app = App::new();
+    if !p.lamp_halos {
+        app.insert_resource(kuluu_render::particle_sim::LampHalosOff(true));
+    }
     app.insert_resource(VanaClock::anchored_at_hour(p.hour))
         .insert_resource(bevy::winit::WinitSettings::continuous())
         .insert_resource(p)

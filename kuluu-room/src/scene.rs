@@ -315,8 +315,6 @@ impl Case {
             Self::LoadZone => "zone",
             Self::LoadWeather => "weather",
             Self::SgLamps => "sglamps",
-            // ANIMTEST_SHOT_PATH names the PNG; Bevy reads back the render target, so this works
-            // with KULUU_WINDOW_HIDDEN=1 where no window capture can reach.
             Self::Shot => "shot",
         }
     }

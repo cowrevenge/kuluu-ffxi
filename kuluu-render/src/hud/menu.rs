@@ -8671,9 +8671,22 @@ pub fn update_status_detail_window(
         entry_kind,
         Some(crate::hud::status_panel::StatusEntryKind::CraftSkill)
     ) {
-        // One column, same right-aligned numbers law (ur/41).
+        // One column, same right-aligned numbers law (ur/41), and fitted like its two-column
+        // siblings so the third `(level)` column sits on a real right margin (ur/49).
         roster_display = pad_column_numbers(&dynamic.rows);
         let (layout, height) = skill_window_layout(rows_len, false);
+        const CRAFT_RIGHT_CLEARANCE_PX: f32 = 8.0;
+        if rows_len > 0 {
+            let widest = roster_display
+                .iter()
+                .map(|label| {
+                    crate::ui_font::text_width_px(label.as_str(), STATUS_DETAIL_ROW_FONT_PX)
+                })
+                .fold(0.0f32, f32::max);
+            node.width = Val::Px(
+                (16.0 + widest + CRAFT_RIGHT_CLEARANCE_PX + MENU_BORDER_PX).clamp(96.0, 460.0),
+            );
+        }
         (layout, Val::Px(height))
     } else {
         // Owner ruling 2026-10-20: remove the padding at the bottom of these boxes. A detail with
@@ -9014,8 +9027,9 @@ fn pad_numbers_column(rows: &[DynamicMenuRow], from: usize, to: usize) -> Vec<St
             return acc;
         };
         if paren {
-            let three = name_w + 1 + rank_w + 1 + num.chars().count().max(digit_w) + 2;
-            acc.max(three)
+            // No pad inside the parens (owner ruling 2026-10-20, ur/49: "there should NOT be a
+            // space in the ( 0)"); alignment comes from the gap before them instead.
+            acc.max(name_w + 1 + rank_w + 1 + num.chars().count() + 2)
         } else {
             acc.max(stem.chars().count() + 1 + num.chars().count().max(digit_w))
         }
@@ -9026,16 +9040,15 @@ fn pad_numbers_column(rows: &[DynamicMenuRow], from: usize, to: usize) -> Vec<St
             let Some((stem, num, paren)) = split_num(label) else {
                 return label.to_string();
             };
-            let token_w = num.chars().count().max(digit_w);
             if paren {
                 let (name, rank) = split_rank(stem.as_str());
-                let gap = (edge - name_w - 1 - rank.chars().count() - token_w - 2).max(1);
-                format!(
-                    "{:<name_w$} {rank}{}({num:>token_w$})",
-                    name,
-                    " ".repeat(gap)
-                )
+                // The third column is right-aligned on its `)` - digits keep their natural
+                // width inside the parens.
+                let token_w = num.chars().count() + 2;
+                let gap = (edge - name_w - 1 - rank.chars().count() - token_w).max(1);
+                format!("{:<name_w$} {rank}{}({num})", name, " ".repeat(gap))
             } else {
+                let token_w = num.chars().count().max(digit_w);
                 let gap = (edge - stem.chars().count() - token_w).max(1);
                 format!("{stem}{}{num:>token_w$}", " ".repeat(gap))
             }
@@ -16141,7 +16154,8 @@ mod tests {
         let padded = pad_column_numbers(&craft);
         // Three real columns: names padded to the widest, ranks starting one fixed column
         // after it, `(level)` right-aligned at the shared edge.
-        assert_eq!(padded[0], "Fishing   Amateur    ( 7)");
+        // No pad inside the parens; the `)`s carry the right alignment instead (ur/49).
+        assert_eq!(padded[0], "Fishing   Amateur     (7)");
         assert_eq!(padded[1], "Bonecraft Journeyman (10)");
     }
 

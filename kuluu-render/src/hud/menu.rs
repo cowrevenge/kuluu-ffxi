@@ -8611,8 +8611,14 @@ pub fn update_status_detail_window(
     };
     // Owner ruling 2026-10-19: the title belongs in the bar across the top of the screen (the help
     // line reads `Title: <worn title>`), not on this window's own border. Profile keeps no caption
-    // there at all, because its first row inside the box is the `Profile` header itself; every
-    // other detail still wears its record name.
+    // there at all, because its first row inside the box is the `Profile` header itself.
+    // Owner ruling 2026-10-20 (ur/34-35): Job Levels wears ITS OWN name INSIDE the box, like
+    // Profile's header - never a word straddling the top border and no mask strip at all - which
+    // also eats the band's air that read as "way too much padding on top".
+    let title_inside_box = matches!(
+        entry_kind,
+        Some(crate::hud::status_panel::StatusEntryKind::JobLevels)
+    );
     let want_title = match entry_kind {
         Some(crate::hud::status_panel::StatusEntryKind::Profile) => String::new(),
         _ => menu_title(MenuKind::StatusDetail {
@@ -8656,6 +8662,10 @@ pub fn update_status_detail_window(
         outer_width,
         crate::ui_font::text_width_px(&want_title, MENU_TITLE_FONT_PX),
     );
+    // In-box caption: same x as the first column of rows once the chrome border is subtracted
+    // (slot x 8 - 1), three px below the padding edge. The frame line stays whole behind it.
+    const INBOX_TITLE_LEFT_PX: f32 = 6.0;
+    const INBOX_TITLE_TOP_PX: f32 = 3.0;
     let italic_face = italic_font
         .as_ref()
         .filter(|face| face.0 != Handle::default())
@@ -8681,6 +8691,20 @@ pub fn update_status_detail_window(
                 if face.font != *source {
                     face.font = source.clone();
                 }
+            }
+            if title_inside_box {
+                // In-box: absolute below the padding edge; no centering, no band-top math.
+                let (inbox_left, inbox_top) = (
+                    Val::Px(INBOX_TITLE_LEFT_PX),
+                    Val::Px(INBOX_TITLE_TOP_PX),
+                );
+                if band_node.left != inbox_left {
+                    band_node.left = inbox_left;
+                }
+                if band_node.top != inbox_top {
+                    band_node.top = inbox_top;
+                }
+                continue;
             }
             if band_node.top != band_top {
                 band_node.top = band_top;

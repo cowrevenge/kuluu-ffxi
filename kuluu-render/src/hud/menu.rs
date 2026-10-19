@@ -9132,12 +9132,6 @@ fn pad_numbers_column(
         .collect()
 }
 
-/// The one-column law: the whole list is a single column.
-fn pad_column_numbers(rows: &[DynamicMenuRow]) -> Vec<String> {
-    let n = rows.len();
-    pad_numbers_column(rows, 0, n, None)
-}
-
 /// Craft's variant (ur/50): the shared right edge is lifted to `min_edge_chars` so the `(level)`
 /// column rides on the WINDOW's right margin, not just past the longest row.
 fn pad_column_numbers_edge(rows: &[DynamicMenuRow], min_edge_chars: Option<usize>) -> Vec<String> {

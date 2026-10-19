@@ -13,6 +13,179 @@ Check permissions with `scripts/observe.sh doctor` before driving a client.
 No named VM or external volume is a prerequisite.
 The backend retains optional VM support for an explicit user request.
 
+## Packaged macOS procedure
+
+Use `scripts/macos.py` for the Wine keyboard and capture procedure.
+The same command works from Codex, Claude Code, or a terminal.
+It requires Python 3.9 or later and the standard macOS tools.
+It does not require jq, an OCR engine, or a Python package installation.
+Jev is optional.
+
+### Prepare the machine
+
+1. Install a Wine build that can run FFXI on this Mac.
+2. Prepare a Wine prefix with the client registrations described below.
+3. Install your game files outside the checkout.
+4. Obtain an xiloader version compatible with your client and server.
+5. On Apple Silicon, install Rosetta when the selected Wine build requires it.
+6. Give the calling application Screen Recording permission.
+
+The package does not install game files, Wine, Rosetta, or client registry entries.
+Those components require a compatible installation before observation can work.
+The package records the selected Wine, loader, and client hashes.
+A changed executable causes a clear failure until setup records the verified update.
+The Wine executable hash does not cover every library in its distribution.
+
+### Save local configuration
+
+Run this command from the skill directory.
+Replace the example paths with paths on the current machine.
+
+```bash
+python3 scripts/macos.py --profile local setup \
+  --runner /absolute/path/to/wine \
+  --prefix /absolute/path/to/wine-prefix \
+  --install '/absolute/path/to/FINAL FANTASY XI' \
+  --loader /absolute/path/to/xiloader.exe \
+  --server 127.0.0.1 \
+  --loader-arg=--hairpin
+```
+
+Setup downloads the official AutoHotkey v2.0.30 archive and verifies its SHA256.
+The pinned archive hash comes from the [official release](https://github.com/AutoHotkey/AutoHotkey/releases/tag/v2.0.30).
+For offline setup, add `--ahk-archive /path/to/AutoHotkey_2.0.30.zip`.
+Setup verifies the cached executable before each operation.
+It also copies the loader into the user cache.
+The resulting profile does not depend on files in a temporary checkout.
+
+Configuration goes to `~/.config/ffxi-observe/local.macos.json` with permissions `0600`.
+Cached executables go to `~/.cache/ffxi-observe/`.
+The command honors `XDG_CONFIG_HOME` and `XDG_CACHE_HOME`.
+Run setup on each machine instead of copying a profile with absolute paths.
+Add `--replace` after checking an intentional executable update.
+Setup does not change an existing Wine prefix or stop a running client.
+
+Keep credentials outside the profile.
+For launch, set `FFXI_USER` and `FFXI_PASS` in the environment.
+The launch command passes them to xiloader without printing its arguments.
+They can still appear in local process arguments while the loader runs.
+
+```bash
+python3 scripts/macos.py --profile local doctor
+python3 scripts/macos.py --profile local launch
+python3 scripts/macos.py --profile local capture /tmp/ffxi-before.png
+python3 scripts/macos.py --profile local key menu 0.2
+python3 scripts/macos.py --profile local capture /tmp/ffxi-menu.png
+python3 scripts/macos.py --profile local key esc 0.2
+```
+
+Inspect the captures to verify that the menu opened and closed.
+A successful input command proves submission, not the visible result.
+The doctor command checks dependencies, permissions, executable hashes, Rosetta, and the current window.
+It does not prove login, network access, or client registration correctness.
+Capture and input require one visible FFXI window.
+If no game window exists, doctor reports a null window.
+Launch the client before the visible input check.
+
+Input checks reject a locked screen, ambiguous windows, unknown keys, and holds longer than five seconds.
+A prefix lock prevents concurrent input from these packaged commands.
+Other tools and human input can still interfere.
+Use one driver at a time.
+Windows activation does not guarantee that macOS foreground focus stays unchanged.
+Background operation remains unverified.
+
+### Optional Jev observation and native vision fallback
+
+Store the Jev key in `~/.config/typesafe/api-key` with permissions `0600`.
+Keep its parent directory private.
+To select another key file, add `--jev-key-file /private/path` during setup.
+The profile stores the key path, not its value.
+Capture and keyboard commands do not need this key.
+
+```bash
+python3 scripts/macos.py --profile local decide /tmp/ffxi-menu.png --character 'Exact Name'
+```
+
+The command resizes a temporary copy to meet Jev image limits.
+It preserves the original capture and records both image hashes.
+Only `decide` sends a capture to Jev.
+Jev image support remains experimental, as stated in the [image documentation](https://docs.typesafe.ai/images).
+The model is pinned to `jev-1.14.0`.
+
+If Jev is missing or fails, the command requests native vision.
+It also requests vision when the decision confidence is below `0.9`.
+It returns `status: needs_vision`, the capture path, its hash, and a JSON schema.
+It also saves the request beside the capture as `.decision.json`.
+The command sends no input and does not retry indefinitely.
+Use `--vision` to select this path without calling Jev.
+
+When `needs_vision` appears, open the named capture with the current agent's image tool.
+Alternatively, give the request and capture to a vision-capable subagent.
+Require the subagent to return only the specified JSON.
+Do not give the subagent input control.
+If no image tool is available, report the missing capability and stop.
+
+Save the returned JSON to a temporary file.
+Validate it against the capture before use:
+
+```bash
+python3 scripts/macos.py --profile local decide /tmp/ffxi-menu.png \
+  --character 'Exact Name' --result /tmp/vision-result.json
+```
+
+Validation rejects a different image hash, unsupported fields, and unsafe Enter decisions.
+The login decision format permits only `enter`, `wait`, or `stop`.
+It does not control general gameplay or accept agreements.
+Preserve existing session approval for separate, permitted agreement handling.
+Before input, inspect a current capture and check that the proposed action still applies.
+Neither Jev nor fallback decisions execute automatically.
+
+### Local OrbStack LSB configuration
+
+The optional `scripts/lsb-retail.compose.yaml` supplies a separate connect server and profile server.
+It requires an existing LSB database, world server, map server, and Docker network.
+It pins the server image used for the verified local login.
+Check that your existing stack uses a compatible server revision and database schema.
+It publishes service ports only on `127.0.0.1`.
+
+Set these values for the existing stack:
+
+```bash
+export LSB_NETWORK=your-lsb-project_default
+export LSB_SQL_PASSWORD=your-local-database-password
+# Optional: LSB_SQL_HOST, LSB_SQL_DATABASE, LSB_SQL_LOGIN, LSB_WORLD_HOST
+# Default client-version lock: 2
+# Use LSB_VER_LOCK=0 only for an intentionally older local test client.
+docker --context orbstack compose -p retail-observe \
+  -f scripts/lsb-retail.compose.yaml config --quiet
+docker --context orbstack compose -p retail-observe \
+  -f scripts/lsb-retail.compose.yaml up -d
+```
+
+Do not start this supplement when another server already occupies these ports.
+The connect server uses internal auth port `57432` to avoid the default server's routing identifier.
+Use these additional setup arguments for this supplement:
+
+```bash
+--loader-arg=--authport --loader-arg=57432 \
+--loader-arg=--viewport --loader-arg=57003 \
+--loader-arg=--dataport --loader-arg=57433
+```
+
+The profile server uses ports `51220` and `51240`.
+The existing stack still supplies map and search services.
+The supplement does not create accounts or update database zone addresses.
+Check the existing stack configuration before launch.
+
+### Verification scope
+
+On 2026-10-19, the packaged input command opened the FFXI menu on Apple Silicon.
+The later capture still showed a menu, so menu closure was not verified.
+The captures used the existing HorizonXI 2023 client in Port San d'Oria on local OrbStack LSB.
+Jev and a separate vision subagent identified gameplay.
+Tests cover corrupt downloads, credential permissions, input guards, ambiguous windows, and structured fallback validation.
+A clean installation on another Mac remains unverified.
+
 ## Host permissions -- the two silent failures
 
 The terminal running `observe.sh` needs, in System Settings > Privacy &

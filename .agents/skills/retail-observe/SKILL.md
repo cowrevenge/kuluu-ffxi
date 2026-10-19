@@ -26,6 +26,12 @@ the remake against the same observation.
 The command surface is portable. Execution depends on the host runtime,
 display server, permissions, and configured client install.
 Use Wine on macOS. Use Wine or Proton on Linux, or native execution on Windows.
+For the packaged macOS Wine procedure, use `scripts/macos.py`.
+Read [host-macos.md](references/host-macos.md#packaged-macos-procedure) for setup and verification.
+Jev is optional. If `decide` returns `needs_vision`, inspect its capture with native vision.
+Use the current agent or a vision-capable subagent.
+Validate the structured result with `decide --result` before use.
+If vision is unavailable, stop with a clear diagnostic.
 Discover runner and install paths on the current host.
 Keep machine-specific paths in local profiles rather than shared instructions.
 The Linux and native Windows backends remain unverified against a running client.

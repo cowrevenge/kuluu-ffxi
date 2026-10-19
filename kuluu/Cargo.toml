@@ -22,10 +22,6 @@ name = "kuluu"
 path = "src/main.rs"
 
 [[example]]
-name = "room-no-install"
-required-features = ["native-window", "debug-animation_room"]
-
-[[example]]
 # Headless replay of the single-authority walker over real MZB geometry
 # (plan §4). Needs the viewer feature: the walker lives in `view_native`.
 name = "zz-field-walk"
@@ -87,12 +83,6 @@ enhanced-shutdown-counter = ["kuluu-render?/enhanced-shutdown-counter"]
 enhanced-engage-move-lock-off = ["kuluu-render?/enhanced-engage-move-lock-off"]
 # Enhanced (non-retail): the player ignores knockback travel. See kuluu-render.
 enhanced-ignore-knockback-self = ["kuluu-render?/enhanced-ignore-knockback-self"]
-# Debug pre-server animation room: an AnimationTest button in the launcher titlebar
-# loads a worm+Hume scene and fires dam0 hit cases through the production VFX pipeline
-# with on-screen + stderr logging, before any server login. Kuluu-local (no render side),
-# so no sub-features; opt-in with an explicit `--features debug-animation_room`, which
-# the room-no-install example requires. Vanilla builds omit it.
-debug-animation_room = []
 # Enhanced (non-retail) `//targetname` slash command: target the nearest
 # NPC/mob/pet by exact name. Kuluu-local (no render side), so no sub-features;
 # opt-in with an explicit `--features enhanced-targetname`. Vanilla builds omit it.

@@ -4560,6 +4560,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kuluu-room"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "bevy",
+ "clap",
+ "ffxi-dat",
+ "ffxi-proto",
+ "kuluu-render",
+ "kuluu-snapshot",
+ "serde_json",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "kuluu-session"
 version = "0.7.0"
 dependencies = [

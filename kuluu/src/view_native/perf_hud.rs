@@ -1,4 +1,5 @@
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::time::Real;
 use kuluu_render::hud::{style::theme, HudPanels};
@@ -7,14 +8,18 @@ use kuluu_render::{perf_probe, InGameEntity};
 use super::bridge::NativeSource;
 
 const SAMPLES: usize = 120;
-const GRAPH_W: f32 = 240.0;
+const GRAPH_W: f32 = 720.0;
 const GRAPH_H: f32 = 64.0;
-const BAR_W: f32 = GRAPH_W / SAMPLES as f32;
+const BAR_PERCENT: f32 = 100.0 / SAMPLES as f32;
 const GRAPH_MAX_MS: f32 = 60.0;
 const TARGET_MS: f32 = 1000.0 / 60.0;
 const FONT: f32 = 12.0;
 const LOG_COOLDOWN_S: f32 = 1.0;
 const SUMMARY_PERIOD_S: f32 = 5.0;
+const PANEL_INSET: f32 = 16.0;
+const PANEL_MAX_WIDTH_PERCENT: f32 = 95.0;
+const PANEL_MAX_HEIGHT_PERCENT: f32 = 80.0;
+const SCROLL_LINE_PX: f32 = 24.0;
 
 const GRAPH_BG: Color = Color::srgb(0.08, 0.08, 0.10);
 
@@ -223,7 +228,11 @@ pub fn mark_last_end(mut m: ResMut<PerfMonitor>) {
 fn top_render_spans(diag: &DiagnosticsStore) -> String {
     let mut spans: Vec<(String, f64)> = diag
         .iter()
-        .filter(|d| d.path().as_str().starts_with("render/"))
+        .filter(|d| {
+            let path = d.path().as_str();
+            path.starts_with("render/")
+                && (path.ends_with("/elapsed_cpu") || path.ends_with("/elapsed_gpu"))
+        })
         .filter_map(|d| {
             let peak = d.values().copied().fold(0.0f64, f64::max);
             (peak > 0.0).then(|| {
@@ -365,7 +374,7 @@ pub fn update_perf_monitor(
         let avg_fps = m.summary_frames as f32 / m.summary_s;
         info!(
             target: "perf",
-            "summary {avg_fps:.1}fps baseline {:.1}ms max {:.1}ms spikes {} | max rprep {}\u{00b5}s {} rgraph {}\u{00b5}s rtotal {}\u{00b5}s | churn img+{} ({}KB) mesh+{} std+{} zone+{} skin+{}",
+            "summary {avg_fps:.1}fps baseline {:.1}ms max {:.1}ms spikes {} | max rprep {}us {} rgraph {}us rtotal {}us | churn img+{} ({}KB) mesh+{} std+{} zone+{} skin+{}",
             m.baseline_ms,
             m.summary_max_ms,
             m.spikes_total,
@@ -453,7 +462,7 @@ pub fn update_perf_monitor(
     m.suppressed = 0;
     m.log_cooldown_s = LOG_COOLDOWN_S;
     let rebuild = if m.spike_rebuilt {
-        format!("rebuild {}\u{00b5}s", m.spike_rebuild_us)
+        format!("rebuild {}us", m.spike_rebuild_us)
     } else {
         "no rebuild".to_string()
     };
@@ -469,7 +478,7 @@ pub fn update_perf_monitor(
     let render_spans = top_render_spans(&diag);
     warn!(
         target: "perf",
-        "frame spike {dt_ms:.1}ms (baseline {:.1}ms, +{:.1}ms) after {interval:.2}s \u{2014} cpu {}\u{00b5}s late {late_us}\u{00b5}s render~{render_us}\u{00b5}s [rprep {w_rprep_us}\u{00b5}s {} rgraph {w_rgraph_us}\u{00b5}s rtotal {w_rtotal_us}\u{00b5}s] | {rebuild}, model+{w_model} plate+{w_rasters} probe {w_probe_us}\u{00b5}s | churn img+{} ({}KB) mesh+{} std+{} zone+{} skin+{}{extra}{render_spans}",
+        "frame spike {dt_ms:.1}ms (baseline {:.1}ms, +{:.1}ms) after {interval:.2}s \u{2014} cpu {}us late {late_us}us render~{render_us}us [rprep {w_rprep_us}us {} rgraph {w_rgraph_us}us rtotal {w_rtotal_us}us] | {rebuild}, model+{w_model} plate+{w_rasters} probe {w_probe_us}us | churn img+{} ({}KB) mesh+{} std+{} zone+{} skin+{}{extra}{render_spans}",
         m.baseline_ms,
         dt_ms - m.baseline_ms,
         cpu_us,
@@ -488,11 +497,15 @@ pub fn spawn_perf_hud(mut commands: Commands) {
         .spawn((
             InGameEntity,
             PerfPanel,
+            bevy::ui::RelativeCursorPosition::default(),
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(96.0),
                 left: Val::Px(8.0),
-                width: Val::Px(GRAPH_W + 16.0),
+                width: Val::Px(GRAPH_W + PANEL_INSET),
+                max_width: Val::Percent(PANEL_MAX_WIDTH_PERCENT),
+                max_height: Val::Percent(PANEL_MAX_HEIGHT_PERCENT),
+                overflow: Overflow::scroll_y(),
                 padding: UiRect::axes(Val::Px(8.0), Val::Px(6.0)),
                 border: UiRect::all(Val::Px(1.0)),
                 flex_direction: FlexDirection::Column,
@@ -509,8 +522,9 @@ pub fn spawn_perf_hud(mut commands: Commands) {
 
             p.spawn((
                 Node {
-                    width: Val::Px(GRAPH_W),
+                    width: Val::Percent(100.0),
                     height: Val::Px(GRAPH_H),
+                    min_height: Val::Px(GRAPH_H),
                     overflow: Overflow::clip(),
                     ..default()
                 },
@@ -522,9 +536,9 @@ pub fn spawn_perf_hud(mut commands: Commands) {
                         PerfGraphBar(i),
                         Node {
                             position_type: PositionType::Absolute,
-                            left: Val::Px(i as f32 * BAR_W),
+                            left: Val::Percent(i as f32 * BAR_PERCENT),
                             bottom: Val::Px(0.0),
-                            width: Val::Px(BAR_W),
+                            width: Val::Percent(BAR_PERCENT),
                             height: Val::Px(0.0),
                             ..default()
                         },
@@ -538,6 +552,16 @@ pub fn spawn_perf_hud(mut commands: Commands) {
             spawn_text_line(p, 1, theme::TEXT);
             spawn_text_line(p, 2, theme::TEXT);
             spawn_text_line(p, 3, theme::MUTED);
+            spawn_text_line(p, 4, theme::MUTED);
+            p.spawn((
+                super::dev_diagnostics::DevelopmentSummaryText,
+                Text::new("Collecting diagnostics..."),
+                TextFont {
+                    font_size: FONT.into(),
+                    ..default()
+                },
+                TextColor(theme::TEXT),
+            ));
         });
 }
 
@@ -550,7 +574,6 @@ fn spawn_text_line(p: &mut ChildSpawnerCommands, index: usize, color: Color) {
             ..default()
         },
         TextColor(color),
-        TextLayout::no_wrap(),
     ));
 }
 
@@ -559,7 +582,7 @@ fn spawn_ref_line(g: &mut ChildSpawnerCommands, ms: f32, color: Color) {
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(0.0),
-            width: Val::Px(GRAPH_W),
+            width: Val::Percent(100.0),
             bottom: Val::Px((ms / GRAPH_MAX_MS).clamp(0.0, 1.0) * GRAPH_H),
             height: Val::Px(1.0),
             ..default()
@@ -572,9 +595,6 @@ pub fn apply_perf_visibility(
     panels: Res<HudPanels>,
     mut q: Query<&mut Visibility, With<PerfPanel>>,
 ) {
-    if !panels.is_changed() {
-        return;
-    }
     let want = if panels.perf {
         Visibility::Inherited
     } else {
@@ -583,6 +603,42 @@ pub fn apply_perf_visibility(
     for mut v in q.iter_mut() {
         if *v != want {
             *v = want;
+        }
+    }
+}
+
+pub fn scroll_perf_panel(
+    panels: Res<HudPanels>,
+    mut wheel: MessageReader<MouseWheel>,
+    pointer: Option<ResMut<kuluu_render::mouse::MousePointer>>,
+    mut query: Query<
+        (
+            &bevy::ui::RelativeCursorPosition,
+            &ComputedNode,
+            &mut ScrollPosition,
+        ),
+        With<PerfPanel>,
+    >,
+) {
+    let delta: f32 = wheel
+        .read()
+        .map(|event| match event.unit {
+            MouseScrollUnit::Line => event.y * SCROLL_LINE_PX,
+            MouseScrollUnit::Pixel => event.y,
+        })
+        .sum();
+    if !panels.perf {
+        return;
+    }
+    let mut pointer = pointer;
+    for (cursor, node, mut scroll) in &mut query {
+        if cursor.cursor_over() {
+            if let Some(pointer) = pointer.as_mut() {
+                pointer.wheel = 0.0;
+            }
+            let max =
+                (node.content_size().y - node.size().y).max(0.0) * node.inverse_scale_factor();
+            scroll.0.y = (scroll.0.y - delta).clamp(0.0, max);
         }
     }
 }
@@ -629,7 +685,7 @@ fn build_text_lines(
 
     let title = (
         format!(
-            "PERF  {fps:.0} fps  {:.1}ms  (scale {GRAPH_MAX_MS:.0}ms)",
+            "DEVELOPMENT DIAGNOSTICS  {fps:.0} fps  {:.1}ms  (scale {GRAPH_MAX_MS:.0}ms)",
             m.baseline_ms,
         ),
         theme::TITLE,
@@ -652,7 +708,7 @@ fn build_text_lines(
     let main_us = m.spike_main_us.min(frame_us);
     let split = (
         format!(
-            "spike split: cpu {}\u{00b5}s  late {}\u{00b5}s  render~{}\u{00b5}s  (rp {} rg {} rt {})",
+            "spike wall time: main {}us  late {}us  remainder~{}us  (rp {} rg {} rt {})",
             m.spike_cpu_us,
             main_us.saturating_sub(m.spike_cpu_us),
             frame_us.saturating_sub(main_us),
@@ -670,9 +726,9 @@ fn build_text_lines(
 
     let cause = (
         format!(
-            "on spike: {}  model+{} plate+{} probe {}\u{00b5}s   snap {}\u{00b5}s n:{}  {:.0} rebuild/s",
+            "on spike: {}  model+{} plate+{} probe {}us   snap {}us n:{}  {:.0} rebuild/s",
             if m.spike_rebuilt {
-                format!("rebuild {}\u{00b5}s", m.spike_rebuild_us)
+                format!("rebuild {}us", m.spike_rebuild_us)
             } else {
                 "no rebuild".to_string()
             },
@@ -711,5 +767,51 @@ fn sample_color(ms: f32) -> Color {
         theme::WARN
     } else {
         theme::DANGER
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kuluu_render::mouse::MousePointer;
+
+    #[test]
+    fn only_a_visible_hovered_panel_claims_camera_scroll() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<MouseWheel>()
+            .init_resource::<HudPanels>()
+            .init_resource::<MousePointer>()
+            .add_systems(Update, scroll_perf_panel);
+        let panel = app
+            .world_mut()
+            .spawn((
+                PerfPanel,
+                bevy::ui::RelativeCursorPosition::default(),
+                ComputedNode::default(),
+                ScrollPosition::default(),
+            ))
+            .id();
+        for (visible, hovered, claimed) in [
+            (false, true, false),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            app.world_mut().resource_mut::<HudPanels>().perf = visible;
+            app.world_mut()
+                .get_mut::<bevy::ui::RelativeCursorPosition>(panel)
+                .unwrap()
+                .cursor_over = hovered;
+            app.world_mut().resource_mut::<MousePointer>().wheel = 1.0;
+            app.world_mut().write_message(MouseWheel {
+                unit: MouseScrollUnit::Line,
+                x: 0.0,
+                y: 1.0,
+                phase: bevy::input::touch::TouchPhase::Moved,
+                window: Entity::PLACEHOLDER,
+            });
+            app.update();
+            assert_eq!(app.world().resource::<MousePointer>().wheel == 0.0, claimed);
+        }
     }
 }

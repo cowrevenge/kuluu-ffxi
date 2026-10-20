@@ -323,6 +323,7 @@ pub(super) fn apply_slash_outcome(
         SlashOutcome::SetDevHud(setting) => {
             let next = setting.unwrap_or(!slash_writers.hud_verbosity.dev_hud);
             slash_writers.hud_verbosity.dev_hud = next;
+            slash_writers.hud_panels.perf = next;
             push_system_chat_line(
                 scene_state,
                 format!("/devhud: {}", if next { "on" } else { "off" }),

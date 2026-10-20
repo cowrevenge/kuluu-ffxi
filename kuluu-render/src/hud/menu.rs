@@ -8276,16 +8276,22 @@ pub fn update_main_menu(
                     .copied()
                     .unwrap_or("<unknown>")
             };
-            let want = if parent.cursor == row.slot {
-                format!("> {label}")
-            } else {
-                format!("  {label}")
-            };
+            // ur/77: a child opening over this opener must not re-style it —
+            // no `>` mark, while the selected line keeps its cursor gold so the
+            // window reads as holding your place until ESC returns to it.
+            let want = format!("  {label}");
             if **text != want {
                 **text = want;
             }
-            if color.0 != theme::TEXT {
-                color.0 = theme::TEXT;
+            let gated = menu_row_disabled(parent.kind, row.slot, &scene.snapshot);
+            let tint = if is_dynamic(parent.kind) {
+                parent_rows.get(row.slot).and_then(|r| r.tint)
+            } else {
+                None
+            };
+            let want_color = menu_row_color(gated, tint, parent.cursor == row.slot);
+            if color.0 != want_color {
+                color.0 = want_color;
             }
             if bg.0 != Color::NONE {
                 bg.0 = Color::NONE;
@@ -8636,13 +8642,15 @@ pub fn update_menu_stack_windows(
         }
         let kind = open.level.kind;
         let label = rows_entry_label(kind, idx, open.rows, &dynamic);
-        let want = format!("{}{label}", style::cursor_prefix(open.level.cursor == idx));
+        // ur/77: same law as the mirror arm — windows under focus drop the `>`
+        // mark and keep the selected line in cursor gold.
+        let want = format!("  {label}");
         if **text != want {
             **text = want;
         }
         let gated = menu_row_disabled(kind, idx, &scene.snapshot);
         let tint = open.rows.get(idx).and_then(|r| r.tint);
-        let want_color = menu_row_color(gated, tint, false);
+        let want_color = menu_row_color(gated, tint, open.level.cursor == idx);
         if color.0 != want_color {
             color.0 = want_color;
         }
@@ -11397,7 +11405,8 @@ mod tests {
             "the list keeps its own frame, not the right seat"
         );
         assert_eq!(list.title, menu_title(MenuKind::QuestList));
-        assert_eq!(list.rows, vec!["  Quest A", "> Quest B"]);
+        // ur/77: under focus the window keeps no `>` mark; its cursor row stays gold.
+        assert_eq!(list.rows, vec!["  Quest A", "  Quest B"]);
         let (mirror, mirror_z) = drawn_mirror(&mut app).expect("the main menu stays open");
         assert_eq!(mirror.right, Val::Px(MENU_RIGHT_EDGE));
         let (_, title, _) = companion_frame_visible(&mut app);
@@ -11463,7 +11472,8 @@ mod tests {
             (Val::Px(16.0), Val::Px(48.0), Val::Px(366.0))
         );
         assert_eq!(stacked[0].title, menu_title(MenuKind::RetailConfigPage(3)));
-        assert_eq!(stacked[0].rows, vec!["> Page A"]);
+        // ur/77: the same no-mark law under focus.
+        assert_eq!(stacked[0].rows, vec!["  Page A"]);
         let (mirror, mirror_z) = drawn_mirror(&mut app).expect("the hub stays visible");
         assert_eq!(
             mirror.right,
@@ -11472,9 +11482,10 @@ mod tests {
         );
         let (_, title, rows) = companion_frame_visible(&mut app);
         assert_eq!(title, menu_title(MenuKind::RetailConfig));
+        // ur/77: unfocused windows list their rows without the `>` mark.
         assert_eq!(
             rows,
-            vec!["> Hub A", "  Hub B"],
+            vec!["  Hub A", "  Hub B"],
             "the hub lists its own rows, not the focused window's"
         );
         assert!(mirror_z < stacked[0].z && stacked[0].z < pane_z);
@@ -16287,6 +16298,29 @@ mod tests {
                 .any(|(t, _)| t.contains("Add-ons") || t.contains("<unknown>")),
             "the pane never keeps stale selector labels under the log: {detail:?}"
         );
+
+        // ur/77: mirrored under the open log the selector drops its `>` mark,
+        // and the selected line keeps its gold while Add-ons stays grey.
+        let mut mirror: Vec<(String, bevy::color::Color)> = app
+            .world_mut()
+            .query::<(&CompanionRow, &Node, &Text, &TextColor)>()
+            .iter(app.world())
+            .filter(|(_, node, _, _)| node.display != Display::None)
+            .map(|(_, _, text, color)| (text.0.clone(), color.0))
+            .collect();
+        mirror.sort_by_key(|(t, _)| t.clone());
+        assert_eq!(mirror.len(), 7, "{mirror:?}");
+        assert!(
+            !mirror.iter().any(|(t, _)| t.contains('>')),
+            "no marker on an unfocused window: {mirror:?}"
+        );
+        let selected = mirror
+            .iter()
+            .find(|(t, _)| t.contains("Aht Urhgan"))
+            .unwrap();
+        assert_eq!(selected.1, menu_row_color(false, None, true));
+        let addons = mirror.iter().find(|(t, _)| t.contains("Add-ons")).unwrap();
+        assert_eq!(addons.1, theme::TEXT_DISABLED);
 
         if let InputMode::Menu(stack) = &mut *app.world_mut().resource_mut::<InputMode>() {
             assert!(stack.pop());

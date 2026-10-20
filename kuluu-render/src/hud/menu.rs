@@ -6101,12 +6101,17 @@ pub fn mission_complete_bits(snap: &kuluu_snapshot::SceneSnapshot, log: u8) -> V
 
 /// The grey law (ur/62): a selector row is active when the snapshot reports any
 /// data for one of its chains — a non-zero main-port current, or any completion
-/// bit on 0x00D0/0x00D8. While no MISSION frame has folded (`info` absent) every
-/// row is grey; nothing here invents expansion ownership the wire never sent.
+/// bit on 0x00D0/0x00D8; nothing here invents expansion ownership the wire never
+/// sent. One exemption (ur/69): "would you grey out nations? its the very thing
+/// you would never grey out" - every character has a nationality and retail
+/// lights that row at login, so it stands always active. The exemption follows
+/// the chain set, not the row index, so list order cannot move or lose it.
 pub fn mission_selector_row_active(snap: &kuluu_snapshot::SceneSnapshot, label_idx: usize) -> bool {
-    mission_selector_chains(label_idx)
-        .iter()
-        .any(|&log| mission_chain_reported(snap, log))
+    let chains = mission_selector_chains(label_idx);
+    if chains.contains(&MISSION_LOG_SANDORIA) {
+        return true;
+    }
+    chains.iter().any(|&log| mission_chain_reported(snap, log))
 }
 
 fn mission_chain_reported(snap: &kuluu_snapshot::SceneSnapshot, log: u8) -> bool {
@@ -15683,8 +15688,18 @@ mod tests {
             ]
         );
 
+        let nations = MISSION_SELECTOR_LABELS_PINNED
+            .iter()
+            .position(|l| *l == "Nations")
+            .unwrap();
+        // Even on a snapshot with no MISSION frame at all, the Nations row stands
+        // lit (ur/69); every other chain greys until its own words report.
         let empty = kuluu_snapshot::SceneSnapshot::default();
+        assert!(!menu_row_disabled(MenuKind::MissionList, nations, &empty));
         for idx in 0..7 {
+            if idx == nations {
+                continue;
+            }
             assert!(
                 menu_row_disabled(MenuKind::MissionList, idx, &empty),
                 "row {idx} greys while no MISSION frame has folded"
@@ -15707,10 +15722,6 @@ mod tests {
             soa: 0,
             rov: 0,
         });
-        let nations = MISSION_SELECTOR_LABELS_PINNED
-            .iter()
-            .position(|l| *l == "Nations")
-            .unwrap();
         assert!(!menu_row_disabled(MenuKind::MissionList, nations, &snap));
         for idx in 0..7 {
             assert_eq!(

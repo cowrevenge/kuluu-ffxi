@@ -346,7 +346,12 @@ impl EventVm {
                         surfaced = Some(result);
                     }
                 }
-                StepResult::AwaitMessageAck | StepResult::AwaitServerAck(_) => {
+                StepResult::AwaitServerAck(tag) => {
+                    if surfaced.is_none() {
+                        surfaced = Some(StepResult::AwaitServerAck(tag));
+                    }
+                }
+                StepResult::AwaitMessageAck => {
                     tracing::debug!(
                         target: "ffxi_event::vm",
                         actor,

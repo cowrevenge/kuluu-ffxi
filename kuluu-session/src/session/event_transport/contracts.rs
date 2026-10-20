@@ -780,6 +780,49 @@ async fn progressing_child_wait_does_not_timeout_contract() {
     host.waiting();
 }
 
+async fn owner_child_server_acknowledgement_contract() {
+    const OP_WAIT: u8 = 0x1C;
+    const OP_SEND_TAG: u8 = 0x43;
+    const WAIT_FRAMES: u32 = 1;
+    let mut program = vec![OP_WAIT];
+    operand(&mut program, REFERENCE);
+    program.extend([OP_SEND_TAG, 0, OP_SEND_TAG, 1]);
+    message(&mut program, 1);
+    program.push(OP_END);
+    let mut child = block(program, vec![WAIT_FRAMES, 0]);
+    child.actor = ZONE_PLAYER_ACTOR;
+    let mut master = vec![OP_SET];
+    operand(&mut master, WORK_FARE);
+    operand(&mut master, REFERENCE);
+    master.push(OP_END);
+    let mut host = Host::new(
+        EventDat {
+            blocks: vec![block(master, vec![0]), child],
+        },
+        FARE,
+    )
+    .await;
+    let step = host.step(Drive::Tick(TICK));
+    assert!(matches!(
+        step.advance,
+        Advance::AwaitServerAck(ffxi_event::PendingTag::SendTag { end_para: 0 })
+    ));
+    let generic_ack = map::event_position_wire::EVENT_RECV_PENDING.to_le_bytes();
+    assert!(server_ack_matches(
+        &mut host.dialog,
+        &framing::SubPacket {
+            opcode: map::s2c::EVENTUCOFF,
+            sequence: 0,
+            data: &generic_ack,
+        }
+    ));
+    let step = host.step(Drive::ServerAck);
+    assert!(matches!(step.advance, Advance::Frame(_)));
+    let step = host.step(Drive::Choice(0));
+    assert!(matches!(step.advance, Advance::Ended { .. }));
+    assert!(host.dialog.active_end().is_none());
+}
+
 async fn abort_contract() {
     let mut replaced = Host::new(position_dat(false), FARE).await;
     replaced.begin(FARE).await;
@@ -1047,6 +1090,7 @@ async fn event_state_contract() {
     submap_reply_cancellation_diagnostic_contract().await;
     registration_reply_contract().await;
     progressing_child_wait_does_not_timeout_contract().await;
+    owner_child_server_acknowledgement_contract().await;
     abort_contract().await;
     action_event_gate_contract().await;
     item_stack_gate_contract().await;

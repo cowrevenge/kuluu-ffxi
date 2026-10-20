@@ -5411,6 +5411,28 @@ fn side_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<RecordFra
     (frame.x < LEFT_HALF_MAX_X).then_some(frame)
 }
 
+/// The display windows that must never fall into the selector column when their record
+/// has not been read yet: `quest00`/`quest01` and `miss00` measure (16,48,w366) on every
+/// install (`real_menu_window_frames_census_surfaces_every_record_rect` fails if a DAT moves
+/// them), so the pinned copy keeps the side decided at open time rather than by DAT load
+/// timing — an early-opened quest window landing beside Commands is ur/82 ("the quest window
+/// should open on the LEFT side"); retail anchors its panel there even with nothing loaded.
+fn pinned_left_frame(kind: MenuKind) -> Option<RecordFrame> {
+    match kind {
+        MenuKind::QuestList
+        | MenuKind::QuestDetail { .. }
+        | MenuKind::MissionDetail { .. }
+        | MenuKind::MissionText { .. } => Some(RecordFrame {
+            x: 16.0,
+            y: 48.0,
+            width: 366.0,
+            height: None,
+            anchor: FRAME_ANCHOR_NONE,
+        }),
+        _ => None,
+    }
+}
+
 /// A window that docks keeps its record x wherever its record sits
 /// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md).
 fn docked_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<RecordFrame> {
@@ -5514,6 +5536,7 @@ pub fn menu_stack_layout(stack: &MenuStack, frames: &ConfigDatRows) -> MenuStack
     let side = |index: usize| {
         side_record_frame(levels[index].kind, frames)
             .or_else(|| docked_record_frame(levels[index].kind, frames))
+            .or_else(|| pinned_left_frame(levels[index].kind))
     };
     let focused_frame = side(focused);
     let records: Vec<(usize, RecordFrame)> = (0..focused)
@@ -11890,6 +11913,48 @@ mod tests {
             vec![(1, MenuWindowSeat::Column)],
             "Commands closes; the Debug window wears its place"
         );
+    }
+
+    /// ur/82 ("the quest window should open on the LEFT side", while Commands stays
+    /// framed right): even with no DAT record frames read yet, the quest pair — and
+    /// the mission log/text windows sharing `miss00`'s rect — seat at their measured
+    /// left-column frame instead of beside the selector column.
+    #[test]
+    fn quests_and_mission_displays_never_fall_to_the_selector_column() {
+        let frames = ConfigDatRows::default();
+        let pinned = RecordFrame {
+            x: 16.0,
+            y: 48.0,
+            width: 366.0,
+            height: None,
+            anchor: FRAME_ANCHOR_NONE,
+        };
+        // The quest pair: Commands framed right, the list on its left rect — the
+        // exact layout ur/82 asks for while DAT records are still loading.
+        let mut quests = MenuStack::root();
+        quests.push(MenuKind::QuestList);
+        quests.push(MenuKind::QuestDetail { log: 0, id: 1 });
+        assert_eq!(
+            menu_stack_layout(&quests, &frames).windows,
+            vec![
+                (0, MenuWindowSeat::Column),
+                (1, MenuWindowSeat::Record(pinned)),
+                (2, MenuWindowSeat::Record(pinned)),
+            ],
+        );
+        // The mission displays sharing `miss00`'s rect hold the same seat.
+        for detail in [
+            MenuKind::MissionDetail { log: 0, member: 0 },
+            MenuKind::MissionText { log: 0, id: 1 },
+        ] {
+            let mut missions = MenuStack::root();
+            missions.push(MenuKind::MissionList);
+            missions.push(detail);
+            assert_eq!(
+                menu_stack_layout(&missions, &frames).focused(),
+                Some((2, MenuWindowSeat::Record(pinned)))
+            );
+        }
     }
 
     /// The anchor byte pins a frame to the screen edge it names: x and y gain

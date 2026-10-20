@@ -6382,19 +6382,17 @@ pub fn is_bazaar_stall_entity(e: &kuluu_snapshot::Entity, self_char_id: Option<u
         && (e.id as u64) < u32::MAX as u64
 }
 
-/// The `Current:`/`Completed:` sections of one log window (ur/64: retail's
-/// `miss00` lists real mission names under those two captions). Current comes from
-/// the main port (`NationMission`, `Expansion_*`; SoA/Rov de-offset); completion
-/// from ports 0x00D0/0x00D8. A chain the wire reports nothing for shows only what
-/// it reported — no invented rows.
-/// Names come from the scraped `xi.mission.id` lattice (vendor/server/scripts/
-/// globals/missions.lua); ids the vendor table leaves unnamed draw nothing.
+/// Retail's `miss00` law (ur/73): the child window is always two sections -
+/// `Current:` and `Completed:` are permanent headers, each filled with names or
+/// with retail's own reason line when empty. Current comes from the main port
+/// (`NationMission`, `Expansion_*`; SoA/Rov de-offset), completion from ports
+/// 0x00D0/0x00D8; names come from the scraped `xi.mission.id` lattice.
+/// The arrows cycle this window's members (ur/64); Nations merely opens on home first.
 pub fn mission_detail_rows(
     snap: &kuluu_snapshot::SceneSnapshot,
     log: u8,
     _member: u8,
 ) -> Vec<DynamicMenuRow> {
-    let mut rows: Vec<String> = Vec::new();
     let current = if log == MISSION_LOG_TOAU || log == MISSION_LOG_WOTG {
         mission_quest_port_current(snap, log)
     } else {
@@ -6404,15 +6402,21 @@ pub fn mission_detail_rows(
             .and_then(|info| mission_main_port_current(info, log))
     };
     let completed = mission_complete_bits(snap, log);
-    if let Some(id) = current.filter(|&id| !completed.contains(&(id as u16))) {
-        rows.push("Current:".to_string());
-        push_mission_name(&mut rows, log, id as u16);
+    let mut rows: Vec<String> = vec!["Current:".to_string()];
+    match current.filter(|&id| !completed.contains(&(id as u16))) {
+        Some(id) => push_mission_name(&mut rows, log, id as u16),
+        None => rows.push(mission_current_reason(snap, log).to_string()),
     }
-    if !completed.is_empty() {
-        rows.push("Completed:".to_string());
-        for id in completed {
-            push_mission_name(&mut rows, log, id);
-        }
+    let mut named: Vec<String> = Vec::new();
+    for id in completed {
+        push_mission_name(&mut named, log, id);
+    }
+    rows.push("Completed:".to_string());
+    if named.is_empty() {
+        // The capture's exact wording for an empty Completed section (ur/73).
+        rows.push("No completed missions.".to_string());
+    } else {
+        rows.append(&mut named);
     }
     // The wire port that named this window's data, kept on the inert rows.
     let port = match log {
@@ -6420,22 +6424,13 @@ pub fn mission_detail_rows(
         MISSION_LOG_TOAU | MISSION_LOG_WOTG => 0x00D8,
         _ => ffxi_proto::mission::PORT_MISSION_MAIN,
     };
-    let mut rows: Vec<DynamicMenuRow> = rows
-        .into_iter()
+    rows.into_iter()
         .map(|label| DynamicMenuRow {
             tint: None,
             label,
             action: DynamicMenuAction::MissionLogRow { port },
         })
-        .collect();
-    if rows.is_empty() {
-        rows.push(DynamicMenuRow {
-            tint: None,
-            label: "(nothing recorded)".to_string(),
-            action: DynamicMenuAction::MissionLogRow { port },
-        });
-    }
-    rows
+        .collect()
 }
 
 /// One named mission line; ids the vendor lattice carries no name for (unassigned
@@ -6444,6 +6439,25 @@ fn push_mission_name(rows: &mut Vec<String>, log: u8, id: u16) {
     if let Some(name) = ffxi_vocab::mission_names::mission_name(log, id) {
         rows.push((*name).to_string());
     }
+}
+
+/// The line retail puts under `Current:` when the log holds no current mission
+/// (ur/73 capture): another allegiance's nation log states why outright; every
+/// other empty section takes the neutral wording [I], as none is grounded for
+/// an in-era chain.
+fn mission_current_reason(snap: &kuluu_snapshot::SceneSnapshot, log: u8) -> &'static str {
+    let allegiance_locked = matches!(
+        log,
+        MISSION_LOG_SANDORIA | MISSION_LOG_BASTOK | MISSION_LOG_WINDURST
+    ) && snap
+        .missions
+        .info
+        .as_ref()
+        .is_some_and(|info| (log as u32) != info.nation);
+    if allegiance_locked {
+        return "Not allowed under current allegiance.";
+    }
+    "No current mission."
 }
 
 /// The `quest00` rows (vault main_menu.md §31): the chrome carries no captions,
@@ -15815,8 +15829,20 @@ mod tests {
             &sort,
             &mut detail,
         );
-        assert_eq!(labels(&detail)[0], "Completed:");
-        assert_eq!(labels(&detail)[1], "The Zeruhn Report");
+        assert_eq!(
+            labels(&detail),
+            [
+                "Current:",
+                "No current mission.",
+                "Completed:",
+                "The Zeruhn Report",
+                "Geological Survey",
+                "Fetichism",
+                "The Crystal Line",
+                "Wading Beasts",
+                "The Emissary"
+            ]
+        );
     }
 
     /// The log-window law (ur/64): `Current:` then `Completed:` with the names from
@@ -15847,6 +15873,8 @@ mod tests {
         assert_eq!(
             labels(&rows),
             [
+                "Current:",
+                "Not allowed under current allegiance.",
                 "Completed:",
                 "The Zeruhn Report",
                 "Geological Survey",
@@ -15871,9 +15899,17 @@ mod tests {
             "main-port current names itself"
         );
 
-        // A chain the wire reports nothing for shows only the empty note.
+        // A chain the wire reports nothing for still draws both sections (ur/73).
         let rows = mission_detail_rows(&snap, MISSION_LOG_ROV, 0);
-        assert_eq!(labels(&rows), ["(nothing recorded)"]);
+        assert_eq!(
+            labels(&rows),
+            [
+                "Current:",
+                "No current mission.",
+                "Completed:",
+                "No completed missions."
+            ]
+        );
     }
 
     /// SoA/Rov main-port words carry LSB's wire offsets (`(current * 2) + 0x6E`
@@ -15926,7 +15962,15 @@ mod tests {
         assert_eq!(mission_quest_port_current(&snap, MISSION_LOG_TOAU), Some(4));
         let rows = mission_detail_rows(&snap, MISSION_LOG_TOAU, 0);
         // Toau id 4 is `CONFESSIONS_OF_ROYALTY` in the vendor lattice.
-        assert_eq!(labels(&rows), ["Current:", "Confessions of Royalty"]);
+        assert_eq!(
+            labels(&rows),
+            [
+                "Current:",
+                "Confessions of Royalty",
+                "Completed:",
+                "No completed missions."
+            ]
+        );
     }
 
     /// Left/Right cycle the selector row's members (ur/64: "Left / Right by

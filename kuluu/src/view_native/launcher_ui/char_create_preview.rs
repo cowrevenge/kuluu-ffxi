@@ -48,7 +48,7 @@ pub(super) fn register(app: &mut App) {
 }
 
 fn tag_create_preview_meshes(
-    trigger: On<Add, Mesh3d>,
+    trigger: On<Add<Mesh3d>>,
     parents: Query<&ChildOf>,
     preview_parents: Query<(), With<CharCreatePreviewParent>>,
     mut commands: Commands,

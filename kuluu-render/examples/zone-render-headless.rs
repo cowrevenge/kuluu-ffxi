@@ -1,7 +1,7 @@
 use bevy::app::AppExit;
 use bevy::camera::ScalingMode;
 use bevy::prelude::*;
-use bevy::render::view::screenshot::{save_to_disk, Capturing, Screenshot};
+use bevy::render::view::screenshot::Capturing;
 use ffxi_dat::weather::collect_zone_weather_sets;
 use kuluu_render::camera::OperatorCamera;
 use kuluu_render::dat_mmb::{
@@ -21,6 +21,9 @@ use kuluu_render::vana_time::VanaClock;
 use kuluu_render::weather::{apply_zone_weather, sample_zone_weather, ZoneWeather};
 use kuluu_render::SceneState;
 use std::env;
+
+#[path = "support/capture_preview.rs"]
+mod capture_preview;
 
 // --sky reuses the REAL client sky pipeline (no reimplementation): the skybox
 // gradient dome, the sun/moon discs + directional lights, and the lens flare,
@@ -222,15 +225,13 @@ fn main() {
     );
     let mut app = App::new();
     app.insert_resource(VanaClock::anchored_at_hour(p.hour))
+        .insert_resource(bevy::winit::WinitSettings::continuous())
         .insert_resource(p)
         .init_resource::<FC>()
         .init_resource::<CS>()
         .insert_resource(ClearColor(Color::BLACK))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                resolution: (1280u32, 1280u32).into(),
-                ..default()
-            }),
+            primary_window: Some(capture_preview::window((1280, 1280))),
             ..default()
         }))
         .add_plugins(FfxiZoneMaterialPlugin)
@@ -311,6 +312,9 @@ fn main() {
             // they do in the client. Only the simulator's two systems are pulled in — the
             // rest of SchedulerRuntimePlugin wants a live session's resources.
             .init_resource::<kuluu_render::particle_sim::ParticleSimulator>()
+            .init_resource::<kuluu_render::distortion_pass::ActiveDistortion>()
+            .add_message::<kuluu_render::scheduler_runtime::ParticleSpawnTrace>()
+            .add_message::<kuluu_render::audio::SfxEvent>()
             .add_systems(
                 Update,
                 (
@@ -498,6 +502,7 @@ fn setup(
         | bevy::render::render_resource::TextureUsages::RENDER_ATTACHMENT;
     let target = images.add(target);
     c.insert_resource(CapTarget(target.clone()));
+    capture_preview::spawn(&mut c, target.clone(), UVec2::new(size.width, size.height));
     let cam_target = bevy::camera::RenderTarget::Image(target.into());
     let cam = match p.cam {
         Some(pos) => c
@@ -521,6 +526,7 @@ fn setup(
             .id()
         }
     };
+    c.entity(cam).insert(bevy::camera::ShadowLodOrigin);
     if p.fog {
         c.entity(cam).insert((
             OperatorCamera,
@@ -743,8 +749,7 @@ fn cap(
         *frame_secs = 0.0;
     }
     if !s.0 && f.0 >= p.cap {
-        c.spawn(Screenshot::image(target.0.clone()))
-            .observe(save_to_disk(p.out.clone()));
+        capture_preview::capture(&mut c, target.0.clone(), &p.out);
         s.0 = true;
         eprintln!("captured -> {}", p.out);
     }

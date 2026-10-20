@@ -623,7 +623,7 @@ pub struct MmbSpriteMesh {
     pub indices: Vec<u32>,
     // Stage 0's D argument per `positions` entry, raw D3DCOLOR byte/255 — DoD3mDraw runs its
     // tables against the un-doubled upload colour (unlike the D3m path, whose /128 normalise
-    // folds stage 0's MODULATE2X in), so ffxi_particle.wgsl's MMB tables expect this scale.
+    // folds stage 0's MODULATE2X in), so ffxi_particle.wesl's MMB tables expect this scale.
     pub colors: Vec<[f32; 4]>,
 
     pub texture_name: String,
@@ -10649,7 +10649,7 @@ mod tests {
                     center: Vec3::ZERO,
                     half_extent: Vec2::ONE,
                     haze_offset: 0.02,
-                    started_at: std::time::Instant::now(),
+                    started_at: bevy::platform::time::Instant::now(),
                     duration_secs: 1.0,
                     envelope: None,
                     follow: None,

@@ -56,6 +56,6 @@ row. Read a pin's date with `git -C vendor/<name> log -1 --format=%cs`.
 
 ## Vendored crates
 
-`recastnavigation-rs/`, `cab/` and `bevy_pbr/` are patched copies of crates.io
+`recastnavigation-rs/`, `cab/` and `bevy_framepace/` are patched copies of crates.io
 releases wired through `[patch.crates-io]` in the workspace `Cargo.toml`,
 which states each patch's reason. Grep `KULUU PATCH` for the changed lines.

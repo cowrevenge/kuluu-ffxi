@@ -611,7 +611,7 @@ mod tests {
     use super::*;
 
     // vendor/server/src/login/auth_session.h SupportedXiloaderVersion
-    const LSB_SUPPORTED_XILOADER_VERSION: [u8; 3] = [2, 1, 0];
+    const LSB_SUPPORTED_XILOADER_VERSION: [u8; 3] = [2, 2, 0];
 
     const TEST_RESPONSE_LIMIT: Duration = Duration::from_secs(1);
     const TEST_STALL_LIMIT: Duration = Duration::from_millis(20);

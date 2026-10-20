@@ -6844,11 +6844,15 @@ pub fn quest_menu_rows() -> Vec<DynamicMenuRow> {
         },
         row("", None),
         row("Records of Eminence", None),
-        row("Current            0/30", None),
+        // ur/88 law: every line stays inside `quest00`'s frame — the window fits
+        // ≈36 labelled characters at kuluu's menu font, so these columns take
+        // retail's layout without its slack and no trailing value crosses the
+        // right border.
+        row("Current         0/30", None),
         row("Objective List", Some(MenuRowTint::RovObjectiveLink)),
-        row("Vana'Bout          Plaudits :      0", None),
-        row("Sparks :         0 Unity Accolades :         0", None),
-        row("Deeds :           0 Number Completed :        0", None),
+        row("Vana'Bout     Plaudits :     0", None),
+        row("Sparks :    0 Unity Accolades :   0", None),
+        row("Deeds :     0 Number Completed :  0", None),
     ]
 }
 
@@ -7695,6 +7699,10 @@ fn order_dynamic_rows(
         // to that law too: retail's selector order is Nations first (ur/65), and the log window's
         // Current/Completed sections read by position - this catch-all alphabetised both once,
         // which is what made the pinned list "not match".
+        // The quest family draws fixed panels too: the hub's block reads by
+        // position (grey Vana'Bout, pink link), and quest lists are log-then-id
+        // per their ports — ur/88 shows the catch-all alphabetising the hub into
+        // nonsense once already.
         MenuKind::ItemAction { .. }
         | MenuKind::KeyItems
         | MenuKind::EmoteList
@@ -7702,7 +7710,10 @@ fn order_dynamic_rows(
         | MenuKind::StatusDetail { .. }
         | MenuKind::MissionList
         | MenuKind::MissionDetail { .. }
-        | MenuKind::MissionText { .. } => {}
+        | MenuKind::MissionText { .. }
+        | MenuKind::QuestMenu
+        | MenuKind::QuestList { .. }
+        | MenuKind::QuestDetail { .. } => {}
         _ => rows.sort_by(|a, b| a.label.cmp(&b.label)),
     }
 }
@@ -16913,6 +16924,15 @@ mod tests {
         assert!(rows[4].label.contains("0/30"), "{}", rows[4].label);
         assert_eq!(rows[5].label, "Objective List");
         assert_eq!(rows[5].tint, Some(MenuRowTint::RovObjectiveLink));
+        // ur/88: no line may cross `quest00`'s right border — the widest row
+        // plus its cursor marker stays inside the frame's ~36 characters.
+        for row in &rows {
+            assert!(
+                row.label.chars().count() <= 36,
+                "line escapes the frame: {}",
+                row.label
+            );
+        }
         let snap = kuluu_snapshot::SceneSnapshot::default();
         for index in 0..rows.len() {
             assert_eq!(
@@ -16922,6 +16942,22 @@ mod tests {
                 rows[index].label
             );
         }
+    }
+
+    /// ur/88: the quest family is exempt from [`order_dynamic_rows`]' alphabetical
+    /// catch-all — hub rows come back in panel order, drills first, never sorted.
+    #[test]
+    fn quest_kinds_keep_their_built_row_order() {
+        let mut rows = quest_menu_rows();
+        order_dynamic_rows(
+            MenuKind::QuestMenu,
+            &crate::hud::item_detail::SortOptions::default(),
+            &mut rows,
+        );
+        assert_eq!(rows[0].label, "Current", "the hub never re-sorts (ur/88)");
+        assert_eq!(rows[1].label, "Completed");
+        assert_eq!(rows[3].label, "Records of Eminence");
+        assert!(rows[8].label.starts_with("Deeds"), "{}", rows[8].label);
     }
 
     #[test]

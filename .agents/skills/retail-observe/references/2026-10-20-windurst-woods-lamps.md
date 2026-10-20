@@ -83,10 +83,16 @@ The incorrect entry was cancelled without submission.
 - Observation date: 2026-10-20 UTC.
 - Client profile: `horizonxi-2023`.
 - Client DLL SHA-256: `f4f90fbd080c05448aab3f866b127d7c1675b3cc15c8beaa57bfc584064b7e7c`.
-- DAT 341: `ROM/1/37.DAT`.
-- DAT SHA-256: `f4a6afe801ae258bb395d432b32c5aedf13cd049da56d2e199cdd8c671f62466`.
+- DAT 341: `ROM/0/81.DAT`.
+- DAT SHA-256: `77c82c162548c3d8cde14975f3382e3660dae13d8ca375485d403ba9cfd82ba3`.
 - The registered HXI and current-retail installations supplied byte-identical DAT 341 files.
 - Server command source: `vendor/server/scripts/commands/pos.lua`, `commandObj.onTrigger`.
 - The deployed `/server/scripts/commands/pos.lua` matched the checked source during observation.
 - Host window: 69883; owner PID: 10708.
 - Private profile: `lsb-jev`; credentials were not recorded in this observation.
+
+Logical DAT 341 resolves through each install's VTABLE and FTABLE to `ROM/0/81.DAT`.
+Both tables select ROM 1 and file word 81; the file size is 9281824 bytes.
+The files were compared directly and are byte-identical.
+Resolver proof is `artifacts/verify/release-080-current-main/retail-reference/dat341-resolver-proof.json`.
+The earlier `ROM/1/37.DAT` path and hash described another file and are superseded.

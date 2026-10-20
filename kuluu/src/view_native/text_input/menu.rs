@@ -1771,7 +1771,12 @@ fn toggle_debug_panel(
             if missions.logs.is_empty() {
                 lines.push("[debug] mission logs: (no ports folded)".to_string());
             }
+            // Half a screen of zeroes helps nobody; the fold itself is the proof.
             for entry in &missions.logs {
+                if entry.data.iter().all(|w| *w == 0) {
+                    lines.push(format!("[debug] port {:#06x}: (empty)", entry.port));
+                    continue;
+                }
                 let words = entry
                     .data
                     .iter()

@@ -5396,11 +5396,12 @@ pub fn dock_placement(
 /// statcom2 sits exactly over the main menu's page 1 and configwi over its page 2, so either one
 /// hides the main menu under it. ur/60 adds the Missions law ("missions should open a new child
 /// menu in the same place AS commands. (commands closes)") : when the missions list focuses,
-/// Commands does not linger beside it as an opener - the list takes its column.
+/// Commands does not linger beside it as an opener - the list takes its column. Debug joins by the same ruling
+/// (ur/72: "the command window should hide/close" while the Debug window is open).
 fn covers_main_menu(kind: MenuKind) -> bool {
     matches!(
         kind,
-        MenuKind::Status | MenuKind::RetailConfig | MenuKind::MissionList
+        MenuKind::Status | MenuKind::RetailConfig | MenuKind::MissionList | MenuKind::Debug
     )
 }
 
@@ -11504,6 +11505,16 @@ mod tests {
             menu_stack_layout(&missions, &frames).windows,
             vec![(1, MenuWindowSeat::Column)],
             "Commands closes; the Missions list wears its place"
+        );
+
+        // ur/72 ("the debug window still shows commands.. the command window should
+        // hide/close"): Debug covers the column exactly like the missions list.
+        let mut debug = MenuStack::root();
+        debug.push(MenuKind::Debug);
+        assert_eq!(
+            menu_stack_layout(&debug, &frames).windows,
+            vec![(1, MenuWindowSeat::Column)],
+            "Commands closes; the Debug window wears its place"
         );
     }
 

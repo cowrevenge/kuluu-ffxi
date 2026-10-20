@@ -39,6 +39,18 @@ rg -n -i 'TOPIC' references/
 Read only the matching records and the selected host procedure.
 Use [retail-grounding](../retail-grounding/SKILL.md) to resolve source conflicts or behavior questions.
 
+## Select the control method
+
+In Codex, prefer `cua_repl` computer use when it can select and control the running client.
+Inspect a fresh screenshot before sending input.
+Keep the selected host procedure for setup, diagnostics, and supported capture operations.
+If computer use cannot select or control the client, save its diagnostic.
+Then use a supported host input method only when the active tool rules permit it.
+
+In other coding agents, use the selected host procedure for capture and input.
+Use Jev or the current agent's vision for decisions as described below.
+Neither Codex tools nor Jev credentials are mandatory across coding agents.
+
 ## Observe one action at a time
 
 1. Run the selected procedure's `doctor` command.

@@ -19,6 +19,25 @@ Session behavior requires a real session against the server; cosmetic widgets
 can use the production fixture described below. Tests and source inspection
 alone do not establish the visible result.
 
+## Select the GUI control method
+
+In Codex, prefer `cua_repl` computer use for visible keyboard, mouse, scroll, and drag tests.
+First select the running client and inspect a fresh screenshot.
+Use the client socket for state, diagnostics, and captures when those operations are available.
+Computer use availability does not establish access to the selected client.
+If selection or control fails, save the diagnostic before selecting a supported alternative.
+Follow the active tool rules when selecting an alternative input method.
+
+In other coding agents, use the portable input and capture procedures in [drive-gui.md](references/drive-gui.md).
+Jev or the current agent's vision can supply visual decisions when available.
+Do not require Codex tools or Jev credentials in another coding agent.
+
+Allow only one input driver per client.
+Inspect each result before selecting the next input.
+Stop after two consecutive inputs produce no visible change.
+Do not use repeated Enter input without checks of the visible result.
+Synthetic input does not establish physical trackpad behavior.
+
 ## Required behavior evidence
 
 Before collection, derive the required cases from the reported problem and the final change.

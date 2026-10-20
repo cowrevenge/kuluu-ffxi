@@ -272,6 +272,7 @@ pub fn collect_mouse_system(
     state.wheel = 0.0;
 
     for ev in motion.read() {
+        tracing::trace!(target: "input_trace", delta = ?ev.delta, "Raw mouse motion");
         state.delta += ev.delta;
     }
     let motion_delta = state.delta;
@@ -279,17 +280,27 @@ pub fn collect_mouse_system(
         window.focused && options.grab_mode == CursorGrabMode::Locked
     });
     if locked && (state.left || state.right) {
+        for ev in cursor.read() {
+            tracing::trace!(target: "input_trace", position = ?ev.position, locked, "Logical cursor position");
+        }
         cursor.clear();
         if let Some(position) = state.cursor_pos.as_mut() {
             *position += motion_delta;
         }
     } else {
         for ev in cursor.read() {
+            tracing::trace!(target: "input_trace", position = ?ev.position, locked, "Logical cursor position");
             state.cursor_pos = Some(ev.position);
         }
     }
     for ev in wheel.read() {
+        tracing::trace!(target: "input_trace", unit = ?ev.unit, y = ev.y, "Mouse wheel input");
         state.wheel += ev.y;
+    }
+    if motion_delta != Vec2::ZERO || state.wheel != 0.0 {
+        if let Ok((window, options)) = windows.single() {
+            tracing::trace!(target: "input_trace", scale = window.scale_factor(), focused = window.focused, grab_mode = ?options.grab_mode, "Mouse window state");
+        }
     }
     for ev in buttons.read() {
         let pressed = ev.state == ButtonState::Pressed;
@@ -393,9 +404,13 @@ pub fn mouse_camera_system(
                 CameraMode::Chase => Some(chase.distance),
                 CameraMode::FirstPerson => None,
             };
+            let yaw_before = chase.yaw;
             chase.yaw +=
                 camera_orbit_yaw_rate_rad_per_sec(axis.x, FOLLOW_ACTOR_FREE_RUN_DEFAULT, rig)
                     * time.delta_secs();
+            if axis != Vec2::ZERO {
+                tracing::trace!(target: "input_trace", ?anchor, ?cursor, ?axis, yaw_delta = chase.yaw - yaw_before, delta_secs = time.delta_secs(), "Mouse camera drag");
+            }
 
             let (lo, hi) = match mode {
                 CameraMode::Chase => (ChaseCamera::PITCH_MIN, ChaseCamera::PITCH_MAX),

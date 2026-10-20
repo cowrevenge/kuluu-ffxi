@@ -47,6 +47,7 @@ struct P {
     amb: f32,
     sun: f32,
     cam: Option<Vec3>,
+    stream_origin: Option<Vec3>,
     tgt: Vec3,
     fog: bool,
     sky: bool,
@@ -106,6 +107,7 @@ fn main() {
         amb: 600.0,
         sun: 8000.0,
         cam: None,
+        stream_origin: None,
         tgt: Vec3::ZERO,
         fog: false,
         sky: false,
@@ -151,6 +153,10 @@ fn main() {
             }
             "--cam" => {
                 p.cam = Some(f3(&a, i));
+                i += 4;
+            }
+            "--stream-origin" => {
+                p.stream_origin = Some(f3(&a, i));
                 i += 4;
             }
             "--tgt" => {
@@ -488,6 +494,13 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
     settings: Res<GraphicsSettings>,
 ) {
+    if let Some(origin) = p.stream_origin {
+        c.spawn((
+            kuluu_render::components::IsSelf,
+            Transform::from_translation(origin),
+            GlobalTransform::from_translation(origin),
+        ));
+    }
     d.zone_geom_mode = p.mode;
     if p.draw_scale.is_none() {
         d.world = 1e5;

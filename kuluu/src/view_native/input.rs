@@ -1199,6 +1199,10 @@ pub fn dispatch_movement_system(
             bindings.pressed(Action::CameraZoomIn, keys) || bindings.pressed(Action::PageUp, keys);
         let zoom_out = bindings.pressed(Action::CameraZoomOut, keys)
             || bindings.pressed(Action::PageDown, keys);
+        let trace_zoom = zoom_in || zoom_out || env.wheel_zoom.armed().is_some();
+        let focal_before = env.view_fov.focal_length;
+        let owed_before = env.wheel_zoom.frames_owed();
+        let owed_arm = env.wheel_zoom.armed();
         // Retail's tick: the 1/60 s frames elapsed since the last update (M29), so the focal moves at
         // 360/s whatever rate the fixed step runs at.
         let tick_frames = time.delta_secs() * kuluu_render::scheduler_runtime::ROUTINE_FPS;
@@ -1228,6 +1232,9 @@ pub fn dispatch_movement_system(
                 // Reaching a band end discards the rest of the owed frames too.
                 env.wheel_zoom.clear();
             }
+        }
+        if trace_zoom {
+            tracing::trace!(target: "input_trace", delta_secs = time.delta_secs(), tick_frames, focal_before, focal_after = env.view_fov.focal_length, owed_before, owed_after = env.wheel_zoom.frames_owed(), ?owed_arm, zoom_in, zoom_out, "Fixed camera zoom");
         }
     }
 

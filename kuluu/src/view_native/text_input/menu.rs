@@ -692,6 +692,23 @@ pub(super) fn confirm_menu_at_cursor(
             if matches!(action, A::DisplayInfo) {
                 return None;
             }
+            // The mission log's section headers and reason lines, its text
+            // window's readout rows, and every `quest01` detail line (with the
+            // quest list's "(no quests reported)" placeholder) carry these three
+            // actions as inert data — §30/§31's stay-inert law. Unconsumed they
+            // fell through to the one-shot tail below, which answers any
+            // leftover action with World: one stray press closed the whole menu
+            // family, and reopening it presented a fresh focused selector —
+            // full border, `>` at the hover seat — where the kept mirror should
+            // still have drawn. Owner law (ur/92): "Clicking 'no currenct quest'
+            // should do NOTHING (not close the window)"; with it the ur/77
+            // no-mark and settled-width states never get torn down to rebuild.
+            if matches!(
+                action,
+                A::MissionLogRow { .. } | A::MissionTextRow { .. } | A::QuestDetailRow { .. }
+            ) {
+                return None;
+            }
             // kuluu's Controls-page commands (bead kuluu-o9qt7.26.1): applied
             // through the same seam as `/keybinds preset|reset`, then KEEP the page
             // open — `refresh_dynamic_menu_rows` re-lists its live rows on top of
@@ -3468,6 +3485,73 @@ mod menu_key_tests {
             },
             "Left steps back over the same ring"
         );
+    }
+
+    /// Owner law (ur/92 round): selecting an inert readout row does NOTHING —
+    /// "Clicking 'no currenct quest' should do NOTHING (not close the window)".
+    /// The placeholder carries `QuestDetailRow`'s sentinel; before the fix any
+    /// unconsumed action fell to the one-shot tail, which answers World, so one
+    /// Enter closed every menu at once and reopening showed a fresh selector.
+    #[test]
+    fn inert_readout_row_selects_never_close_their_windows() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+
+        // The quest list of a region the wire reports nothing about: its only
+        // row is the "(no quests reported)" placeholder.
+        stack.push(MenuKind::QuestList {
+            completed: false,
+            region: 3,
+        });
+        harness.dynamic.rows = kuluu_render::hud::menu::quest_list_rows(
+            &harness.scene_state.snapshot,
+            &kuluu_render::hud::menu::QuestTextCatalog::default(),
+            false,
+            3,
+        );
+        assert_eq!(harness.dynamic.rows.len(), 1, "the placeholder row");
+        let markers = world.resource_mut::<MapMarkers>();
+        let next = harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        assert!(
+            next.is_none(),
+            "a placeholder select must not leave menu mode: {next:?}"
+        );
+        assert_eq!(
+            stack.current().unwrap().kind,
+            MenuKind::QuestList {
+                completed: false,
+                region: 3
+            },
+            "nothing pushed over the list either"
+        );
+
+        // A `miss00` section header is inert by the same law (ur/73).
+        stack.push(MenuKind::MissionDetail {
+            log: kuluu_render::hud::menu::MISSION_LOG_SANDORIA,
+            member: 0,
+        });
+        let depth = stack.levels.len();
+        harness.dynamic.rows = kuluu_render::hud::menu::mission_detail_rows(
+            &harness.scene_state.snapshot,
+            &kuluu_render::hud::menu::MissionTextCatalog::default(),
+            kuluu_render::hud::menu::MISSION_LOG_SANDORIA,
+            0,
+        );
+        let header = harness
+            .dynamic
+            .rows
+            .iter()
+            .position(|r| r.label == "Current:")
+            .expect("the permanent Current: header (ur/73)");
+        stack.current_mut().unwrap().cursor = header;
+        let markers = world.resource_mut::<MapMarkers>();
+        let next = harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        assert!(
+            next.is_none(),
+            "a header select must not leave menu mode: {next:?}"
+        );
+        assert_eq!(stack.levels.len(), depth, "the log keeps its seat");
     }
 
     fn menu_root_trade_index() -> usize {

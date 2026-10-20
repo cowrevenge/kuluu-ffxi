@@ -7242,12 +7242,17 @@ fn order_dynamic_rows(
         // A Status detail window is a readout, not a list. Retail fills each one straight out of its
         // source object in one fixed order (profile's allegiance block then its Monstrosity rows,
         // skills by skill id, currencies by descriptor), so re-sorting moves data the player reads
-        // positionally, and profile's rank gauge hangs from a named row.
+        // positionally, and profile's rank gauge hangs from a named row. The mission windows belong
+        // to that law too: retail's selector order is Nations first (ur/65), and the log window's
+        // Current/Completed sections read by position - this catch-all alphabetised both once,
+        // which is what made the pinned list "not match".
         MenuKind::ItemAction { .. }
         | MenuKind::KeyItems
         | MenuKind::EmoteList
         | MenuKind::Arrange(_)
-        | MenuKind::StatusDetail { .. } => {}
+        | MenuKind::StatusDetail { .. }
+        | MenuKind::MissionList
+        | MenuKind::MissionDetail { .. } => {}
         _ => rows.sort_by(|a, b| a.label.cmp(&b.label)),
     }
 }
@@ -15741,6 +15746,50 @@ mod tests {
                 "selector row {idx} must open its first chain"
             );
         }
+    }
+
+    /// Both mission windows survive `order_dynamic_rows` untouched: the catch-all
+    /// alphabetising pass re-sorted them once (ur/65: "it still does not match"),
+    /// moving rows retail reads positionally.
+    #[test]
+    fn mission_windows_keep_their_built_order_through_row_sorting() {
+        let sort = crate::hud::item_detail::SortOptions {
+            auto: true,
+            key: crate::hud::item_detail::SortKey::Name,
+        };
+
+        let mut rows = mission_selector_rows();
+        order_dynamic_rows(MenuKind::MissionList, &sort, &mut rows);
+        assert_eq!(
+            labels(&rows),
+            [
+                "Nations",
+                "Zilart",
+                "Promathia",
+                "Aht Urhgan",
+                "Altana",
+                "Adoulin",
+                "Add-ons"
+            ]
+        );
+
+        // The log window's header and wire order survive the same pass.
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: 0x00D0,
+            data: [0, 0, 0b111111, 0, 0, 0, 0, 0],
+        });
+        let mut detail = mission_detail_rows(&snap, MISSION_LOG_BASTOK, 0);
+        order_dynamic_rows(
+            MenuKind::MissionDetail {
+                log: MISSION_LOG_BASTOK,
+                member: 0,
+            },
+            &sort,
+            &mut detail,
+        );
+        assert_eq!(labels(&detail)[0], "Completed:");
+        assert_eq!(labels(&detail)[1], "The Zeruhn Report");
     }
 
     /// The log-window law (ur/64): `Current:` then `Completed:` with the names from

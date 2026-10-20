@@ -4903,6 +4903,12 @@ pub fn renders_bespoke_screen(kind: MenuKind) -> bool {
 #[derive(Component)]
 pub struct MainMenu;
 
+/// A window's small absolute-marked extras — caption arrows, hub dots — which
+/// `update_main_menu` must reach without spending a system parameter each: the
+/// fn sits at bevy_ecs 0.19's ceiling of 16 function-system arguments.
+#[derive(Component)]
+pub struct MenuDecoration;
+
 #[derive(Component)]
 pub struct MainMenuTitle;
 
@@ -4929,6 +4935,9 @@ const MENU_TITLE_FONT_PX: f32 = 14.0;
 /// The size the selector's rows draw at; `status_pane_width` sizes that window from it, so the two
 /// cannot drift apart.
 const MENU_ROW_FONT_PX: f32 = 14.0;
+/// The vertical breathing between flowed rows — mirrors the `row_gap` of
+/// [`style::window_frame`], which is what every pane row stacks by.
+pub const MENU_PANEL_ROW_GAP_PX: f32 = 2.0;
 const MENU_BORDER_PX: f32 = 1.0;
 /// Air inside a title's mask strip either side of the word, as in the persona caption.
 const MENU_TITLE_MASK_PAD_PX: f32 = 3.0;
@@ -5068,6 +5077,45 @@ pub struct MainMenuCompanionFrame;
 
 #[derive(Component)]
 pub struct CompanionTitle;
+
+/// One blue hub dot of the quest menu (ur/90): retail marks its selectable
+/// rows with a ●; per-row span colours stay [I-pending] in this window model,
+/// so the dots ride as stand-alone glyphs on the monospace grid beside the
+/// reserved bullet column.
+#[derive(Component)]
+pub struct MenuBulletRow {
+    pub slot: usize,
+}
+
+/// ur/90: rows of [`quest_menu_rows`] retail hangs a blue dot on — measured from
+/// the capture, every row but the blank, the header and the Sparks/Deeds stat
+/// continuations.
+pub const QUEST_MENU_BULLETED_ROWS: [usize; 5] = [0, 1, 4, 5, 6];
+
+/// The dot's blue as captured (ur/87 gradient core ≈RGB(41,208,248)).
+pub const QUEST_MENU_BULLET_BLUE: Color = Color::srgb(0.16, 0.82, 0.97);
+
+/// ur/89: a blank separator row never holds the cursor — a landing on one
+/// steps past it in the pressed direction, wrapping; an all-blank list keeps
+/// the target where it was.
+pub fn step_past_blank_rows(rows: &[DynamicMenuRow], target: usize, down: bool) -> usize {
+    let total = rows.len();
+    if total == 0 {
+        return target;
+    }
+    let mut at = target % total;
+    for _ in 0..total {
+        if !rows[at].label.is_empty() {
+            return at;
+        }
+        at = if down {
+            (at + 1) % total
+        } else {
+            (at + total - 1) % total
+        };
+    }
+    target
+}
 
 #[derive(Component)]
 pub struct CompanionRow {
@@ -5846,6 +5894,7 @@ fn spawn_pane_column(parent: &mut ChildSpawnerCommands) {
                     ("◄", Val::Px(MENU_TITLE_MASK_PAD_PX), Val::Auto)
                 };
                 c.spawn((
+                    MenuDecoration,
                     MissionLogArrow { forward },
                     Button,
                     Node {
@@ -5874,6 +5923,30 @@ fn spawn_pane_column(parent: &mut ChildSpawnerCommands) {
                     style::text_font(MENU_ROW_FONT_PX),
                     TextColor(theme::TEXT),
                     BackgroundColor(Color::NONE),
+                ));
+            }
+            // ur/90: the hub's blue dots share the row slots. The HUD font is
+            // monospace, so each glyph sits on the grid: column 2 (the label
+            // prefix keeps columns 0-1 for the cursor mark), and a vertical step
+            // of one line height plus the frame's 2px row gap.
+            let advance = crate::ui_font::text_width_px("x", MENU_ROW_FONT_PX);
+            let line_h = crate::ui_font::line_height_px(MENU_ROW_FONT_PX);
+            for slot in 0..MAX_ENTRY_COUNT {
+                c.spawn((
+                    MenuDecoration,
+                    MenuBulletRow { slot },
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(style::WINDOW_PAD_X_PX + 2.0 * advance),
+                        top: Val::Px(
+                            style::WINDOW_PAD_Y_PX + slot as f32 * (line_h + MENU_PANEL_ROW_GAP_PX),
+                        ),
+                        ..default()
+                    },
+                    TextSpan::new(""),
+                    text_nowrap(),
+                    style::text_font(MENU_ROW_FONT_PX),
+                    TextColor(QUEST_MENU_BULLET_BLUE),
                 ));
             }
         });
@@ -6818,9 +6891,11 @@ const QUEST_MENU_ROV_VANABOUT_ROW: usize = 6;
 /// The FIRST Quests window — exactly what owner capture ur/87 shows when the
 /// Commands quest row opens: two drill rows over a Records-of-Eminence block,
 /// whose counters have no wire field in kuluu's snapshot and so ride as
-/// grounded-empty zeros, exactly as captured. Retail hangs a blue ● on seven of
-/// the nine lines; those are per-row spans our single-colour row model cannot
-/// express yet [I-pending], so labels ride bare — left-aligned like every other
+/// grounded-empty zeros, exactly as captured. Retail hangs a blue ● on five of
+/// the nine lines ([`QUEST_MENU_BULLETED_ROWS`], counted from ur/87); they ride
+/// beside these rows as stand-alone glyphs (`MenuBulletRow`). Other per-row span
+/// colours stay [I-pending] in our single-colour row model, so labels ride bare —
+/// left-aligned like every other
 /// list (ur/40), values pushed into fixed columns. 'Objective List' carries the
 /// measured pink; Vana'Bout is gated grey as photographed. Selecting a hub row
 /// that leads nowhere stays inert like every text-panel window: kuluu has no
@@ -8464,7 +8539,7 @@ pub fn update_main_menu(
             Without<MainMenuRow>,
             Without<MainMenuPane>,
             Without<MainMenuCompanionFrame>,
-            Without<MissionLogArrow>,
+            Without<MenuDecoration>,
         ),
     >,
     mut pane_q: Query<
@@ -8474,7 +8549,7 @@ pub fn update_main_menu(
             Without<MainMenuRow>,
             Without<MainMenuCompanionFrame>,
             Without<CompanionRow>,
-            Without<MissionLogArrow>,
+            Without<MenuDecoration>,
         ),
     >,
     // One fill for both windows: mirror nodes carry the same title/row
@@ -8489,10 +8564,21 @@ pub fn update_main_menu(
             &mut TextColor,
             &mut BackgroundColor,
         ),
-        (Without<MainMenuTitle>, Without<MissionLogArrow>),
+        (Without<MainMenuTitle>, Without<MenuDecoration>),
     >,
     mut title_q: Query<(&MainMenuTitle, Option<&CompanionTitle>, &mut Text)>,
-    mut arrow_q: Query<(&MissionLogArrow, &mut Node)>,
+    // The caption arrows and the hub dots (ur/90) share one parameter — exactly
+    // which marker each decoration entity carries picks its role; arrow entities
+    // have no span, dot entities carry only their `Node` for positioning.
+    #[allow(clippy::type_complexity)] mut decor_q: Query<
+        (
+            Option<&MenuBulletRow>,
+            Option<&MissionLogArrow>,
+            &mut Node,
+            Option<&mut TextSpan>,
+        ),
+        With<MenuDecoration>,
+    >,
     mut comp_frame_q: Query<
         (&mut Node, &mut ZIndex, &ComputedNode),
         (
@@ -8500,7 +8586,7 @@ pub fn update_main_menu(
             Without<MainMenuRow>,
             Without<MainMenuPane>,
             Without<MainMenu>,
-            Without<MissionLogArrow>,
+            Without<MenuDecoration>,
         ),
     >,
 ) {
@@ -8597,7 +8683,10 @@ pub fn update_main_menu(
     let arrows_wanted = view
         .as_ref()
         .is_some_and(|view| matches!(view.kind, MenuKind::MissionDetail { .. }));
-    for (_, mut node) in arrow_q.iter_mut() {
+    for (_, arrow, mut node, _) in decor_q.iter_mut() {
+        if arrow.is_none() {
+            continue;
+        }
         let want = if arrows_wanted {
             Display::Flex
         } else {
@@ -8730,10 +8819,13 @@ pub fn update_main_menu(
             None
         };
         let base_color = menu_row_color(gated, tint, is_cursor);
-        let (want, want_color, want_bg) = if is_cursor {
-            (format!("> {body}"), base_color, Color::NONE)
-        } else {
-            (format!("  {body}"), base_color, Color::NONE)
+        // ur/90: the quest hub keeps a third column free for its blue dots.
+        let bullet_col = view.kind == MenuKind::QuestMenu;
+        let (want, want_color, want_bg) = match (is_cursor, bullet_col) {
+            (true, false) => (format!("> {body}"), base_color, Color::NONE),
+            (false, false) => (format!("  {body}"), base_color, Color::NONE),
+            (true, true) => (format!(">  {body}"), base_color, Color::NONE),
+            (false, true) => (format!("   {body}"), base_color, Color::NONE),
         };
         if **text != want {
             **text = want;
@@ -8743,6 +8835,26 @@ pub fn update_main_menu(
         }
         if bg.0 != want_bg {
             bg.0 = want_bg;
+        }
+    }
+
+    // ur/90: the hub's blue dots — drawn only on a row that is itself drawn.
+    for (bullet, arrow, _, span) in decor_q.iter_mut() {
+        let (Some(bullet), None, Some(mut span)) = (bullet, arrow, span) else {
+            continue;
+        };
+        let list_idx = viewport_start + bullet.slot;
+        let want = if view.kind == MenuKind::QuestMenu
+            && bullet.slot < window
+            && list_idx < total
+            && QUEST_MENU_BULLETED_ROWS.contains(&list_idx)
+        {
+            "●"
+        } else {
+            ""
+        };
+        if span.as_str() != want {
+            **span = want.to_string();
         }
     }
 
@@ -16933,6 +17045,12 @@ mod tests {
                 row.label
             );
         }
+        assert_eq!(rows[2].label, "", "the separator is a blank row (ur/89)");
+        // ur/90: the dot count from ur/87 — five dots, on rows 0, 1, 4, 5 and 6.
+        assert_eq!(QUEST_MENU_BULLETED_ROWS, [0, 1, 4, 5, 6]);
+        for index in QUEST_MENU_BULLETED_ROWS {
+            assert!(!rows[index].label.is_empty());
+        }
         let snap = kuluu_snapshot::SceneSnapshot::default();
         for index in 0..rows.len() {
             assert_eq!(
@@ -16942,6 +17060,22 @@ mod tests {
                 rows[index].label
             );
         }
+    }
+
+    /// ur/89: a blank row never holds the cursor — it steps past in the pressed
+    /// direction; an all-blank list keeps its landing, empty or otherwise.
+    #[test]
+    fn step_past_blanks_walks_to_the_next_written_row() {
+        let rows = quest_menu_rows();
+        assert_eq!(step_past_blank_rows(&rows, 2, true), 3);
+        assert_eq!(step_past_blank_rows(&rows, 2, false), 1);
+        assert_eq!(step_past_blank_rows(&rows, 5, true), 5, "written rows pass");
+        let mut blanks = rows.clone();
+        for row in blanks.iter_mut() {
+            row.label.clear();
+        }
+        assert_eq!(step_past_blank_rows(&blanks, 4, true), 4);
+        assert_eq!(step_past_blank_rows(&[], 2, false), 2, "empty keeps target");
     }
 
     /// ur/88: the quest family is exempt from [`order_dynamic_rows`]' alphabetical

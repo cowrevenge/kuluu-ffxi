@@ -2566,24 +2566,32 @@ pub(super) fn handle_menu_key(
         } else {
             cursor - 1
         };
-        level.step_cursor_to(kuluu_render::hud::menu::settle_cursor(
-            kind,
-            graphics.dlss_supported,
-            up,
-            false,
-        ));
+        // ur/89: a blank separator row never holds the cursor. The rows to
+        // consult are only meaningful for a dynamic window; static kinds keep
+        // their settled landing.
+        let settled =
+            kuluu_render::hud::menu::settle_cursor(kind, graphics.dlss_supported, up, false);
+        let up = if kuluu_render::hud::menu::is_dynamic(kind) {
+            kuluu_render::hud::menu::step_past_blank_rows(&dynamic.rows, settled, false)
+        } else {
+            settled
+        };
+        level.step_cursor_to(up);
         return None;
     }
     if bindings.matches_logical(Action::NavDown, key) {
         let level = stack.current_mut()?;
         let next = cursor + 1;
         let down = if next >= entry_count { 0 } else { next };
-        level.step_cursor_to(kuluu_render::hud::menu::settle_cursor(
-            kind,
-            graphics.dlss_supported,
-            down,
-            true,
-        ));
+        let settled =
+            kuluu_render::hud::menu::settle_cursor(kind, graphics.dlss_supported, down, true);
+        // ur/89: and a blank separator row never holds the cursor.
+        let down = if kuluu_render::hud::menu::is_dynamic(kind) {
+            kuluu_render::hud::menu::step_past_blank_rows(&dynamic.rows, settled, true)
+        } else {
+            settled
+        };
+        level.step_cursor_to(down);
         return None;
     }
     if bindings.matches_logical(Action::NavConfirm, key) {
@@ -3278,6 +3286,33 @@ mod menu_key_tests {
             );
             stack.pop();
         }
+    }
+
+    /// ur/89: the hub's blank separator never holds the cursor — Down steps past
+    /// it to the header and Up steps back across it.
+    #[test]
+    fn quest_hub_cursor_steps_past_the_blank_separator() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        harness.dynamic.rows = kuluu_render::hud::menu::quest_menu_rows();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::QuestMenu);
+        let mut press = |key: Key, code: KeyCode, stack: &mut MenuStack| {
+            let markers = world.resource_mut::<MapMarkers>();
+            harness.key(&key, code, stack, markers)
+        };
+        let cursor = |stack: &MenuStack| stack.current().unwrap().cursor;
+
+        press(Key::ArrowDown, KeyCode::ArrowDown, &mut stack);
+        assert_eq!(cursor(&stack), 1);
+        press(Key::ArrowDown, KeyCode::ArrowDown, &mut stack);
+        assert_eq!(
+            cursor(&stack),
+            3,
+            "Down skips blank row 2 and lands on the header"
+        );
+        press(Key::ArrowUp, KeyCode::ArrowUp, &mut stack);
+        assert_eq!(cursor(&stack), 1, "Up skips back past the same blank");
     }
 
     fn menu_root_trade_index() -> usize {

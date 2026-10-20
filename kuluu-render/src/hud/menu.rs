@@ -5998,13 +5998,26 @@ pub fn mission_selector_chains(label_idx: usize) -> &'static [u8] {
         .unwrap_or(&[])
 }
 
-/// The row each selector line opens (ur/62), first member at cursor.
-pub fn mission_selector_open_row(label_idx: usize) -> Option<MissionSelectorRow> {
-    let log = *mission_selector_chains(label_idx).first()?;
+/// The row each selector line opens (ur/62): first cycle member — except the Nations row, which opens on the character's
+/// own nation (ur/70: a Windurstian got Sandoria's blank page); LSB fills `Nation` in this chain's order so it indexes directly. Without main-port info yet it falls back to the first member.
+pub fn mission_selector_open_row(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    label_idx: usize,
+) -> Option<MissionSelectorRow> {
+    let chains = mission_selector_chains(label_idx);
+    if chains.is_empty() {
+        return None;
+    }
+    let mut member = 0usize;
+    if chains.contains(&MISSION_LOG_SANDORIA) {
+        if let Some(info) = snap.missions.info.as_ref() {
+            member = (info.nation as usize).min(chains.len() - 1);
+        }
+    }
     Some(MissionSelectorRow {
         label_idx,
-        log,
-        member: 0,
+        log: chains[member],
+        member: member as u8,
     })
 }
 
@@ -6099,16 +6112,16 @@ pub fn mission_complete_bits(snap: &kuluu_snapshot::SceneSnapshot, log: u8) -> V
     ids
 }
 
-/// The grey law (ur/62): a selector row is active when the snapshot reports any
-/// data for one of its chains — a non-zero main-port current, or any completion
-/// bit on 0x00D0/0x00D8; nothing here invents expansion ownership the wire never
-/// sent. One exemption (ur/69): "would you grey out nations? its the very thing
-/// you would never grey out" - every character has a nationality and retail
-/// lights that row at login, so it stands always active. The exemption follows
-/// the chain set, not the row index, so list order cannot move or lose it.
+/// The grey law as finalised on the live server (ur/70): "zilar/promation.. def installed" - era rows are installed content; the server runs every era and retail lights them at login
+/// whatever the progress; Nations lights because every character has a nationality (ur/69). Only the Add-on micro-chains gate on data: they own no completion port, so their main-port
+/// current words are pure server grants - which is why retail dims that row alone. The test follows chain membership, not the row index; list order can never move or lose it.
 pub fn mission_selector_row_active(snap: &kuluu_snapshot::SceneSnapshot, label_idx: usize) -> bool {
     let chains = mission_selector_chains(label_idx);
-    if chains.contains(&MISSION_LOG_SANDORIA) {
+    let is_addons_row = !chains.is_empty()
+        && chains
+            .iter()
+            .all(|&log| matches!(log, MISSION_LOG_ACP | MISSION_LOG_AMK | MISSION_LOG_ASA));
+    if !is_addons_row {
         return true;
     }
     chains.iter().any(|&log| mission_chain_reported(snap, log))
@@ -6176,18 +6189,16 @@ pub fn mission_nation_name(nation: u32) -> String {
     }
 }
 
-/// The `missionm` selector (ur/62: list every chain, grey the inactive ones —
-/// retail's battery shows all seven and dims what this character has not begun,
-/// owner captures ur/61/ur/63). Rows are fixed; a select pushes that row's log
-/// window on its first cycle member.
-pub fn mission_selector_rows() -> Vec<DynamicMenuRow> {
+/// The `missionm` selector (ur/62): all seven chains in retail's order; greying follows the installed-content law (ur/70) and a select pushes that row's log window, Nations on its
+/// own nation.
+pub fn mission_selector_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
     MISSION_SELECTOR_LABELS_PINNED
         .iter()
         .enumerate()
         .map(|(label_idx, label)| DynamicMenuRow {
             tint: None,
             label: (*label).to_string(),
-            action: mission_selector_open_row(label_idx).map_or(
+            action: mission_selector_open_row(snap, label_idx).map_or(
                 DynamicMenuAction::MissionLogRow { port: 0 },
                 |row| DynamicMenuAction::MissionOpenLog {
                     log: row.log,
@@ -7041,8 +7052,8 @@ fn dynamic_rows_for(
         // Region Info modes (vault main_menu.md §29): the rows also carry the
         // predicate gate notice for an unresolvable zone.
         MenuKind::RegionInfo { mode } => region_info_rows(mode, snap.zone_id),
-        // The missionm selector lists every chain and greys inactive ones (ur/62).
-        MenuKind::MissionList => mission_selector_rows(),
+        // The missionm selector lists every chain and greys inactive ones (ur/62, ur/70).
+        MenuKind::MissionList => mission_selector_rows(snap),
         MenuKind::MissionDetail { log, member } => mission_detail_rows(snap, log, member),
         // The bazaar browser lists the zone's open player stalls (§33 wire law).
         MenuKind::BazaarStalls => bazaar_stall_rows(snap),
@@ -15668,12 +15679,13 @@ mod tests {
         );
     }
 
-    /// The selector law (ur/62): all seven chains listed in retail's own order and
-    /// spelling (ur/65); a row greys when the folded s2c 0x056 state reports nothing
-    /// for its chains, and every active row opens a log window.
+    /// The selector law (ur/62 + ur/70): all seven chains listed in retail's own order
+    /// and spelling (ur/65); every era row plus Nations stands lit at login whatever the progress,
+    /// and only Add-ons waits for its server grants. Selects push the log window; Nations on the profile nation.
     #[test]
     fn mission_selector_lists_every_chain_and_greys_the_inactive_ones() {
-        let rows = mission_selector_rows();
+        let empty = kuluu_snapshot::SceneSnapshot::default();
+        let rows = mission_selector_rows(&empty);
         assert_eq!(rows.len(), 7);
         assert_eq!(
             labels(&rows),
@@ -15688,64 +15700,40 @@ mod tests {
             ]
         );
 
-        let nations = MISSION_SELECTOR_LABELS_PINNED
+        // The installed-content law (ur/70) on a snapshot with no MISSION frame at
+        // all: every era row and Nations stand lit; only Add-ons waits, dark.
+        let addons = MISSION_SELECTOR_LABELS_PINNED
             .iter()
-            .position(|l| *l == "Nations")
+            .position(|l| *l == "Add-ons")
             .unwrap();
-        // Even on a snapshot with no MISSION frame at all, the Nations row stands
-        // lit (ur/69); every other chain greys until its own words report.
-        let empty = kuluu_snapshot::SceneSnapshot::default();
-        assert!(!menu_row_disabled(MenuKind::MissionList, nations, &empty));
-        for idx in 0..7 {
-            if idx == nations {
-                continue;
+        assert!(menu_row_disabled(MenuKind::MissionList, addons, &empty));
+        for idx in 0..MISSION_SELECTOR_LABELS_PINNED.len() {
+            if idx != addons {
+                assert!(
+                    !menu_row_disabled(MenuKind::MissionList, idx, &empty),
+                    "row {idx} must stand lit at login (ur/70)"
+                );
             }
-            assert!(
-                menu_row_disabled(MenuKind::MissionList, idx, &empty),
-                "row {idx} greys while no MISSION frame has folded"
-            );
         }
 
-        // A Windurst character mid-mission: the Nations row lights; era rows stay
-        // grey until their own words report something.
-        let mut snap = kuluu_snapshot::SceneSnapshot::default();
-        snap.missions.info = Some(kuluu_snapshot::MissionInfo {
+        // The Add-ons row lights only once the main port carries a status for one of its chains.
+        let mut granted = kuluu_snapshot::SceneSnapshot::default();
+        granted.missions.info = Some(kuluu_snapshot::MissionInfo {
             nation: 2,
             nation_mission: 3,
             rotz: 0,
             cop: 0,
             cop2: 0,
-            addon_acp: 0,
+            addon_acp: 1,
             addon_amk: 0,
             addon_asa: 0,
             tales_beginning: 0,
             soa: 0,
             rov: 0,
         });
-        assert!(!menu_row_disabled(MenuKind::MissionList, nations, &snap));
-        for idx in 0..7 {
-            assert_eq!(
-                menu_row_disabled(MenuKind::MissionList, idx, &snap),
-                idx != nations
-            );
-        }
+        assert!(!menu_row_disabled(MenuKind::MissionList, addons, &granted));
 
-        // A completion bit on port 0x00D0 lights the row even at zero current.
-        let mut with_bit = kuluu_snapshot::SceneSnapshot::default();
-        with_bit
-            .missions
-            .logs
-            .push(kuluu_snapshot::MissionLogEntry {
-                port: 0x00D0,
-                data: [1, 0, 0, 0, 0, 0, 0, 0],
-            });
-        assert!(!menu_row_disabled(
-            MenuKind::MissionList,
-            nations,
-            &with_bit
-        ));
-
-        // Every selector row opens its chain's log on the first cycle member.
+        // On a snapshot without main-port info every row opens its first cycle member.
         for (idx, row) in rows.iter().enumerate() {
             let chains = mission_selector_chains(idx);
             assert!(
@@ -15757,6 +15745,14 @@ mod tests {
                 "selector row {idx} must open its first chain"
             );
         }
+
+        // With a known profile nation the Nations row opens there (ur/70), and Left/Right still cycles from that slot.
+        let nations = MISSION_SELECTOR_LABELS_PINNED
+            .iter()
+            .position(|l| *l == "Nations")
+            .unwrap();
+        let row = mission_selector_open_row(&granted, nations).expect("nations row opens");
+        assert_eq!((row.log, row.member), (MISSION_LOG_WINDURST, 2));
     }
 
     /// Both mission windows survive `order_dynamic_rows` untouched: the catch-all
@@ -15769,7 +15765,8 @@ mod tests {
             key: crate::hud::item_detail::SortKey::Name,
         };
 
-        let mut rows = mission_selector_rows();
+        let empty = kuluu_snapshot::SceneSnapshot::default();
+        let mut rows = mission_selector_rows(&empty);
         order_dynamic_rows(MenuKind::MissionList, &sort, &mut rows);
         assert_eq!(
             labels(&rows),

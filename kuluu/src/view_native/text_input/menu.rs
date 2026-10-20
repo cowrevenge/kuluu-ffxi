@@ -3055,7 +3055,9 @@ mod menu_key_tests {
             data: [1, 0, 0, 0, 0, 0, 0, 0],
         });
         harness.scene_state.snapshot = snap;
-        harness.dynamic.rows = kuluu_render::hud::menu::mission_selector_rows();
+        let selector =
+            kuluu_render::hud::menu::mission_selector_rows(&harness.scene_state.snapshot);
+        harness.dynamic.rows = selector;
 
         // ur/65: the grey Add-ons row (this snapshot reports nothing for it)
         // refuses its select — no window opens.

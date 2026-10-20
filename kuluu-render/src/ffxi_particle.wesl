@@ -65,9 +65,6 @@ const FOG_BLACK: f32 = 2.0;
 const PATH_D3M_TEXTURED: f32 = 0.0;
 const PATH_D3M_UNTEXTURED: f32 = 1.0;
 const PATH_MMB_TEXTURED: f32 = 2.0;
-// Lamp halo alpha map: neutral light only — adds no authored colour, lifts the pixel
-// underneath along the sheet's alpha pattern.
-const PATH_LAMP_ALPHAMAP: f32 = 3.0;
 
 // d3d8types.h D3DTOP_MODULATE2X / MODULATE4X — the per-stage gains of every table above.
 const STAGE_MODULATE_2X: f32 = 2.0;
@@ -200,15 +197,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let d = min(in.color, vec4<f32>(1.0));
     var texel = vec4<f32>(1.0);
     if (data.params.w == PATH_D3M_TEXTURED
-        || data.params.w == PATH_MMB_TEXTURED
-        || data.params.w == PATH_LAMP_ALPHAMAP)
+        || data.params.w == PATH_MMB_TEXTURED)
     {
         texel = textureSample(particle_texture, particle_sampler, in.uv);
     }
-    var staged = stage1(stage0(d, texel, in.factor), d, in.factor);
-    if (data.params.w == PATH_LAMP_ALPHAMAP) {
-        staged = vec4<f32>(in.factor.rgb, in.factor.a * texel.a);
-    }
+    let staged = stage1(stage0(d, texel, in.factor), d, in.factor);
 
     let core = clamp(staged, vec4<f32>(0.0), vec4<f32>(1.0));
 

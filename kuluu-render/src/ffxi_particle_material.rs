@@ -39,7 +39,6 @@ const FOG_BLACK_BLEND_BYTE: u8 = 0x48;
 const PATH_D3M_TEXTURED: f32 = 0.0;
 const PATH_D3M_UNTEXTURED: f32 = 1.0;
 const PATH_MMB_TEXTURED: f32 = 2.0;
-const PATH_LAMP_ALPHAMAP: f32 = 3.0;
 
 // Forward depth bias for every particle element. Wash volumes like South Gustaberg's
 // ghu1 are copies of the wall geometry drawn additively on top of it; without a bias
@@ -155,7 +154,6 @@ impl FfxiParticleMaterial {
             ignores_texture_alpha(def, path),
         );
         if crate::particle_sim::is_lamp_halo_def(def) {
-            material.data.params.w = PATH_LAMP_ALPHAMAP;
             // The glow sheets pin in chunk order: depth-sorted, they re-sort against each other
             // frame to frame and dance under/over one another as the camera moves.
             material.sort_bias = crate::element_sort::pinned_order_bias(dat_offset);
@@ -418,6 +416,24 @@ mod tests {
         assert_eq!(m.sort_bias, transparent_sort_bias(&def, 0));
         assert!(m.depth_write);
         assert!(FfxiParticleMaterialKey::from(&m).depth_write);
+    }
+
+    #[test]
+    fn lamp_sprite_keeps_authored_stage_selection() {
+        let mut def = ParticleGeneratorDef {
+            mesh_kind: ffxi_dat::particle_gen::ParticleMeshKind::SpriteSheet,
+            blend: ParticleBlend::Additive,
+            init_color: [0.0; 4],
+            ..Default::default()
+        };
+        *def.tod_color_driven.last_mut().unwrap() = true;
+        assert!(crate::particle_sim::is_lamp_halo_def(&def));
+        for ignore_texture_alpha in [false, true] {
+            def.ignore_texture_alpha = ignore_texture_alpha;
+            let material = FfxiParticleMaterial::for_def(&def, None, 0, D3mDrawPath::D3m);
+            assert_eq!(material.data.params.w, PATH_D3M_TEXTURED);
+            assert_eq!(material.data.params.z, f32::from(ignore_texture_alpha));
+        }
     }
 
     #[test]

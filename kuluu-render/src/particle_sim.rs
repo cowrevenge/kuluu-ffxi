@@ -48,15 +48,8 @@ pub struct CelestialClock {
     pub day_fraction: f32,
     pub day_of_week: usize,
     pub moon_phase: usize,
-    // The animation-test slider values: lamp_halos_lift is the lamp halos' (PATH_LAMP_ALPHAMAP)
-    // peak wall-brighten; wash_alpha_lift multiplies the authored alpha of the ghu*/li* wall-wash
-    // volumes (1.0 = exactly as authored). Both live on the clock so every draw site reads them
-    // without new plumbing.
     pub lamp_halos_lift: f32,
     pub wash_alpha_lift: f32,
-    // Seconds accumulator for the halo flicker wave (the DAT ships no flicker keyframes; retail
-    // wavers at runtime, so both modes ride the hand-tuned `lamp_flicker` model on this clock).
-    pub lamp_flicker_phase: f32,
 }
 
 impl Default for CelestialClock {
@@ -65,9 +58,8 @@ impl Default for CelestialClock {
             day_fraction: 0.0,
             day_of_week: 0,
             moon_phase: 0,
-            lamp_halos_lift: LAMP_ALPHAMAP_LIFT_DEFAULT,
+            lamp_halos_lift: LAMP_ALPHA_LIFT_DEFAULT,
             wash_alpha_lift: WASH_ALPHA_LIFT_DEFAULT,
-            lamp_flicker_phase: 0.0,
         }
     }
 }
@@ -80,7 +72,6 @@ impl ParticleSimulator {
     pub fn set_celestial_clock(&mut self, mut clock: CelestialClock) {
         clock.lamp_halos_lift = self.clock.lamp_halos_lift;
         clock.wash_alpha_lift = self.clock.wash_alpha_lift;
-        clock.lamp_flicker_phase = self.clock.lamp_flicker_phase;
         self.clock = clock;
     }
 
@@ -98,7 +89,7 @@ impl ParticleSimulator {
     // room's teardown restores the shipped defaults so a tester visit cannot leak a
     // lighting change into a session.
     pub fn reset_test_lighting(&mut self) {
-        self.clock.lamp_halos_lift = LAMP_ALPHAMAP_LIFT_DEFAULT;
+        self.clock.lamp_halos_lift = LAMP_ALPHA_LIFT_DEFAULT;
         self.clock.wash_alpha_lift = WASH_ALPHA_LIFT_DEFAULT;
     }
 
@@ -247,18 +238,12 @@ const D3M_TFACTOR_PROMOTE_BLEND_BYTE: u8 = 0x44;
 const D3M_TFACTOR_PROMOTE_MIN: f32 = 0x7F as f32 / u8::MAX as f32;
 const D3M_TFACTOR_PROMOTED: f32 = 1.0;
 
-// Lamp halo billboards — the soft glow sheets retail authors under ligh/ (SG's lig* quad,
-// Bastok's lt__/gl*/lp* families, the lglt wall wash): additive sprite sheets whose whole
-// brightness is their ToD gate. The class is content-based so every zone's lanterns ride one
-// code path: lift/flicker/range knobs and Enhanced-mode replacement all apply identically.
 const LAMP_HALO_INIT_ALPHA_MAX: f32 = 0.2;
 
 pub(crate) fn is_lamp_halo_def(def: &ParticleGeneratorDef) -> bool {
     def.mesh_kind == ParticleMeshKind::SpriteSheet
         && def.blend == ffxi_dat::particle_gen::ParticleBlend::Additive
         && def.tod_color_driven[TOD_ALPHA_CHANNEL]
-        // Halos author a near-zero alpha (SG lig2 0.071, Bastok lt__ 0.0) and let the ToD gate
-        // do all the work; flame sheets carry their own authored alpha (fi* 0.5) and stay out.
         && def.init_color[TOD_ALPHA_CHANNEL] <= LAMP_HALO_INIT_ALPHA_MAX
 }
 
@@ -301,25 +286,12 @@ pub struct WallWashOff(pub bool);
 #[derive(Component)]
 pub struct HaloSuppressed;
 
-// A hand tuning, not a measured retail value: at 0.12 the halo reads as lantern light on stone
-// without washing out the wall texture; past roughly 0.6 it covers the stone instead of
-// lighting it.
-// pub: the AnimationTest box seeds its lantern-alpha slider from this default.
-pub const LAMP_ALPHAMAP_LIFT_DEFAULT: f32 = 0.12;
+pub const LAMP_ALPHA_LIFT_DEFAULT: f32 = 1.0;
 // Wall-wash slider seed (1.0 = authored alpha) and ceiling. The seed has to be
 // the identity multiplier: it scales authored wash alpha, so any other default
 // dims every wall wash in a normal session rather than only inside the tester.
 pub const WASH_ALPHA_LIFT_DEFAULT: f32 = 1.0;
 pub const WASH_ALPHA_LIFT_MAX: f32 = 2.0;
-// The DAT ships no flicker keyframes, so each halo's phase in the shared `lamp_flicker` wave is
-// derived from its mesh id: halos of different families waver out of step. The stride is a hand
-// tuning.
-const LAMP_FLICKER_SEED_STRIDE: f32 = 0.37;
-
-fn lamp_flicker_seed(def: &ParticleGeneratorDef) -> f32 {
-    def.mesh_id.iter().map(|b| f32::from(*b)).sum::<f32>() * LAMP_FLICKER_SEED_STRIDE
-}
-
 pub(crate) fn ignores_texture_alpha(def: &ParticleGeneratorDef, path: D3mDrawPath) -> bool {
     def.ignore_texture_alpha
         || (path == D3mDrawPath::Mmb
@@ -1974,8 +1946,6 @@ pub fn tick_particle_simulator(
             &mut commands,
         );
     }
-    // Advance the shared flicker wave before any draw factor samples it this frame.
-    sim.clock.lamp_flicker_phase += time.delta_secs();
     let frames = time.delta_secs() * ROUTINE_FPS;
     // research/xim Particle.kt update — children read the parent's state before anything ages.
     let orphans = anchor_children(&mut sim);
@@ -3414,7 +3384,6 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
     // This is the sun's authored dawn/noon/dusk ramp: the disc is not tinted by a formula.
     let mut rgb = p.rgb;
     let mut alpha = alpha;
-    let mut tod_alpha_gate = 1.0f32;
     for (channel, track) in g.tracks.tod_color.iter().enumerate() {
         let Some(track) = track.as_ref().filter(|_| g.def.tod_color_driven[channel]) else {
             continue;
@@ -3423,7 +3392,6 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
         match channel {
             TOD_ALPHA_CHANNEL => {
                 alpha *= v;
-                tod_alpha_gate *= v;
             }
             _ => rgb[channel] = v,
         }
@@ -3460,32 +3428,19 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
     // vel_basis like every other position source.
     let world = track_position(g, p, progress);
 
-    let lamp_halo = is_lamp_halo_def(&g.def);
-    let factor_alpha = if lamp_halo {
-        // PATH_LAMP_ALPHAMAP multiplies this against the texel's own alpha in the shader; the
-        // day gate (tkaa) is what turns lamps on at night and off by day. Retail's visible
-        // wavering is runtime behavior (no flicker keyframes ship), so retail mode rides the
-        // same hand-tuned lamp_flicker model as the Enhanced lights — a timer going up/down.
-        (clock.lamp_halos_lift
-            * tod_alpha_gate
-            * crate::zone_point_lights::lamp_flicker(
-                clock.lamp_flicker_phase,
-                lamp_flicker_seed(&g.def),
-            ))
-        .clamp(0.0, 1.0)
+    let alpha_lift = if is_lamp_halo_def(&g.def) {
+        clock.lamp_halos_lift
     } else if is_wall_wash_def(&g.def) {
-        // Wash volumes keep the authored D3m alpha path; the slider multiplies it (1.0 = as
-        // authored) so the test box can dial the wash down without touching retail defaults.
-        tfactor_alpha(&g.def, g.draw_path, alpha) * clock.wash_alpha_lift
+        clock.wash_alpha_lift
     } else {
-        tfactor_alpha(&g.def, g.draw_path, alpha)
+        1.0
     };
+    let factor_alpha = tfactor_alpha(&g.def, g.draw_path, alpha) * alpha_lift;
 
     ParticleDraw {
         flipbook_frame,
         scale: Vec2::new(sx, sy),
-        // The shader's lamp branch adds neutral light, so a halo's factor colour is white.
-        factor_rgb: if lamp_halo { Vec3::ONE } else { rgb },
+        factor_rgb: rgb,
         factor_alpha,
         world,
     }
@@ -4830,51 +4785,29 @@ mod tests {
         }
     }
 
-    // Lamp halos (`lig*` sprite sheets) are LIGHTS: their drawn alpha is the lift knob times the
-    // ToD gate and must not carry the `enhanced-particle-alpha-20` boost — that enhancement is
-    // for hit-flash and other effect particles. Pins both sides so either half drifting fails a
-    // test whichever feature set hits it.
     #[test]
-    fn lamp_halo_alpha_bypasses_enhanced_particle_gain() {
-        let mut g = live(def(60.0, 1.0, 1), 60.0);
+    fn lamp_sprite_keeps_authored_color_and_alpha() {
+        const AUTHORED_COLOR: [f32; 4] = [0.25, 0.5, 0.75, 0.071];
+        let mut d = def(ROUTINE_FPS, 1.0, 1);
+        d.mesh_id = *b"ligh";
+        d.mesh_kind = ParticleMeshKind::SpriteSheet;
+        d.tod_color_driven[TOD_ALPHA_CHANNEL] = true;
+        d.init_color = AUTHORED_COLOR;
+        assert!(is_lamp_halo_def(&d));
+        let mut g = live(d, ROUTINE_FPS);
         advance(&mut g, 2.0);
-        assert!(!g.particles.is_empty(), "two frames emit");
-
+        assert!(!g.particles.is_empty());
         let clock = CelestialClock::default();
-        let raw_alpha = g.def.init_color[3];
-        let plain = drawn_factor(&g, &clock);
+        let factor = drawn_factor(&g, &clock);
+        assert_eq!(factor.xyz(), Vec3::from_slice(&AUTHORED_COLOR[..3]));
+        assert_eq!(factor.w, expected_factor_alpha(AUTHORED_COLOR[3]));
+        let dimmed = CelestialClock {
+            lamp_halos_lift: 0.5,
+            ..clock
+        };
         assert_eq!(
-            plain.w,
-            expected_factor_alpha(raw_alpha),
-            "non-halo particles carry the build's alpha gain"
-        );
-
-        g.def.mesh_id = *b"lig0";
-        g.def.mesh_kind = ffxi_dat::particle_gen::ParticleMeshKind::SpriteSheet;
-        // The content rule: ToD-gated alpha over a near-zero authored alpha.
-        g.def.tod_color_driven[TOD_ALPHA_CHANNEL] = true;
-        g.def.init_color[TOD_ALPHA_CHANNEL] = 0.071;
-        let halo = drawn_factor(&g, &clock);
-        assert!(
-            is_lamp_halo_def(&g.def),
-            "ToD-gated low-alpha sheet must hit the halo branch"
-        );
-        // No ToD track here: gate holds at 1.0, so alpha is the lift knob times the flicker wave
-        // at this phase — still independent of the build's alpha gain.
-        let seed = lamp_flicker_seed(&g.def);
-        assert_eq!(
-            halo.w,
-            (clock.lamp_halos_lift
-                * crate::zone_point_lights::lamp_flicker(clock.lamp_flicker_phase, seed))
-            .clamp(0.0, 1.0)
-        );
-        assert_eq!(halo.xyz(), Vec3::ONE);
-        let mut other_family = g.def;
-        other_family.mesh_id = *b"lt__";
-        assert_ne!(
-            lamp_flicker_seed(&other_family),
-            seed,
-            "halo families waver out of step"
+            drawn_factor(&g, &dimmed).w,
+            factor.w * dimmed.lamp_halos_lift
         );
     }
 

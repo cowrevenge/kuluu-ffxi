@@ -1209,7 +1209,7 @@ fn spawn_panel(commands: &mut Commands) {
 
     // Lantern-alpha slider row: label + track + knob. Seed both drawn pieces from the renderer's
     // default lift so panel and shader agree before anyone touches it.
-    let seed_lift = kuluu_render::particle_sim::LAMP_ALPHAMAP_LIFT_DEFAULT;
+    let seed_lift = kuluu_render::particle_sim::LAMP_ALPHA_LIFT_DEFAULT;
     let label = commands
         .spawn((
             TestSceneScoped,
@@ -2702,7 +2702,7 @@ fn tear_down_test_scene(
 mod tests {
     use super::*;
     use kuluu_render::particle_sim::{
-        ParticleSimulator, TestAlphaOverride, LAMP_ALPHAMAP_LIFT_DEFAULT, WASH_ALPHA_LIFT_DEFAULT,
+        ParticleSimulator, TestAlphaOverride, LAMP_ALPHA_LIFT_DEFAULT, WASH_ALPHA_LIFT_DEFAULT,
     };
 
     #[test]
@@ -3037,7 +3037,7 @@ mod tests {
             "the lamp-room clock hold outlived the box"
         );
         let sim = app.world().resource::<ParticleSimulator>();
-        assert_eq!(sim.lamp_halos_lift(), LAMP_ALPHAMAP_LIFT_DEFAULT);
+        assert_eq!(sim.lamp_halos_lift(), LAMP_ALPHA_LIFT_DEFAULT);
         assert_eq!(sim.wash_alpha_lift(), WASH_ALPHA_LIFT_DEFAULT);
     }
 

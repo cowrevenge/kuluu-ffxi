@@ -966,6 +966,9 @@ pub const DEBUG_GRAPHICS_DEBUG: &str = "Graphics Debug";
 pub const DEBUG_POSITION_LOG: &str = "Panel Pos Log";
 pub const DEBUG_NAMEPLATES: &str = "Nameplate Debug";
 pub const DEBUG_UI_SETTINGS: &str = "UI Settings";
+/// Debug wire dump row (ur/71): one enter prints the MISSION main port's raw fields and every folded log port's words to system chat -
+/// ground truth when a mission window disagrees with the server. Fires like Print POS, toggles nothing.
+pub const DEBUG_MISSION_WIRE: &str = "Mission Wire";
 
 /// Retail+ section (dev-only Debug menu): a separator row, the section label,
 /// then the DLSS On/Off toggle plus — in enhanced builds only — Mob HP Under /
@@ -1116,6 +1119,7 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_POSITION_LOG,
     DEBUG_NAMEPLATES,
     DEBUG_UI_SETTINGS,
+    DEBUG_MISSION_WIRE,
     DEBUG_RETAIL_SEPARATOR,
     DEBUG_RETAIL_LABEL,
     RETAIL_DLSS_MENU,
@@ -6048,12 +6052,16 @@ pub fn mission_main_port_current(info: &kuluu_snapshot::MissionInfo, log: u8) ->
         _ => return None,
     };
     let current = match log {
-        MISSION_LOG_SOA if raw > MISSION_MAIN_PORT_SOA_WIRE_OFFSET => {
+        // LSB encodes both Adoulin-era currents (`(current * 2) + 0x6E`, `current + 0x6C`) even for characters who never entered the era,
+        // so a freshly logged-in char's words are exactly those sentinels: they mean "not started", not mission id 110/108 - reading them as ids is what
+        // made Altana light and draw junk (ur/71). Declined eras send literal 0.
+        MISSION_LOG_SOA if raw >= MISSION_MAIN_PORT_SOA_WIRE_OFFSET => {
             (raw - MISSION_MAIN_PORT_SOA_WIRE_OFFSET) / 2
         }
-        MISSION_LOG_ROV if raw > MISSION_MAIN_PORT_ROV_WIRE_OFFSET => {
+        MISSION_LOG_ROV if raw >= MISSION_MAIN_PORT_ROV_WIRE_OFFSET => {
             raw - MISSION_MAIN_PORT_ROV_WIRE_OFFSET
         }
+        MISSION_LOG_SOA | MISSION_LOG_ROV => 0,
         _ => raw,
     };
     (current != 0).then_some(current)
@@ -9790,7 +9798,7 @@ fn format_row_body(
         MenuKind::Debug => {
             if label == DEBUG_VOLUME {
                 format!("{label:<14}[{master_pct:>3}]")
-            } else if label == DEBUG_PRINT_POS {
+            } else if label == DEBUG_PRINT_POS || label == DEBUG_MISSION_WIRE {
                 format!("{label:<14}[enter]")
             } else if label == DEBUG_RETAIL_SEPARATOR || label == DEBUG_RETAIL_LABEL {
                 label.to_string()
@@ -15880,6 +15888,23 @@ mod tests {
         // LSB's own law answers an odd wire word too: (0x6E+3 - 0x6E)/2 = 1.
         assert_eq!(mission_main_port_current(&info, MISSION_LOG_SOA), Some(1));
         assert_eq!(mission_main_port_current(&info, MISSION_LOG_ROV), Some(2));
+
+        // An un-entered era arrives as the exact sentinel - not started, and never mission id 110/108 (ur/71: Altana's junk current).
+        let fresh = kuluu_snapshot::MissionInfo {
+            nation: 0,
+            nation_mission: 0,
+            rotz: 0,
+            cop: 0,
+            cop2: 0,
+            addon_acp: 0,
+            addon_amk: 0,
+            addon_asa: 0,
+            tales_beginning: 0,
+            soa: MISSION_MAIN_PORT_SOA_WIRE_OFFSET,
+            rov: MISSION_MAIN_PORT_ROV_WIRE_OFFSET,
+        };
+        assert_eq!(mission_main_port_current(&fresh, MISSION_LOG_SOA), None);
+        assert_eq!(mission_main_port_current(&fresh, MISSION_LOG_ROV), None);
 
         let mut snap = kuluu_snapshot::SceneSnapshot::default();
         // QUEST_OFFER_PORTS[5] is Aht Urhgan's; word 5 mirrors ToAU current.

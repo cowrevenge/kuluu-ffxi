@@ -1726,9 +1726,9 @@ fn toggle_debug_panel(
     use kuluu_render::hud::menu::DEBUG_ENGAGE_ANIM_LOCK;
     use kuluu_render::hud::menu::{
         DEBUG_AUTO_ENTER_CS, DEBUG_ENTITY_LIST, DEBUG_FOG, DEBUG_FORCE_18, DEBUG_GRAPHICS_DEBUG,
-        DEBUG_MESH, DEBUG_NAMEPLATES, DEBUG_NET_STATUS, DEBUG_NOCLIP, DEBUG_PERF,
-        DEBUG_POSITION_LOG, DEBUG_PRINT_POS, DEBUG_SOUND, DEBUG_STAIR_DRAW, DEBUG_STAIR_STATUS,
-        DEBUG_TARGET_CYCLE, DEBUG_UI_SETTINGS, DEBUG_WEATHER,
+        DEBUG_MESH, DEBUG_MISSION_WIRE, DEBUG_NAMEPLATES, DEBUG_NET_STATUS, DEBUG_NOCLIP,
+        DEBUG_PERF, DEBUG_POSITION_LOG, DEBUG_PRINT_POS, DEBUG_SOUND, DEBUG_STAIR_DRAW,
+        DEBUG_STAIR_STATUS, DEBUG_TARGET_CYCLE, DEBUG_UI_SETTINGS, DEBUG_WEATHER,
     };
 
     // Print Pos is a button, not a toggle: fire and return before the
@@ -1741,6 +1741,50 @@ fn toggle_debug_panel(
                 self_pos.x, self_pos.y, self_pos.z,
             ),
         );
+        return;
+    }
+
+    // Mission Wire is a button too (ur/71): prints the folded MISSION state verbatim - main-port fields and every log port's eight
+    // words - so a window that disagrees with the server can be judged from chat text alone.
+    if label == DEBUG_MISSION_WIRE {
+        // Read the snapshot fully into owned strings first; the chat pushes below need the mutable borrow.
+        let lines = {
+            let missions = &scene_state.snapshot.missions;
+            let mut lines: Vec<String> = Vec::new();
+            match missions.info.as_ref() {
+            Some(info) => lines.push(format!(
+                "[debug] mission info: nation={} nat_mission={} rotz={} cop={} cop2={} acp={} amk={} asa={} tales={:#06x} soa={} rov={}",
+                info.nation,
+                info.nation_mission,
+                info.rotz,
+                info.cop,
+                info.cop2,
+                info.addon_acp,
+                info.addon_amk,
+                info.addon_asa,
+                info.tales_beginning,
+                info.soa,
+                info.rov,
+            )),
+                None => lines.push("[debug] mission info: (absent)".to_string()),
+            }
+            if missions.logs.is_empty() {
+                lines.push("[debug] mission logs: (no ports folded)".to_string());
+            }
+            for entry in &missions.logs {
+                let words = entry
+                    .data
+                    .iter()
+                    .map(|w| format!("{w:#010x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                lines.push(format!("[debug] port {:#06x}: {}", entry.port, words));
+            }
+            lines
+        };
+        for line in lines {
+            push_system_chat_line(scene_state, line);
+        }
         return;
     }
 

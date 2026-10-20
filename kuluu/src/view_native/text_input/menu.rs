@@ -881,6 +881,13 @@ pub(super) fn confirm_menu_at_cursor(
                 return None;
             }
 
+            // ur/87: a quest-hub drill row opens its half of the `quest00` list,
+            // §31's filter word riding as the payload.
+            if let A::OpenQuestList { completed } = action {
+                stack.push(MenuKind::QuestList { completed });
+                return None;
+            }
+
             // Config-family drill rows push their own window (handler jump tables:
             // hub FFXiMain.dll retail-2026-09 RVA 0x196770/.text 0x1968A4, `conf5m`
             // 0x199240; vault main_menu.md §42/§47) — the page's DAT rows arrive on
@@ -3212,7 +3219,7 @@ mod menu_key_tests {
         let mut harness = Harness::new();
         let mut world = marker_world();
         let mut stack = MenuStack::root();
-        stack.push(MenuKind::QuestList);
+        stack.push(MenuKind::QuestList { completed: false });
         stack.take_absorb_open_minus();
         let mut snap = kuluu_snapshot::SceneSnapshot::default();
         // San d'Oria offer bit 0 only — the list's single row is quest (log 0, id 0).
@@ -3224,6 +3231,7 @@ mod menu_key_tests {
         harness.dynamic.rows = kuluu_render::hud::menu::quest_list_rows(
             &harness.scene_state.snapshot,
             &kuluu_render::hud::menu::QuestTextCatalog::default(),
+            false,
         );
 
         stack.current_mut().unwrap().cursor = 0;
@@ -3242,6 +3250,34 @@ mod menu_key_tests {
             3,
             "detail pushes over the list, like retail"
         );
+    }
+
+    /// ur/87: the hub's two drill rows push their half of the `quest00` list on
+    /// confirm — §31's filter word rides as the payload.
+    #[test]
+    fn quest_hub_drill_rows_push_their_filtered_lists() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::QuestMenu);
+        harness.dynamic.rows = kuluu_render::hud::menu::quest_menu_rows();
+        for (row, want_done) in [(0usize, false), (1, true)] {
+            stack.current_mut().unwrap().cursor = row;
+            let markers = world.resource_mut::<MapMarkers>();
+            harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+            match stack.current().unwrap().kind {
+                MenuKind::QuestList { completed } => assert_eq!(completed, want_done),
+                other => {
+                    panic!("hub row {row} pushed {other:?}, expected that half of the quest list")
+                }
+            }
+            assert_eq!(
+                stack.levels.len(),
+                3,
+                "Commands and the hub stay stacked under the list"
+            );
+            stack.pop();
+        }
     }
 
     fn menu_root_trade_index() -> usize {
@@ -6478,7 +6514,8 @@ mod menu_dispatch_tests {
             &mut scene_state,
             &cmd_tx,
         );
-        assert_eq!(stack.current().map(|l| l.kind), Some(MenuKind::QuestList));
+        // ur/87: the literal opens the FIRST quest window, not a list.
+        assert_eq!(stack.current().map(|l| l.kind), Some(MenuKind::QuestMenu));
     }
 
     /// The unification (bead kuluu-o9qt7.28): the seam runs `parse_slash`, so a retail alias from

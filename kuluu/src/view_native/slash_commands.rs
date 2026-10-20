@@ -808,8 +808,10 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 usage: "",
                 summary: "open the quest list",
                 handler: |c| {
+                    // ur/87: the hub is that first window — its drill rows carry
+                    // §31's filter word down into `quest00`.
                     if c.rest.is_empty() {
-                        SlashOutcome::OpenMenu(MenuKind::QuestList)
+                        SlashOutcome::OpenMenu(MenuKind::QuestMenu)
                     } else {
                         unknown_command(c.cmd)
                     }
@@ -3952,10 +3954,10 @@ mod tests {
     }
 
     #[test]
-    fn quest_opens_the_quest_list() {
+    fn quest_opens_the_quest_menu() {
         assert!(matches!(
             parse_slash_t("/quest", &empty_entities(), origin(), None, None),
-            SlashOutcome::OpenMenu(MenuKind::QuestList)
+            SlashOutcome::OpenMenu(MenuKind::QuestMenu)
         ));
         assert!(matches!(
             parse_slash_t("/quest foo", &empty_entities(), origin(), None, None),

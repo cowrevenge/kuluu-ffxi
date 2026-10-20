@@ -1415,6 +1415,7 @@ fn sub_target_action_for(
         // kuluu-o9qt7.13.5; vault main_menu.md §59 addendum 20/21).
         | A::MogHouseRemodelSelect { .. }
         | A::QuestDetailRow { .. }
+        | A::OpenQuestList { .. }
         | A::HomeJobRow { .. } => None,
         // Config-family rows drill windows or answer locally (vault main_menu.md
         // §42/§47/§48); they never take a sub-target step. Status detail lines
@@ -2044,7 +2045,10 @@ fn dispatch_dynamic_menu_action(
         // The stall picker answers on the plain confirm seam (vault
         // main_menu.md §33), never as a sub-target action.
         A::BazaarStall { .. } => return,
-        A::QuestOpenDetail { .. } | A::QuestDetailRow { .. } => return,
+        // The ur/87 hub's drill rows push their list in confirm_menu_at_cursor.
+        A::QuestOpenDetail { .. }
+        | A::QuestDetailRow { .. }
+        | A::OpenQuestList { .. } => return,
         // Config-family drills are pushed in confirm_menu_at_cursor (where the menu stack
         // lives) and leaf option rows answer there until bead kuluu-o9qt7.20.1 wires the
         // option store — no wire from here either way (vault main_menu.md §48: retail's

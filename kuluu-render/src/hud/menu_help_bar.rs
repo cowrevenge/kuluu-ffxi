@@ -332,8 +332,11 @@ fn help_bar_title(kind: MenuKind) -> &'static str {
         MenuKind::MissionList | MenuKind::MissionDetail { .. } | MenuKind::MissionText { .. }
     ) {
         menu::menu_title(MenuKind::MissionList)
-    } else if matches!(kind, MenuKind::QuestList | MenuKind::QuestDetail { .. }) {
-        menu::menu_title(MenuKind::QuestList)
+    } else if matches!(
+        kind,
+        MenuKind::QuestMenu | MenuKind::QuestList { .. } | MenuKind::QuestDetail { .. }
+    ) {
+        menu::menu_title(MenuKind::QuestMenu)
     } else {
         menu::menu_title(kind)
     }
@@ -1285,11 +1288,15 @@ mod tests {
         }
     }
 
-    /// The quest pair takes the mission-family helper-box law (ur/81 extended):
-    /// both windows keep `Quests` in the title box, not the per-window word.
+    /// The quest windows take the mission-family helper-box law (ur/81 extended):
+    /// hub and lists keep `Quests` in the title box, not the per-window word.
     #[test]
     fn every_quest_window_helper_box_says_quests() {
-        assert_eq!(help_bar_title(MenuKind::QuestList), "Quests");
+        assert_eq!(help_bar_title(MenuKind::QuestMenu), "Quests");
+        assert_eq!(
+            help_bar_title(MenuKind::QuestList { completed: false }),
+            "Quests"
+        );
         for log in [0u8, 255] {
             assert_eq!(
                 help_bar_title(MenuKind::QuestDetail { log, id: 1 }),

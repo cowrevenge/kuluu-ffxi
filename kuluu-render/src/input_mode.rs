@@ -505,11 +505,22 @@ pub enum MenuKind {
         id: u16,
     },
 
-    /// Page-2 row 2 fires the "/quest" text command, whose id-table handler resets
-    /// the quest-window filter word and name-opens `menu    quest00` (FFXiMain.dll
+    /// The FIRST window the Quests row opens — owner capture ur/87 shows it before
+    /// any quest list: two drill rows (Current, Completed) over a Records of
+    /// Eminence block whose counters ride as grounded-empty readouts. Kuluu seats
+    /// it on `quest00`'s frame like the mission family shares one record, and
+    /// Commands stays open beside it (owner ruling ur/82-85).
+    QuestMenu,
+
+    /// The `quest00` list window under [`MenuKind::QuestMenu`]. The id-table handler
+    /// resets the quest-window filter word before name-opening quest00 (FFXiMain.dll
     /// retail-2026-09 RVA 0x14E889 → runner, entry 0x4D → 0x1007D240; vault
-    /// main_menu.md §31). Rows follow the s2c 0x056 quest-log state.
-    QuestList,
+    /// main_menu.md §31), so the hub hands that filter down as `completed`:
+    /// false lists the incomplete half of the s2c 0x056 quest ports, true the
+    /// complete half.
+    QuestList {
+        completed: bool,
+    },
 
     /// The `quest01` detail window — quest00's select tail name-opens it over
     /// itself with the row value (FFXiMain.dll retail-2026-09 RVA 0x2300EE; vault
@@ -1180,13 +1191,13 @@ mod tests {
     #[test]
     fn item_one_windows_open_on_item_one_every_time() {
         let mut stack = MenuStack::root();
-        stack.push(MenuKind::QuestList);
+        stack.push(MenuKind::QuestMenu);
         stack.current_mut().unwrap().cursor = 3;
         stack.pop();
-        stack.push(MenuKind::QuestList);
+        stack.push(MenuKind::QuestMenu);
         assert_eq!(cursor_of(&stack), 0, "reopened on item 1");
         stack.current_mut().unwrap().cursor = 2;
-        stack.push(MenuKind::QuestList);
+        stack.push(MenuKind::QuestMenu);
         assert_eq!(cursor_of(&stack), 0, "an open while open lands on item 1");
     }
 
@@ -1340,7 +1351,7 @@ mod tests {
         stack.current_mut().unwrap().last_item_lock = None;
         stack.push(MenuKind::RetailConfig);
         assert_eq!(stack.current().unwrap().last_item_lock, None);
-        stack.push(MenuKind::QuestList);
+        stack.push(MenuKind::QuestList { completed: false });
         assert_eq!(stack.current().unwrap().last_item_lock, None);
     }
 

@@ -530,6 +530,12 @@ pub enum DynamicMenuAction {
         id: u16,
     },
 
+    /// One of the ur/87 quest hub's two drill rows: §31's filter word rides as
+    /// the payload, and select pushes that half of the `quest00` list.
+    OpenQuestList {
+        completed: bool,
+    },
+
     /// One craftable recipe row of the kuluu craft list (the `cmbmenu` row-2 branch opens this
     /// window pair; FFXiMain.dll retail-2026-09 RVA 0x1E29C1, vault main_menu.md §22/§28). The plan is resolved
     /// against the bag at render time: selecting sends exactly this c2s 0x096 ask, ingredients in
@@ -1262,7 +1268,8 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::MissionDetail { .. }
             | MenuKind::MissionText { .. }
             | MenuKind::BazaarStalls
-            | MenuKind::QuestList
+            | MenuKind::QuestMenu
+            | MenuKind::QuestList { .. }
             | MenuKind::QuestDetail { .. }
             | MenuKind::AutomatonEquip
             | MenuKind::MacroSelect
@@ -1555,7 +1562,7 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::MissionText { .. } => &[],
         // Stall rows come from the zone entity stream (vault main_menu.md §33).
         MenuKind::BazaarStalls => &[],
-        MenuKind::QuestList => &[],
+        MenuKind::QuestMenu | MenuKind::QuestList { .. } => &[],
         MenuKind::QuestDetail { .. } => &[],
         // The Unity and alter ego point windows list DAT-labelled rows
         // (`unity_fp::unity_fp_rows`).
@@ -1632,7 +1639,7 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
             return mission_chain_name(log).unwrap_or("Mission Log")
         }
         MenuKind::BazaarStalls => "Bazaar",
-        MenuKind::QuestList => "Quests",
+        MenuKind::QuestMenu | MenuKind::QuestList { .. } => "Quests",
         MenuKind::QuestDetail { .. } => "Quest Log",
         // The bag picker hung off the trade window's Add-Item button row; its
         // own caption is [I] like the rest of the family (§25).
@@ -4699,6 +4706,9 @@ pub fn menu_row_disabled(
         // ur/65 overrides browsing: "if its grey.. why can i click it" — a grey
         // row's select is refused like the roomlist's gated row.
         MenuKind::MissionList => !mission_selector_row_active(snap, index),
+        // ur/87 measures exactly one dim row in the quest hub (the Vana'Bout
+        // readout), and since ur/65 a grey row's select is refused.
+        MenuKind::QuestMenu => index == QUEST_MENU_ROV_VANABOUT_ROW,
         MenuKind::Status => crate::hud::status_panel::STATUS_ENTRIES
             .get(index)
             .is_some_and(|entry| !crate::hud::status_panel::status_row_enabled(entry.kind, snap)),
@@ -5145,8 +5155,10 @@ pub fn record_window_name(kind: MenuKind) -> Option<&'static str> {
             .get(usize::from(sub))
             .copied()
             .unwrap_or(""),
-        // `/quest` chains through exactly these two windows (vault main_menu.md §31).
-        MenuKind::QuestList => "quest00",
+        // `/quest` chains the hub and its filtered lists onto `quest00`, details on
+        // `quest01` (vault main_menu.md §31); ur/87 adds the hub to the shared record,
+        // as the mission family shares one for log and text.
+        MenuKind::QuestMenu | MenuKind::QuestList { .. } => "quest00",
         MenuKind::QuestDetail { .. } => "quest01",
         // `miss00` is the only mission-log record — it serves every chain (vault
         // main_menu.md §30); retail's unregistered sibling for mission text ('miss'/
@@ -5419,7 +5431,8 @@ fn side_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<RecordFra
 /// should open on the LEFT side"); retail anchors its panel there even with nothing loaded.
 fn pinned_left_frame(kind: MenuKind) -> Option<RecordFrame> {
     match kind {
-        MenuKind::QuestList
+        MenuKind::QuestMenu
+        | MenuKind::QuestList { .. }
         | MenuKind::QuestDetail { .. }
         | MenuKind::MissionDetail { .. }
         | MenuKind::MissionText { .. } => Some(RecordFrame {
@@ -6757,13 +6770,15 @@ fn mission_current_reason(snap: &kuluu_snapshot::SceneSnapshot, log: u8) -> &'st
 /// one row per `(log, id)` in log-then-id order. Names come install-catalog-
 /// first ([`QuestTextCatalog`]) with the scraped `scripts/globals/quests.lua`
 /// lattice as fallback; neither knowing a bit draws `Quest #id`. A bit present
-/// in both a QuestOffer and its QuestComplete port shows as complete (the
-/// window carries one row per quest; which report wins is state order, filter
-/// semantics [I-pending]). Select mirrors quest00's select tail name-open of
-/// quest01 by pushing detail.
+/// in both a QuestOffer and its QuestComplete port belongs to the completed
+/// half. §31's filter word arrives from [`MenuKind::QuestMenu`]'s rows as
+/// `completed`, so each list holds only quests whose merged complete state
+/// matches it (ur/87: the hub opens Current and Completed as separate lists).
+/// Select mirrors quest00's select tail name-open of quest01 by pushing detail.
 pub fn quest_list_rows(
     snap: &kuluu_snapshot::SceneSnapshot,
     texts: &QuestTextCatalog,
+    completed: bool,
 ) -> Vec<DynamicMenuRow> {
     let mut statuses: std::collections::BTreeMap<(u8, u16), bool> = Default::default();
     for entry in &snap.missions.logs {
@@ -6775,12 +6790,11 @@ pub fn quest_list_rows(
     }
     let mut rows: Vec<DynamicMenuRow> = statuses
         .iter()
-        .map(|(&(log, id), &complete)| DynamicMenuRow {
+        .filter(|(_, held)| **held == completed)
+        .map(|(&(log, id), _)| DynamicMenuRow {
             tint: None,
             label: match quest_label(texts, log, id) {
-                Some(name) if complete => format!("{name} (complete)"),
                 Some(name) => name,
-                None if complete => format!("Quest #{id} (complete)"),
                 None => format!("Quest #{id}"),
             },
             action: DynamicMenuAction::QuestOpenDetail { log, id },
@@ -6794,6 +6808,48 @@ pub fn quest_list_rows(
         });
     }
     rows
+}
+
+/// The dim Vana'Bout readout's row position within [`quest_menu_rows`] — the
+/// only line drawn grey (≈RGB(180,180,188) against pure white elsewhere) in
+/// owner capture ur/87; since ur/65 a grey row's select is refused.
+const QUEST_MENU_ROV_VANABOUT_ROW: usize = 6;
+
+/// The FIRST Quests window — exactly what owner capture ur/87 shows when the
+/// Commands quest row opens: two drill rows over a Records-of-Eminence block,
+/// whose counters have no wire field in kuluu's snapshot and so ride as
+/// grounded-empty zeros, exactly as captured. Retail hangs a blue ● on seven of
+/// the nine lines; those are per-row spans our single-colour row model cannot
+/// express yet [I-pending], so labels ride bare — left-aligned like every other
+/// list (ur/40), values pushed into fixed columns. 'Objective List' carries the
+/// measured pink; Vana'Bout is gated grey as photographed. Selecting a hub row
+/// that leads nowhere stays inert like every text-panel window: kuluu has no
+/// Records-of-Eminence windows to jump to yet.
+pub fn quest_menu_rows() -> Vec<DynamicMenuRow> {
+    let row = |label: &str, tint| DynamicMenuRow {
+        tint,
+        label: label.to_string(),
+        action: DynamicMenuAction::DisplayInfo,
+    };
+    vec![
+        DynamicMenuRow {
+            tint: None,
+            label: "Current".to_string(),
+            action: DynamicMenuAction::OpenQuestList { completed: false },
+        },
+        DynamicMenuRow {
+            tint: None,
+            label: "Completed".to_string(),
+            action: DynamicMenuAction::OpenQuestList { completed: true },
+        },
+        row("", None),
+        row("Records of Eminence", None),
+        row("Current            0/30", None),
+        row("Objective List", Some(MenuRowTint::RovObjectiveLink)),
+        row("Vana'Bout          Plaudits :      0", None),
+        row("Sparks :         0 Unity Accolades :         0", None),
+        row("Deeds :           0 Number Completed :        0", None),
+    ]
 }
 
 /// One quest name line — the install catalog's own wording first (it keeps the
@@ -7140,7 +7196,7 @@ pub fn refresh_dynamic_menu_rows(
         stack.levels.iter().any(|level| {
             matches!(
                 level.kind,
-                MenuKind::QuestList | MenuKind::QuestDetail { .. }
+                MenuKind::QuestList { .. } | MenuKind::QuestDetail { .. }
             )
         })
     });
@@ -7431,9 +7487,12 @@ fn dynamic_rows_for(
         MenuKind::MissionText { log, id } => mission_text_rows(&dynamic.mission_texts, log, id),
         // The bazaar browser lists the zone's open player stalls (§33 wire law).
         MenuKind::BazaarStalls => bazaar_stall_rows(snap),
-        // The quest00 list follows the folded s2c 0x056 quest ports (vault
-        // main_menu.md §31).
-        MenuKind::QuestList => quest_list_rows(snap, &dynamic.quest_texts),
+        // ur/87: Quests opens this hub first; its drill rows push the filtered
+        // quest00 lists below it.
+        MenuKind::QuestMenu => quest_menu_rows(),
+        // The quest00 lists follow the folded s2c 0x056 quest ports, halved by
+        // §31's filter word (vault main_menu.md §31; ur/87).
+        MenuKind::QuestList { completed } => quest_list_rows(snap, &dynamic.quest_texts, completed),
         MenuKind::QuestDetail { log, id } => quest_detail_rows(snap, &dynamic.quest_texts, log, id),
         // The pupequip variant's fourteen automaton slot rows (vault
         // main_menu.md §39).
@@ -7878,6 +7937,12 @@ pub enum MenuRowTint {
     /// A skill line whose s2c 0x062 word carries the bit-15 cap flag — retail paints it
     /// ARGB 0x802060A0 instead of grey (`.text FFXiMain.dll retail-2026-09 0x148564`).
     SkillCapped,
+
+    /// The quest hub's 'Objective List' line — the only non-white row in owner
+    /// capture ur/87, screen RGB (255, 145, 188) measured there. Whether it marks
+    /// a link or a state stays [I-pending] on one capture; kuluu paints the
+    /// measured colour whether or not the cursor sits on that row.
+    RovObjectiveLink,
 }
 
 /// The slots `.text FFXiMain.dll retail-2026-09 0x131FA0` walks when looking for an already-
@@ -8757,6 +8822,7 @@ fn menu_row_color(gated: bool, tint: Option<MenuRowTint>, lit_cursor: bool) -> C
         Some(MenuRowTint::SkillCapped) => {
             crate::hud::unity_fp::retail_text_color(crate::hud::unity_fp::ARGB_CAPPED)
         }
+        Some(MenuRowTint::RovObjectiveLink) => Color::srgb(1.0, 145.0 / 255., 188.0 / 255.),
         None if lit_cursor => theme::CURSOR,
         None => theme::TEXT,
     }
@@ -11471,7 +11537,8 @@ mod tests {
             frames.frames.insert(name.into(), frame);
         }
         for (kind, name) in [
-            (MenuKind::QuestList, "quest00"),
+            (MenuKind::QuestMenu, "quest00"),
+            (MenuKind::QuestList { completed: false }, "quest00"),
             (MenuKind::QuestDetail { log: 1, id: 7 }, "quest01"),
             (
                 MenuKind::MissionDetail {
@@ -11679,7 +11746,7 @@ mod tests {
     #[test]
     fn two_open_record_windows_draw_at_their_own_frames_newest_on_top() {
         let mut stack = MenuStack::root();
-        stack.push(MenuKind::QuestList);
+        stack.push(MenuKind::QuestList { completed: false });
         stack.current_mut().unwrap().cursor = 1;
         stack.push(MenuKind::QuestDetail { log: 1, id: 7 });
         let mut app = stack_app(
@@ -11690,7 +11757,7 @@ mod tests {
             ],
         );
         app.world_mut().resource_mut::<DynamicMenu>().stacked_rows = vec![(
-            MenuKind::QuestList,
+            MenuKind::QuestList { completed: false },
             vec![display_row("Quest A"), display_row("Quest B")],
         )];
         app.update();
@@ -11709,7 +11776,10 @@ mod tests {
             (Val::Px(16.0), Val::Px(48.0), Val::Px(366.0)),
             "the list keeps its own frame, not the right seat"
         );
-        assert_eq!(list.title, menu_title(MenuKind::QuestList));
+        assert_eq!(
+            list.title,
+            menu_title(MenuKind::QuestList { completed: false })
+        );
         // ur/77: under focus the window keeps no `>` mark; its cursor row stays gold.
         assert_eq!(list.rows, vec!["  Quest A", "  Quest B"]);
         let (mirror, mirror_z) = drawn_mirror(&mut app).expect("the main menu stays open");
@@ -11801,7 +11871,7 @@ mod tests {
     #[test]
     fn a_window_on_an_older_windows_whole_rect_hides_it() {
         let mut stack = MenuStack::root();
-        stack.push(MenuKind::QuestList);
+        stack.push(MenuKind::QuestList { completed: false });
         stack.push(MenuKind::QuestDetail { log: 1, id: 7 });
         let mut app = stack_app(
             stack.clone(),
@@ -11938,7 +12008,7 @@ mod tests {
         // The quest pair: Commands framed right, the list on its left rect — the
         // exact layout ur/82 asks for while DAT records are still loading.
         let mut quests = MenuStack::root();
-        quests.push(MenuKind::QuestList);
+        quests.push(MenuKind::QuestList { completed: false });
         quests.push(MenuKind::QuestDetail { log: 0, id: 1 });
         assert_eq!(
             menu_stack_layout(&quests, &frames).windows,
@@ -16707,11 +16777,14 @@ mod tests {
 
         let mut stack = MenuStack::root();
         stack.levels[0].cursor = quests_at;
-        stack.push(MenuKind::QuestList);
+        stack.push(MenuKind::QuestList { completed: false });
         let mut app = stack_app(stack, &[]);
         app.update();
 
-        assert_eq!(title_text(&mut app), menu_title(MenuKind::QuestList));
+        assert_eq!(
+            title_text(&mut app),
+            menu_title(MenuKind::QuestList { completed: false })
+        );
         assert!(
             drawn_mirror(&mut app).is_some(),
             "Commands stays framed beside the quest list"
@@ -16765,7 +16838,7 @@ mod tests {
     fn quest_list_rows_expand_the_quest_ports() {
         let mut snap = kuluu_snapshot::SceneSnapshot::default();
         let texts = QuestTextCatalog::default();
-        let empty = quest_list_rows(&snap, &texts);
+        let empty = quest_list_rows(&snap, &texts, false);
         assert_eq!(empty.len(), 1, "logged-out state keeps one hint row");
         assert!(empty[0].label.contains("no quests"));
 
@@ -16785,18 +16858,23 @@ mod tests {
             data: [7; 8],
         });
 
-        let rows = quest_list_rows(&snap, &texts);
-        assert_eq!(rows.len(), 3, "one row per (log, id) bit held");
+        // ur/87's hub splits the lists: Current holds only the incomplete bits,
+        // Completed the merged-complete ones (id 18, held by both ports), each
+        // drawn under its own name — no suffix rides a half-list.
+        let rows = quest_list_rows(&snap, &texts, false);
+        assert_eq!(rows.len(), 2, "the current half holds only incomplete bits");
         // scripts/globals/quests.lua San d'Oria block.
         assert_eq!(rows[0].label, "A Sentrys Peril");
         assert_eq!(rows[1].label, "Rosel the Armorer");
-        assert_eq!(rows[2].label, "Gates to Paradise (complete)");
+        let done = quest_list_rows(&snap, &texts, true);
+        assert_eq!(done.len(), 1, "the overlap bit belongs to Completed");
+        assert_eq!(done[0].label, "Gates to Paradise");
         assert_eq!(
             rows[0].action,
             DynamicMenuAction::QuestOpenDetail { log: 0, id: 0 }
         );
         assert_eq!(
-            rows[2].action,
+            done[0].action,
             DynamicMenuAction::QuestOpenDetail { log: 0, id: 18 }
         );
 
@@ -16813,11 +16891,49 @@ mod tests {
         }
     }
 
+    /// ur/87: the hub rows are the measured panel — drills first, then the
+    /// Records-of-Eminence block with its grounded-empty zeros, pink objective
+    /// link and one grey Vana'Bout readout.
+    #[test]
+    fn quest_hub_rows_measure_the_capture() {
+        let rows = quest_menu_rows();
+        assert_eq!(rows.len(), 9);
+        assert_eq!(rows[0].label, "Current");
+        assert_eq!(
+            rows[0].action,
+            DynamicMenuAction::OpenQuestList { completed: false }
+        );
+        assert_eq!(rows[1].label, "Completed");
+        assert_eq!(
+            rows[1].action,
+            DynamicMenuAction::OpenQuestList { completed: true }
+        );
+        assert_eq!(rows[3].label, "Records of Eminence");
+        assert!(rows[4].label.starts_with("Current"));
+        assert!(rows[4].label.contains("0/30"), "{}", rows[4].label);
+        assert_eq!(rows[5].label, "Objective List");
+        assert_eq!(rows[5].tint, Some(MenuRowTint::RovObjectiveLink));
+        let snap = kuluu_snapshot::SceneSnapshot::default();
+        for index in 0..rows.len() {
+            assert_eq!(
+                menu_row_disabled(MenuKind::QuestMenu, index, &snap),
+                index == QUEST_MENU_ROV_VANABOUT_ROW,
+                "only the Vana'Bout readout draws grey: {}",
+                rows[index].label
+            );
+        }
+    }
+
     #[test]
     fn quest_windows_are_dynamic_titled_and_never_root_drilled() {
-        assert!(is_dynamic(MenuKind::QuestList));
+        assert!(is_dynamic(MenuKind::QuestMenu));
+        assert!(is_dynamic(MenuKind::QuestList { completed: false }));
         assert!(is_dynamic(MenuKind::QuestDetail { log: 0, id: 4 }));
-        assert_eq!(menu_title(MenuKind::QuestList), "Quests");
+        assert_eq!(menu_title(MenuKind::QuestMenu), "Quests");
+        assert_eq!(
+            menu_title(MenuKind::QuestList { completed: false }),
+            "Quests"
+        );
         assert_eq!(
             menu_title(MenuKind::QuestDetail { log: 2, id: 9 }),
             "Quest Log"
@@ -17170,7 +17286,11 @@ mod tests {
         for (kind, rule) in [
             (MenuKind::Root, OpenCursor::Remembered),
             (MenuKind::Status, OpenCursor::Remembered),
-            (MenuKind::QuestList, OpenCursor::FirstItem),
+            (
+                MenuKind::QuestList { completed: false },
+                OpenCursor::FirstItem,
+            ),
+            (MenuKind::QuestMenu, OpenCursor::FirstItem),
             (MenuKind::UnityChat, OpenCursor::FirstItem),
             (MenuKind::UnityMenu, OpenCursor::Remembered),
             (MenuKind::RetailConfig, OpenCursor::Remembered),
@@ -17530,7 +17650,7 @@ mod tests {
         const QUEST_Y: i16 = 48;
         const EMOTE_Y: i16 = 120;
         let mut stack = MenuStack::root();
-        stack.push(MenuKind::QuestList);
+        stack.push(MenuKind::QuestList { completed: false });
         let (mut app, log) = dock_app(
             stack,
             &[
@@ -18227,7 +18347,7 @@ mod tests {
             port: ffxi_proto::mission::QUEST_OFFER_PORTS[2],
             data: [1 << 5, 0, 0, 0, 0, 0, 0, 0],
         });
-        let rows = quest_list_rows(&snap, &texts);
+        let rows = quest_list_rows(&snap, &texts, false);
         assert_eq!(rows.len(), 2);
         // The DAT spelling with the apostrophe; vocab would say "A Sentrys Peril".
         assert_eq!(rows[0].label, "A Sentry's Peril");

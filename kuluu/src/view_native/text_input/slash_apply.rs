@@ -149,8 +149,10 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
         kuluu_render::MenuKind::MacroSelect
         | kuluu_render::MenuKind::MacroEditor { .. }
         | kuluu_render::MenuKind::MacroResult => "Macros".into(),
-        // The /quest seam (vault main_menu.md §31).
-        kuluu_render::MenuKind::QuestList => "Quests".into(),
+        // The /quest seam (vault main_menu.md §31; ur/87 hub first).
+        kuluu_render::MenuKind::QuestMenu | kuluu_render::MenuKind::QuestList { .. } => {
+            "Quests".into()
+        }
         kuluu_render::MenuKind::QuestDetail { log, id } => format!("QuestLog({log},{id})").into(),
 
         kuluu_render::MenuKind::ItemAction { item_no, .. } => {

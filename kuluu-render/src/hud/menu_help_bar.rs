@@ -336,7 +336,9 @@ fn help_bar_title(kind: MenuKind) -> &'static str {
         kind,
         MenuKind::QuestMenu | MenuKind::QuestList { .. } | MenuKind::QuestDetail { .. }
     ) {
-        menu::menu_title(MenuKind::QuestMenu)
+        // Hard-coded, not `menu_title`: the quest rectangles' own captions are
+        // blank now (owner ruling, ur/90 round) while this box keeps the word.
+        "Quests"
     } else {
         menu::menu_title(kind)
     }

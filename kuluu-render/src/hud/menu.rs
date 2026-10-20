@@ -1639,7 +1639,10 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
             return mission_chain_name(log).unwrap_or("Mission Log")
         }
         MenuKind::BazaarStalls => "Bazaar",
-        MenuKind::QuestMenu | MenuKind::QuestList { .. } => "Quests",
+        // Owner ruling (ur/90 round): the quest windows' rectangles carry no word
+        // on their top border — in ur/87 both frames run plain above their rows.
+        // The family's name lives only in the help bar (`help_bar_title`).
+        MenuKind::QuestMenu | MenuKind::QuestList { .. } => "",
         MenuKind::QuestDetail { .. } => "Quest Log",
         // The bag picker hung off the trade window's Add-Item button row; its
         // own caption is [I] like the rest of the family (§25).
@@ -17099,11 +17102,10 @@ mod tests {
         assert!(is_dynamic(MenuKind::QuestMenu));
         assert!(is_dynamic(MenuKind::QuestList { completed: false }));
         assert!(is_dynamic(MenuKind::QuestDetail { log: 0, id: 4 }));
-        assert_eq!(menu_title(MenuKind::QuestMenu), "Quests");
-        assert_eq!(
-            menu_title(MenuKind::QuestList { completed: false }),
-            "Quests"
-        );
+        // Owner ruling (ur/90 round): no word rides these rectangles' top borders
+        // (both ur/87 frames run plain); only the help bar names the family.
+        assert_eq!(menu_title(MenuKind::QuestMenu), "");
+        assert_eq!(menu_title(MenuKind::QuestList { completed: false }), "");
         assert_eq!(
             menu_title(MenuKind::QuestDetail { log: 2, id: 9 }),
             "Quest Log"

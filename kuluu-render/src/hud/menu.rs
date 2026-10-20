@@ -5661,6 +5661,9 @@ fn pane_width_for(kind: MenuKind) -> f32 {
         // not the standard column.
         MenuKind::Root => status_pane_width(),
         MenuKind::Status => status_pane_width(),
+        // Ur/94 round: the owner re-ruled that law for the Missions selector too
+        // - "fix its wide to same as commands".
+        MenuKind::MissionList => status_pane_width(),
         _ => MENU_PANE_WIDTH,
     }
 }

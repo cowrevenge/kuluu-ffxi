@@ -777,6 +777,9 @@ pub struct DynamicMenu {
     /// first Mission window [`refresh_dynamic_menu_rows`] sees; see
     /// [`MissionTextCatalog`].
     pub mission_texts: MissionTextCatalog,
+    /// The quest-log name/briefing catalogs, read from the install on the first
+    /// Quest window [`refresh_dynamic_menu_rows`] sees; see [`QuestTextCatalog`].
+    pub quest_texts: QuestTextCatalog,
     /// Chat lines the client emits locally ride ids into GetText **table 9**
     /// (emitter .text FFXiMain.dll retail-2026-09 `.text 0x129DE0`, vault main_menu.md
     /// §59 addendum 35); this is that catalog, loaded once from DAT on the first
@@ -5893,13 +5896,13 @@ fn lsb_group_to_school(group: u8) -> Option<u8> {
 }
 
 /// Mission-chain name/briefing catalogs read from the install. The catalog is
-/// law: its entries carry their own ids (+0x1C word == position, verified at
-/// open), so a name lookup keys off `(chain, wire id)` straight into the DAT —
-/// nothing hand-built sits between the window and the file (owner ruling this
-/// round: read vtables, get names *and* descriptions, index from the table).
-/// The scraped `ffxi_vocab` table only stands in where an install has no
-/// catalog, exactly like the spell-school fallback above. Lives on
-/// [`DynamicMenu`] so every harness that owns the menu owns its catalogs.
+/// law: each block labels itself with its wire id (+0x1C word), so a lookup
+/// keys off `(chain, wire id)` straight into the DAT — nothing hand-built sits
+/// between the window and the file (owner ruling: read vtables, get names *and*
+/// descriptions, index from the table). The scraped `ffxi_vocab` table only
+/// stands in where an install has no catalog, exactly like the spell-school
+/// fallback above. Lives on [`DynamicMenu`] so every harness that owns the menu
+/// owns its catalogs.
 #[derive(Debug, Clone, Default)]
 pub struct MissionTextCatalog {
     loaded: bool,
@@ -5931,7 +5934,7 @@ impl MissionTextCatalog {
     pub fn name(&self, log: u8, id: u16) -> Option<&str> {
         self.tables
             .get(&log)
-            .and_then(|t| ffxi_dat::mission_dat::name(t, usize::from(id)))
+            .and_then(|t| ffxi_dat::mission_dat::name(t, u32::from(id)))
     }
 
     /// The catalog briefing for one `(chain, wire id)` pair (`Area:` /
@@ -5939,7 +5942,52 @@ impl MissionTextCatalog {
     pub fn description(&self, log: u8, id: u16) -> Option<&str> {
         self.tables
             .get(&log)
-            .and_then(|t| ffxi_dat::mission_dat::description(t, usize::from(id)))
+            .and_then(|t| ffxi_dat::mission_dat::description(t, u32::from(id)))
+    }
+}
+
+/// Quest-log name/briefing catalogs read from the install, same law as
+/// [`MissionTextCatalog`] (each block self-labels with its quest id at +0x1C;
+/// `ffxi-dat::quest_dat` refuses ambiguous tables) — Windurst's table proves
+/// why position cannot be trusted and the word must key. The scraped
+/// `ffxi_vocab` lattice stands in only where no catalog was read.
+#[derive(Debug, Clone, Default)]
+pub struct QuestTextCatalog {
+    loaded: bool,
+    tables: std::collections::BTreeMap<u8, ffxi_dat::dmsg::DmsgTable>,
+}
+
+impl QuestTextCatalog {
+    fn ensure_loaded(&mut self, root: Option<&ffxi_dat::DatRoot>) {
+        if self.loaded {
+            return;
+        }
+        let Some(root) = root else { return };
+        // Every log the pin map claims; absent/unmeasured logs simply do not load.
+        for log in 0u8..=10 {
+            if ffxi_dat::quest_dat::quest_catalog_file(log).is_none() {
+                continue;
+            }
+            if let Ok(table) = ffxi_dat::quest_dat::open_quest_catalog(root, log) {
+                self.tables.insert(log, table);
+            }
+        }
+        self.loaded = true;
+    }
+
+    /// The catalog name for one `(log, wire id)` pair.
+    pub fn name(&self, log: u8, id: u16) -> Option<&str> {
+        self.tables
+            .get(&log)
+            .and_then(|t| ffxi_dat::quest_dat::name(t, u32::from(id)))
+    }
+
+    /// The catalog briefing for one `(log, wire id)` pair — retail's quest text
+    /// window body (`Client:` / `Summary:` notes).
+    pub fn description(&self, log: u8, id: u16) -> Option<&str> {
+        self.tables
+            .get(&log)
+            .and_then(|t| ffxi_dat::quest_dat::description(t, u32::from(id)))
     }
 }
 
@@ -6683,12 +6731,17 @@ fn mission_current_reason(snap: &kuluu_snapshot::SceneSnapshot, log: u8) -> &'st
 
 /// The `quest00` rows (vault main_menu.md §31): the chrome carries no captions,
 /// and kuluu lists exactly the quest bits its s2c 0x056 quest-port state holds —
-/// one row per `(log, id)` in log-then-id order, labelled from the scraped
-/// `scripts/globals/quests.lua` lattice. A bit present in both a QuestOffer and
-/// its QuestComplete port shows as complete (the window carries one row per
-/// quest; which report wins is state order, filter semantics [I-pending]).
-/// Select mirrors quest00's select tail name-open of quest01 by pushing detail.
-pub fn quest_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
+/// one row per `(log, id)` in log-then-id order. Names come install-catalog-
+/// first ([`QuestTextCatalog`]) with the scraped `scripts/globals/quests.lua`
+/// lattice as fallback; neither knowing a bit draws `Quest #id`. A bit present
+/// in both a QuestOffer and its QuestComplete port shows as complete (the
+/// window carries one row per quest; which report wins is state order, filter
+/// semantics [I-pending]). Select mirrors quest00's select tail name-open of
+/// quest01 by pushing detail.
+pub fn quest_list_rows(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    texts: &QuestTextCatalog,
+) -> Vec<DynamicMenuRow> {
     let mut statuses: std::collections::BTreeMap<(u8, u16), bool> = Default::default();
     for entry in &snap.missions.logs {
         if let Some((log, complete)) = ffxi_proto::mission::quest_port(entry.port) {
@@ -6701,9 +6754,9 @@ pub fn quest_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuR
         .iter()
         .map(|(&(log, id), &complete)| DynamicMenuRow {
             tint: None,
-            label: match quest_caption(log, id) {
+            label: match quest_label(texts, log, id) {
                 Some(name) if complete => format!("{name} (complete)"),
-                Some(name) => name.to_string(),
+                Some(name) => name,
                 None if complete => format!("Quest #{id} (complete)"),
                 None => format!("Quest #{id}"),
             },
@@ -6720,15 +6773,24 @@ pub fn quest_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuR
     rows
 }
 
-fn quest_caption(log: u8, id: u16) -> Option<&'static str> {
-    ffxi_vocab::quest_lattice::quest_name(log, id)
+/// One quest name line — the install catalog's own wording first (it keeps the
+/// apostrophes and phrasing retail draws; e.g. "A Sentry's Peril" where the
+/// scraped lattice had to strip punctuation), then `ffxi_vocab`, then nothing.
+fn quest_label(texts: &QuestTextCatalog, log: u8, id: u16) -> Option<String> {
+    texts
+        .name(log, id)
+        .map(str::to_string)
+        .or_else(|| ffxi_vocab::quest_lattice::quest_name(log, id).map(String::from))
 }
 
 /// The `quest01` detail lines for one quest bit (vault main_menu.md §31): the
-/// field dump legible, every row inert while that window's paging law stays
-/// [I-pending]. Labels are kuluu pins (§22/§31 chrome-only law).
+/// name, then the install catalog's briefing notes — retail's quest text window
+/// body (`Client:`/`Summary:` lines from the table's second string slot; where
+/// no catalog was read this adds nothing) — then the legible field dump, every
+/// row inert while that window's paging law stays [I-pending].
 pub fn quest_detail_rows(
     snap: &kuluu_snapshot::SceneSnapshot,
+    texts: &QuestTextCatalog,
     log: u8,
     id: u16,
 ) -> Vec<DynamicMenuRow> {
@@ -6746,9 +6808,18 @@ pub fn quest_detail_rows(
         .copied()
         .unwrap_or("Unknown");
     let mut lines: Vec<String> = Vec::new();
-    match quest_caption(log, id) {
-        Some(name) => lines.push(name.to_string()),
+    match quest_label(texts, log, id) {
+        Some(name) => lines.push(name),
         None => lines.push(format!("Quest #{id}")),
+    }
+    if let Some(briefing) = texts.description(log, id) {
+        lines.extend(
+            briefing
+                .split('\n')
+                .map(str::trim_end)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string),
+        );
     }
     lines.push(format!("Area: {area}"));
     if bits.1 {
@@ -7039,6 +7110,20 @@ pub fn refresh_dynamic_menu_rows(
     if mission_open && !dynamic.mission_texts.loaded {
         dynamic.mission_texts.ensure_loaded(dat_for_captions);
     }
+    // Quest windows draw from the same install table family: names and
+    // briefings come from the DAT catalog indexed by its own id words, with
+    // the scraped lattice as no-install fallback.
+    let quest_open = stack.is_some_and(|stack| {
+        stack.levels.iter().any(|level| {
+            matches!(
+                level.kind,
+                MenuKind::QuestList | MenuKind::QuestDetail { .. }
+            )
+        })
+    });
+    if quest_open && !dynamic.quest_texts.loaded {
+        dynamic.quest_texts.ensure_loaded(dat_for_captions);
+    }
 
     // The equip gate needs item records whatever window is open, so the DATs resolve once here
     // rather than per arm.
@@ -7325,8 +7410,8 @@ fn dynamic_rows_for(
         MenuKind::BazaarStalls => bazaar_stall_rows(snap),
         // The quest00 list follows the folded s2c 0x056 quest ports (vault
         // main_menu.md §31).
-        MenuKind::QuestList => quest_list_rows(snap),
-        MenuKind::QuestDetail { log, id } => quest_detail_rows(snap, log, id),
+        MenuKind::QuestList => quest_list_rows(snap, &dynamic.quest_texts),
+        MenuKind::QuestDetail { log, id } => quest_detail_rows(snap, &dynamic.quest_texts, log, id),
         // The pupequip variant's fourteen automaton slot rows (vault
         // main_menu.md §39).
         MenuKind::AutomatonEquip => automaton_equip_rows(snap),
@@ -16539,7 +16624,8 @@ mod tests {
     #[test]
     fn quest_list_rows_expand_the_quest_ports() {
         let mut snap = kuluu_snapshot::SceneSnapshot::default();
-        let empty = quest_list_rows(&snap);
+        let texts = QuestTextCatalog::default();
+        let empty = quest_list_rows(&snap, &texts);
         assert_eq!(empty.len(), 1, "logged-out state keeps one hint row");
         assert!(empty[0].label.contains("no quests"));
 
@@ -16559,7 +16645,7 @@ mod tests {
             data: [7; 8],
         });
 
-        let rows = quest_list_rows(&snap);
+        let rows = quest_list_rows(&snap, &texts);
         assert_eq!(rows.len(), 3, "one row per (log, id) bit held");
         // scripts/globals/quests.lua San d'Oria block.
         assert_eq!(rows[0].label, "A Sentrys Peril");
@@ -16575,7 +16661,7 @@ mod tests {
         );
 
         // The quest01 stand-in is a legible-only dump of the fields kuluu holds.
-        let detail = quest_detail_rows(&snap, 0, 18);
+        let detail = quest_detail_rows(&snap, &texts, 0, 18);
         assert_eq!(detail[0].label, "Gates to Paradise");
         assert_eq!(detail[1].label, "Area: Sandoria");
         assert_eq!(detail[2].label, "Complete.");
@@ -17975,6 +18061,47 @@ mod tests {
                     log: MISSION_LOG_BASTOK,
                     id: 0
                 }
+            );
+        }
+    }
+
+    /// Gated on a retail install (same law as the mission test above, this
+    /// time for `quest_dat`): quest list lines draw the catalog's own wording —
+    /// apostrophes included, which the scraped lattice cannot produce — and the
+    /// detail window fills with the table's briefing notes ahead of the field
+    /// dump.
+    #[test]
+    fn installed_catalogs_fill_the_quest_windows() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let mut texts = QuestTextCatalog::default();
+        texts.ensure_loaded(Some(&root));
+        // Sandoria offer bit 0, Windurst offer bit 5 (`In a Pickle`).
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: ffxi_proto::mission::QUEST_OFFER_PORTS[0],
+            data: [1, 0, 0, 0, 0, 0, 0, 0],
+        });
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: ffxi_proto::mission::QUEST_OFFER_PORTS[2],
+            data: [1 << 5, 0, 0, 0, 0, 0, 0, 0],
+        });
+        let rows = quest_list_rows(&snap, &texts);
+        assert_eq!(rows.len(), 2);
+        // The DAT spelling with the apostrophe; vocab would say "A Sentrys Peril".
+        assert_eq!(rows[0].label, "A Sentry's Peril");
+        assert_eq!(rows[1].label, "In a Pickle");
+        let detail = quest_detail_rows(&snap, &texts, 2, 5);
+        assert_eq!(detail[0].label, "In a Pickle");
+        // The briefing lines from the table's second string slot, retail's
+        // newlines kept as rows, ahead of kuluu's own Area/status dump.
+        assert!(detail[1].label.starts_with("Client: Chamama"));
+        assert!(detail.iter().any(|row| row.label == "Area: Windurst"));
+        for row in &detail {
+            assert_eq!(
+                row.action,
+                DynamicMenuAction::QuestDetailRow { log: 2, id: 5 }
             );
         }
     }

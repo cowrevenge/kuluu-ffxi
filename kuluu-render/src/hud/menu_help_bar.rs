@@ -322,7 +322,8 @@ pub fn option_help(id: SortOptionId) -> (&'static str, &'static str) {
 /// Every mission-family window does the same thing to its own word (ur/81:
 /// "The top left helper bar should just say Missions") — the chain's name
 /// belongs on the log/text windows' captions, not in the title box, where
-/// `Wings of the Goddess` truncated to "Wings of the" (ur/80).
+/// `Wings of the Goddess` truncated to "Wings of the" (ur/80). The quest pair
+/// takes the same law: both windows are one family titled Quests.
 fn help_bar_title(kind: MenuKind) -> &'static str {
     if crate::hud::item_screen::is_item_submenu(kind) {
         menu::menu_title(MenuKind::Items)
@@ -331,6 +332,8 @@ fn help_bar_title(kind: MenuKind) -> &'static str {
         MenuKind::MissionList | MenuKind::MissionDetail { .. } | MenuKind::MissionText { .. }
     ) {
         menu::menu_title(MenuKind::MissionList)
+    } else if matches!(kind, MenuKind::QuestList | MenuKind::QuestDetail { .. }) {
+        menu::menu_title(MenuKind::QuestList)
     } else {
         menu::menu_title(kind)
     }
@@ -1278,6 +1281,19 @@ mod tests {
             assert_eq!(
                 help_bar_title(MenuKind::MissionText { log, id: 1 }),
                 "Missions"
+            );
+        }
+    }
+
+    /// The quest pair takes the mission-family helper-box law (ur/81 extended):
+    /// both windows keep `Quests` in the title box, not the per-window word.
+    #[test]
+    fn every_quest_window_helper_box_says_quests() {
+        assert_eq!(help_bar_title(MenuKind::QuestList), "Quests");
+        for log in [0u8, 255] {
+            assert_eq!(
+                help_bar_title(MenuKind::QuestDetail { log, id: 1 }),
+                "Quests"
             );
         }
     }

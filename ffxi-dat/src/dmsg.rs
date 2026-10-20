@@ -848,10 +848,41 @@ impl DmsgTable {
     }
 
     /// The id word the fixed-block mission-family parser recorded at each entry's
-    /// +0x1C — its own index on every measured table, so name lookups key off it
-    /// rather than a hand-built mapping; `None` for catalogs read by [`Self::parse`].
+    /// +0x1C — every measured chain and quest table labels blocks this way, so
+    /// lookups key off it rather than a hand-built mapping; `None` for catalogs
+    /// read by [`Self::parse`].
     pub fn entry_id_word(&self, index: usize) -> Option<u32> {
         self.id_words.as_ref()?.get(index).copied().flatten()
+    }
+
+    /// The first entry whose own id word ([`Self::entry_id_word`]) is `id` — the
+    /// table indexes itself. Open-time validation (`ffxi_dat::mission_dat`,
+    /// [`crate::quest_dat`]`) keeps the keyed lookups unambiguous per family.
+    pub fn entry_index_for_id_word(&self, id: u32) -> Option<usize> {
+        (0..self.len()).find(|&i| self.entry_id_word(i) == Some(id))
+    }
+
+    /// Slot 0 — the name — of the entry whose own id word is `id`; blank blocks
+    /// read as `None`.
+    pub fn name_for_id(&self, id: u32) -> Option<&str> {
+        self.entry_index_for_id_word(id).and_then(|i| {
+            self.entry_strings(i)?
+                .first()
+                .filter(|s| !s.is_empty())
+                .map(String::as_str)
+        })
+    }
+
+    /// Slot 1 — the briefing (`Mission Orders:`/`Area:` on chains,
+    /// `Client:`/`Summary:` notes on quests) of the entry whose own id word is
+    /// `id`; blocks without one read as `None`.
+    pub fn briefing_for_id(&self, id: u32) -> Option<&str> {
+        self.entry_index_for_id_word(id).and_then(|i| {
+            self.entry_strings(i)?
+                .get(1)
+                .filter(|s| !s.is_empty())
+                .map(String::as_str)
+        })
     }
 }
 

@@ -3221,8 +3221,10 @@ mod menu_key_tests {
             data: [1, 0, 0, 0, 0, 0, 0, 0],
         });
         harness.scene_state.snapshot = snap;
-        harness.dynamic.rows =
-            kuluu_render::hud::menu::quest_list_rows(&harness.scene_state.snapshot);
+        harness.dynamic.rows = kuluu_render::hud::menu::quest_list_rows(
+            &harness.scene_state.snapshot,
+            &kuluu_render::hud::menu::QuestTextCatalog::default(),
+        );
 
         stack.current_mut().unwrap().cursor = 0;
         let markers = world.resource_mut::<MapMarkers>();

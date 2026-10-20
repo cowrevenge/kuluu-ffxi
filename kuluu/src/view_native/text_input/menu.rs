@@ -808,10 +808,10 @@ pub(super) fn confirm_menu_at_cursor(
             }
 
             // The missionm select tail name-opens miss00 over the list (FFXiMain.dll
-            // retail-2026-09 RVA 0x22DB40; vault main_menu.md §30) — kuluu pushes the
-            // per-port detail window the same way.
-            if let A::MissionOpenLog { port } = action {
-                stack.push(MenuKind::MissionDetail { port });
+            // retail-2026-09 RVA 0x22DB40; vault main_menu.md §30) — kuluu pushes that
+            // chain's log window the same way (ur/62: one row per chain).
+            if let A::MissionOpenLog { log, member } = action {
+                stack.push(MenuKind::MissionDetail { log, member });
                 return None;
             }
 
@@ -2391,6 +2391,29 @@ pub(super) fn handle_menu_key(
         return None;
     }
 
+    // ur/64: a mission log is Left/Right by nation — the arrows cycle the
+    // selector row's chain members (wrap like Up/Down); the list itself scrolls
+    // through its rows with the cursor alone.
+    if let MenuKind::MissionDetail { log, member } = kind {
+        let forward = if bindings.matches_logical(Action::NavLeft, key) {
+            Some(false)
+        } else if bindings.matches_logical(Action::NavRight, key) {
+            Some(true)
+        } else {
+            None
+        };
+        if let Some(forward) = forward {
+            if let (Some(level), Some((log, member))) = (
+                stack.current_mut(),
+                kuluu_render::hud::menu::mission_cycle_member(log, member, forward),
+            ) {
+                level.kind = MenuKind::MissionDetail { log, member };
+                level.cursor = 0;
+            }
+            return None;
+        }
+    }
+
     // Retail pages every other vertical list menu (the action-ring Usable list,
     // Magic/Abilities/Key Items/Emotes, the equip-slot picker) with Left/Right,
     // one visible page per press, clamped at the ends. Items handled its own
@@ -3010,7 +3033,7 @@ mod menu_key_tests {
     }
 
     #[test]
-    fn mission_row_select_pushes_the_detail_window() {
+    fn mission_row_select_pushes_the_log_and_arrows_cycle_nations() {
         let mut harness = Harness::new();
         let mut world = marker_world();
         let mut stack = MenuStack::root();
@@ -3022,22 +3045,35 @@ mod menu_key_tests {
             data: [1, 0, 0, 0, 0, 0, 0, 0],
         });
         harness.scene_state.snapshot = snap;
-        harness.dynamic.rows =
-            kuluu_render::hud::menu::mission_list_rows(&harness.scene_state.snapshot);
+        harness.dynamic.rows = kuluu_render::hud::menu::mission_selector_rows();
 
-        // The sole row is the Nations complete-log entry (vault main_menu.md section 30).
+        // The Nations row opens its first chain's log (ur/62: one row per chain).
         stack.current_mut().unwrap().cursor = 0;
         let markers = world.resource_mut::<MapMarkers>();
         harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
 
         match stack.current().unwrap().kind {
-            MenuKind::MissionDetail { port } => assert_eq!(port, 0x00D0),
-            other => panic!("expected the miss00-stand-in detail on top, got {other:?}"),
+            MenuKind::MissionDetail { log: 0, member } => assert_eq!(member, 0),
+            other => panic!("expected the miss00-stand-in log on top, got {other:?}"),
         }
         assert_eq!(
             stack.levels.len(),
             3,
-            "detail pushes over the list, like retail"
+            "the log pushes over the selector, like retail"
+        );
+
+        // ur/64: Right steps to the row's next nation, Left wraps back.
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowRight, KeyCode::ArrowRight, &mut stack, markers);
+        assert_eq!(
+            stack.current().unwrap().kind,
+            MenuKind::MissionDetail { log: 1, member: 1 }
+        );
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowLeft, KeyCode::ArrowLeft, &mut stack, markers);
+        assert_eq!(
+            stack.current().unwrap().kind,
+            MenuKind::MissionDetail { log: 0, member: 0 }
         );
     }
 

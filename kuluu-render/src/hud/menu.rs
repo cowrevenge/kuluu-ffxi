@@ -479,11 +479,12 @@ pub enum DynamicMenuAction {
         mode: u8,
     },
 
-    /// One row of the `missionm` list opening its `miss00` detail (the handler's
-    /// select tail name-opens miss00; FFXiMain.dll retail-2026-09 RVA 0x22DB40;
-    /// vault main_menu.md §30).
+    /// One row of the `missionm` selector opening that chain's `miss00` log (the
+    /// handler's select tail name-opens miss00; FFXiMain.dll retail-2026-09 RVA
+    /// 0x22DB40; vault main_menu.md §30). `log`/`member` follow MenuKind::MissionDetail.
     MissionOpenLog {
-        port: u16,
+        log: u8,
+        member: u8,
     },
 
     /// A legible-only mission-log line (`miss00`'s paging semantics are
@@ -1273,6 +1274,9 @@ pub fn entry_count(kind: MenuKind, dynamic: &DynamicMenu, dlss_supported: bool) 
 /// ride the item_screen panel; everything else the generic panel.
 pub fn list_page_rows(kind: MenuKind) -> usize {
     match kind {
+        // ur/64: a mission log owns its one screen; Left/Right cycle the chain
+        // members instead of paging rows.
+        MenuKind::MissionDetail { .. } => MISSION_LOG_VISIBLE_ROWS,
         // ur/51: a Currencies page is exactly the eight visible rows.
         MenuKind::StatusDetail { entry } if is_currency_detail(Some(entry)) => 8,
         MenuKind::Items | MenuKind::UsableItems => crate::hud::item_screen::ITEM_LIST_ROWS,
@@ -1595,7 +1599,10 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::CraftList => "Craft List",
         MenuKind::RegionInfo { .. } => "Region Info",
         MenuKind::MissionList => "Missions",
-        MenuKind::MissionDetail { .. } => "Mission Log",
+        // The log window wears its chain's name under the arrows (ur/64 shows `Bastok`).
+        MenuKind::MissionDetail { log, .. } => {
+            return mission_chain_name(log).unwrap_or("Mission Log")
+        }
         MenuKind::BazaarStalls => "Bazaar",
         MenuKind::QuestList => "Quests",
         MenuKind::QuestDetail { .. } => "Quest Log",
@@ -4660,6 +4667,10 @@ pub fn menu_row_disabled(
     snap: &kuluu_snapshot::SceneSnapshot,
 ) -> bool {
     match kind {
+        // ur/62: a chain the snapshot reports nothing for draws grey. Like the
+        // roomlist's gated row it stays selectable — browsing an empty log is
+        // information, and the wire says nothing more about why.
+        MenuKind::MissionList => !mission_selector_row_active(snap, index),
         MenuKind::Status => crate::hud::status_panel::STATUS_ENTRIES
             .get(index)
             .is_some_and(|entry| !crate::hud::status_panel::status_row_enabled(entry.kind, snap)),
@@ -5034,9 +5045,26 @@ pub struct MenuStackWindowRow {
     pub slot: usize,
 }
 
+/// A stack window's right-edge scrollbar (ur/64), shown only for the kinds that
+/// carry a visible-row cap.
+#[derive(Component)]
+pub struct MenuStackWindowScrollTrack {
+    pub window: usize,
+}
+
+#[derive(Component)]
+pub struct MenuStackWindowScrollThumb {
+    pub window: usize,
+}
+
 /// More record windows than any menu chain keeps open under the focused one; past it the
 /// oldest stay open undrawn.
 pub const MAX_STACKED_WINDOWS: usize = 8;
+
+/// The mission log's size limit (ur/64: "w/ scroll, has size limit") — retail's
+/// `miss00` frames six rows and hands the rest to the right-edge bar. Pins are
+/// lines counted, not measured.
+pub const MISSION_LOG_VISIBLE_ROWS: usize = 6;
 
 #[derive(Message, Debug, Clone, Copy)]
 pub struct MenuRowActivated {
@@ -5083,7 +5111,7 @@ pub fn record_window_name(kind: MenuKind) -> Option<&'static str> {
         // `/quest` chains through exactly these two windows (vault main_menu.md §31).
         MenuKind::QuestList => "quest00",
         MenuKind::QuestDetail { .. } => "quest01",
-        // `miss00` is the only mission-detail record — it serves every port (vault main_menu.md §30).
+        // `miss00` is the only mission-log record — it serves every chain (vault main_menu.md §30).
         MenuKind::MissionDetail { .. } => "miss00",
         // Retail opens its trade pair left-half; kuluu merges both windows into one
         // surface anchored on its own side's record (vault main_menu.md §25).
@@ -5584,6 +5612,36 @@ fn spawn_stacked_window(parent: &mut ChildSpawnerCommands, slot: usize) {
                 style::text_font(MENU_ROW_FONT_PX),
                 TextColor(theme::TITLE),
             ));
+            // ur/64: the mission log is a size-limited window with a right-edge
+            // scrollbar; the furniture is hidden on every other kind. The pair are
+            // siblings, each marked with its window, so the draw pass pairs them by
+            // slot without walking children.
+            w.spawn((
+                MenuStackWindowScrollTrack { window: slot },
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(MENU_BORDER_PX),
+                    top: Val::Px(0.0),
+                    bottom: Val::Px(0.0),
+                    width: Val::Px(crate::hud::list_view::SCROLLBAR_WIDTH_PX),
+                    display: Display::None,
+                    ..default()
+                },
+                BackgroundColor(theme::CELL_BG),
+            ));
+            w.spawn((
+                MenuStackWindowScrollThumb { window: slot },
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(MENU_BORDER_PX),
+                    top: Val::Px(0.0),
+                    height: Val::Percent(100.0),
+                    width: Val::Px(crate::hud::list_view::SCROLLBAR_WIDTH_PX),
+                    display: Display::None,
+                    ..default()
+                },
+                BackgroundColor(theme::FRAME_EDGE),
+            ));
             for row in 0..DYNAMIC_VISIBLE_ROWS {
                 w.spawn((
                     MenuStackWindowRow {
@@ -5871,15 +5929,235 @@ pub fn region_info_rows(mode: u8, zone: Option<u16>) -> Vec<DynamicMenuRow> {
 /// vendor/server/src/map/enums/mission_log.h).
 pub const MISSION_NATION_NAMES_PINNED: [&str; 3] = ["Sandoria", "Bastok", "Windurst"];
 
-/// The complete-mission ports named by `MissionComplete` (vendor/server/src/map/
-/// enums/mission_log.h) — the only OTHER ports the Missions surface lists; quest
-/// ports belong to the "/quest" seam (vault main_menu.md §30).
-pub const MISSION_COMPLETE_PORTS_PINNED: [(u16, &str); 4] = [
-    (0x00D0, "Nations"),
-    (0x00D8, "ToAU/WoTG"),
-    (0x0030, "Campaign I"),
-    (0x0038, "Campaign II"),
+/// The seven selector rows the Missions battery draws, in capture order with the
+/// captions read off retail's screen (owner captures ur/61/ur/63): `Nations`,
+/// `Zilart`, `Promathia`, `Ant Urghan`, `Altana`, `Adoulin`, `Add-ons`. kuluu
+/// lists them all and greys the chains its s2c 0x056 state reports nothing for
+/// (owner ruling ur/62: "it should list them all, and grey the ones that are not active").
+pub const MISSION_SELECTOR_LABELS_PINNED: [&str; 7] = [
+    "Nations",
+    "Zilart",
+    "Promathia",
+    "Ant Urghan",
+    "Altana",
+    "Adoulin",
+    "Add-ons",
 ];
+
+/// Chain indices (`xi.mission.log_id`, vendor/server/scripts/globals/missions.lua;
+/// same order as `MissionLog` in vendor/server/src/map/enums/mission_log.h).
+pub const MISSION_LOG_SANDORIA: u8 = 0;
+pub const MISSION_LOG_BASTOK: u8 = 1;
+pub const MISSION_LOG_WINDURST: u8 = 2;
+pub const MISSION_LOG_ZILART: u8 = 3;
+pub const MISSION_LOG_TOAU: u8 = 4;
+pub const MISSION_LOG_WOTG: u8 = 5;
+pub const MISSION_LOG_COP: u8 = 6;
+pub const MISSION_LOG_CAMPAIGN: u8 = 8;
+pub const MISSION_LOG_ACP: u8 = 9;
+pub const MISSION_LOG_AMK: u8 = 10;
+pub const MISSION_LOG_ASA: u8 = 11;
+pub const MISSION_LOG_SOA: u8 = 12;
+pub const MISSION_LOG_ROV: u8 = 13;
+
+/// One selector row as `mission_selector_rows` emits it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissionSelectorRow {
+    pub label_idx: usize,
+    /// The chain the window opens on (first member of `log`).
+    pub log: u8,
+    /// Position into that row's Left/Right cycle table.
+    pub member: u8,
+}
+
+/// The chains one selector row cycles with Left/Right, in capture order. Nations
+/// walks its three native logs (ur/64 shows `← Bastok →`); the addons row walks the
+/// three add-on chains; Zilart/Promathia/Altana/Adoulin stand alone — retail's log
+/// ports carry no WoTG chain selector apart from Aht Urhgan, and TVR stays
+/// snapshot-only (LSB marks its own `log_id` guess in vendor/server/scripts/
+/// globals/missions.lua).
+pub fn mission_selector_chains(label_idx: usize) -> &'static [u8] {
+    match label_idx {
+        0 => &[
+            MISSION_LOG_SANDORIA,
+            MISSION_LOG_BASTOK,
+            MISSION_LOG_WINDURST,
+        ],
+        1 => &[MISSION_LOG_ZILART],
+        2 => &[MISSION_LOG_COP],
+        3 => &[MISSION_LOG_TOAU, MISSION_LOG_WOTG],
+        4 => &[MISSION_LOG_SOA],
+        5 => &[MISSION_LOG_ROV],
+        6 => &[MISSION_LOG_ACP, MISSION_LOG_AMK, MISSION_LOG_ASA],
+        _ => &[],
+    }
+}
+
+/// The row each selector line opens (ur/62), first member at cursor.
+pub fn mission_selector_open_row(label_idx: usize) -> Option<MissionSelectorRow> {
+    let log = *mission_selector_chains(label_idx).first()?;
+    Some(MissionSelectorRow {
+        label_idx,
+        log,
+        member: 0,
+    })
+}
+
+/// LSB's wire offsets on the main port for the two Adoulin-era chains
+/// (`(current * 2) + 0x6E` / `current + 0x6C`,
+/// vendor/server/src/map/packets/s2c/0x056_mission.cpp).
+pub const MISSION_MAIN_PORT_SOA_WIRE_OFFSET: u32 = 0x6E;
+pub const MISSION_MAIN_PORT_ROV_WIRE_OFFSET: u32 = 0x6C;
+
+/// The main-port `current` word for one chain, decoded to the same mission id
+/// space as the completion bits and `ffxi_vocab::mission_names`. SoA/Rov subtract
+/// LSB's wire offsets; every other chain carries the plain value.
+pub fn mission_main_port_current(info: &kuluu_snapshot::MissionInfo, log: u8) -> Option<u32> {
+    let raw = match log {
+        l if l == MISSION_LOG_SANDORIA || l == MISSION_LOG_BASTOK || l == MISSION_LOG_WINDURST => {
+            // LSB fills `NationMission` only for the profile nation
+            // (`m_missionLog[profile.nation].current`, 0x056_mission.cpp).
+            (l as u32 == info.nation).then_some(info.nation_mission)?
+        }
+        MISSION_LOG_ZILART => info.rotz,
+        MISSION_LOG_COP => info.cop,
+        MISSION_LOG_TOAU | MISSION_LOG_WOTG => return None, // main port carries neither
+        MISSION_LOG_ACP => u32::from(info.addon_acp),
+        MISSION_LOG_AMK => u32::from(info.addon_amk),
+        MISSION_LOG_ASA => u32::from(info.addon_asa),
+        MISSION_LOG_SOA => info.soa,
+        MISSION_LOG_ROV => info.rov,
+        _ => return None,
+    };
+    let current = match log {
+        MISSION_LOG_SOA if raw > MISSION_MAIN_PORT_SOA_WIRE_OFFSET => {
+            (raw - MISSION_MAIN_PORT_SOA_WIRE_OFFSET) / 2
+        }
+        MISSION_LOG_ROV if raw > MISSION_MAIN_PORT_ROV_WIRE_OFFSET => {
+            raw - MISSION_MAIN_PORT_ROV_WIRE_OFFSET
+        }
+        _ => raw,
+    };
+    (current != 0).then_some(current)
+}
+
+/// The ToAU/WoTG `current` stand-in: LSB mirrors them into the Aht-Urhgan quest-offer
+/// frame's words 5/6 (`packet.Data[5] = m_missionLog[MissionLog::ToAU].current`,
+/// `packet.Data[6] = ...WoTG...`, vendor/server/src/map/packets/s2c/
+/// 0x056_mission_other.cpp). The main port carries neither.
+pub fn mission_quest_port_current(snap: &kuluu_snapshot::SceneSnapshot, log: u8) -> Option<u32> {
+    let word = match log {
+        MISSION_LOG_TOAU => 5,
+        MISSION_LOG_WOTG => 6,
+        _ => return None,
+    };
+    // QuestLog order (vendor/server/src/map/enums/quest_log.h): Aht Urhgan is the
+    // sixth offer port, the frame whose words 5/6 LSB mirrors ToAU/WoTG into.
+    let aht_urhgan_offer = ffxi_proto::mission::QUEST_OFFER_PORTS.get(5)?;
+    snap.missions
+        .logs
+        .iter()
+        .find(|e| e.port == *aht_urhgan_offer)?
+        .data
+        .get(word)
+        .copied()
+        .filter(|&v| v != 0)
+}
+
+/// The chain's per-mission completion bits, as the wire reports them: port 0x00D0
+/// carries Sandoria/Bastok/Windurst/Zilart in words `log*2..` and port 0x00D8 ToAU
+/// (words 0/1) then WoTG (words 2/3), per `MissionComplete` packing in
+/// vendor/server/src/map/packets/s2c/0x056_mission_other.cpp. Chains the wire
+/// never reports (`Not all storylines use this system`, mission_log.h) return an
+/// empty set — kuluu lists only what it was told.
+pub fn mission_complete_bits(snap: &kuluu_snapshot::SceneSnapshot, log: u8) -> Vec<u16> {
+    const PORT_NATIONS: u16 = 0x00D0;
+    const PORT_TOAU_WOTG: u16 = 0x00D8;
+    let (port, word_base) = match log {
+        l if l <= MISSION_LOG_ZILART => (PORT_NATIONS, usize::from(log) * 2),
+        MISSION_LOG_TOAU => (PORT_TOAU_WOTG, 0),
+        MISSION_LOG_WOTG => (PORT_TOAU_WOTG, 2),
+        _ => return Vec::new(),
+    };
+    let Some(entry) = snap.missions.logs.iter().find(|e| e.port == port) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for word in word_base..word_base + 2 {
+        let bits = entry.data.get(word).copied().unwrap_or(0);
+        for b in 0..32 {
+            if bits >> b & 1 == 1 {
+                ids.push(((word - word_base) * 32 + b) as u16);
+            }
+        }
+    }
+    ids
+}
+
+/// The grey law (ur/62): a selector row is active when the snapshot reports any
+/// data for one of its chains — a non-zero main-port current, or any completion
+/// bit on 0x00D0/0x00D8. While no MISSION frame has folded (`info` absent) every
+/// row is grey; nothing here invents expansion ownership the wire never sent.
+pub fn mission_selector_row_active(snap: &kuluu_snapshot::SceneSnapshot, label_idx: usize) -> bool {
+    mission_selector_chains(label_idx)
+        .iter()
+        .any(|&log| mission_chain_reported(snap, log))
+}
+
+fn mission_chain_reported(snap: &kuluu_snapshot::SceneSnapshot, log: u8) -> bool {
+    if !mission_complete_bits(snap, log).is_empty() {
+        return true;
+    }
+    match log {
+        l if l == MISSION_LOG_TOAU || l == MISSION_LOG_WOTG => {
+            mission_quest_port_current(snap, log).is_some()
+        }
+        _ => snap
+            .missions
+            .info
+            .is_some_and(|info| mission_main_port_current(&info, log).is_some()),
+    }
+}
+
+/// The window caption: retail titles the log after the chain member it is showing
+/// (ur/64 shows `Bastok` under the arrows).
+pub fn mission_chain_name(log: u8) -> Option<&'static str> {
+    match log {
+        MISSION_LOG_SANDORIA => Some("Sandoria"),
+        MISSION_LOG_BASTOK => Some("Bastok"),
+        MISSION_LOG_WINDURST => Some("Windurst"),
+        MISSION_LOG_ZILART => Some("Zilart"),
+        MISSION_LOG_TOAU => Some("Aht Urhgan"),
+        MISSION_LOG_WOTG => Some("Wings of the Goddess"),
+        MISSION_LOG_COP => Some("Promathia"),
+        MISSION_LOG_ACP => Some("A Crystalline Prophecy"),
+        MISSION_LOG_AMK => Some("A Moogle Kupo d'Etat"),
+        MISSION_LOG_ASA => Some("A Shantotto Ascension"),
+        MISSION_LOG_SOA => Some("Seekers of Adoulin"),
+        MISSION_LOG_ROV => Some("Rhapsodies of Vana'diel"),
+        _ => None,
+    }
+}
+
+/// Left/Right on a log window cycles the selector row's members (ur/64: "Left /
+/// Right by nation .. w/ scroll, has size limit"), wrapping like Up/Down do.
+pub fn mission_cycle_member(log: u8, member: u8, forward: bool) -> Option<(u8, u8)> {
+    let chains = mission_selector_chains_by_log(log)?;
+    let len = chains.len() as u8;
+    if len < 2 {
+        return Some((log, member));
+    }
+    let at = (chains.iter().position(|&c| c == log)? as i32 + if forward { 1 } else { -1 })
+        .rem_euclid(len as i32) as usize;
+    Some((chains[at], at as u8))
+}
+
+/// Which selector row a log window belongs to, by chain.
+fn mission_selector_chains_by_log(log: u8) -> Option<&'static [u8]> {
+    (0..MISSION_SELECTOR_LABELS_PINNED.len())
+        .map(mission_selector_chains)
+        .find(|chains| chains.contains(&log))
+}
 
 pub fn mission_nation_name(nation: u32) -> String {
     match MISSION_NATION_NAMES_PINNED.get(nation as usize) {
@@ -5888,50 +6166,26 @@ pub fn mission_nation_name(nation: u32) -> String {
     }
 }
 
-/// The `missionm` rows (vault main_menu.md §30): the chrome carries no captions,
-/// and kuluu lists exactly the logs its s2c 0x056 state holds — the nation log
-/// line plus each complete-mission port with data. Select mirrors the handler's
-/// tail name-open of miss00 by pushing that port's detail.
-pub fn mission_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
-    let mut rows = Vec::new();
-    if let Some(info) = &snap.missions.info {
-        rows.push(DynamicMenuRow {
-            tint: None,
-            label: format!(
-                "{}: mission #{}",
-                mission_nation_name(info.nation),
-                info.nation_mission
-            ),
-            action: DynamicMenuAction::MissionOpenLog {
-                port: ffxi_proto::mission::PORT_MISSION_MAIN,
-            },
-        });
-    }
-    for entry in snap
-        .missions
-        .logs
+/// The `missionm` selector (ur/62: list every chain, grey the inactive ones —
+/// retail's battery shows all seven and dims what this character has not begun,
+/// owner captures ur/61/ur/63). Rows are fixed; a select pushes that row's log
+/// window on its first cycle member.
+pub fn mission_selector_rows() -> Vec<DynamicMenuRow> {
+    MISSION_SELECTOR_LABELS_PINNED
         .iter()
-        .filter(|e| e.data.iter().any(|&w| w != 0))
-    {
-        if let Some((port, name)) = MISSION_COMPLETE_PORTS_PINNED
-            .iter()
-            .find(|(p, _)| *p == entry.port)
-        {
-            rows.push(DynamicMenuRow {
-                tint: None,
-                label: format!("Completed missions — {name}"),
-                action: DynamicMenuAction::MissionOpenLog { port: *port },
-            });
-        }
-    }
-    if rows.is_empty() {
-        rows.push(DynamicMenuRow {
+        .enumerate()
+        .map(|(label_idx, label)| DynamicMenuRow {
             tint: None,
-            label: "(no mission logs reported)".to_string(),
-            action: DynamicMenuAction::MissionLogRow { port: 0 },
-        });
-    }
-    rows
+            label: (*label).to_string(),
+            action: mission_selector_open_row(label_idx).map_or(
+                DynamicMenuAction::MissionLogRow { port: 0 },
+                |row| DynamicMenuAction::MissionOpenLog {
+                    log: row.log,
+                    member: row.member,
+                },
+            ),
+        })
+        .collect()
 }
 
 /// The Equipment row's variant law (FFXiMain.dll retail-2026-09 RVA 0x1404D5;
@@ -6098,41 +6352,44 @@ pub fn is_bazaar_stall_entity(e: &kuluu_snapshot::Entity, self_char_id: Option<u
         && (e.id as u64) < u32::MAX as u64
 }
 
-/// The `miss00` detail lines for one port (vault main_menu.md §30): the field
-/// dump legible, every row inert while that window's paging semantics stay
-/// [I-pending]. Labels are kuluu pins (§22/§30 chrome-only law).
-pub fn mission_detail_rows(snap: &kuluu_snapshot::SceneSnapshot, port: u16) -> Vec<DynamicMenuRow> {
-    let mut rows = Vec::new();
-    if port == ffxi_proto::mission::PORT_MISSION_MAIN {
-        if let Some(i) = &snap.missions.info {
-            rows.push(format!(
-                "{}: mission #{}",
-                mission_nation_name(i.nation),
-                i.nation_mission
-            ));
-            // Field-named lines: the LSB field names are [V] (the packet header); retail
-            // expansion captions would be invented chrome ([I]) so kuluu keeps them out.
-            for (name, value) in [
-                ("RoZ", i.rotz),
-                ("CoP", i.cop),
-                ("ACP", u32::from(i.addon_acp)),
-                ("AMK", u32::from(i.addon_amk)),
-                ("ASA", u32::from(i.addon_asa)),
-                ("SoA", i.soa),
-                ("RoV", i.rov),
-            ] {
-                if value != 0 {
-                    rows.push(format!("{name} progress #{value}"));
-                }
-            }
-        }
-    } else if let Some(entry) = snap.missions.logs.iter().find(|e| e.port == port) {
-        for (i, w) in entry.data.iter().enumerate() {
-            if *w != 0 {
-                rows.push(format!("word[{i}] = {w:#010X}"));
-            }
+/// The `Current:`/`Completed:` sections of one log window (ur/64: retail's
+/// `miss00` lists real mission names under those two captions). Current comes from
+/// the main port (`NationMission`, `Expansion_*`; SoA/Rov de-offset); completion
+/// from ports 0x00D0/0x00D8. A chain the wire reports nothing for shows only what
+/// it reported — no invented rows.
+/// Names come from the scraped `xi.mission.id` lattice (vendor/server/scripts/
+/// globals/missions.lua); ids the vendor table leaves unnamed draw nothing.
+pub fn mission_detail_rows(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    log: u8,
+    _member: u8,
+) -> Vec<DynamicMenuRow> {
+    let mut rows: Vec<String> = Vec::new();
+    let current = if log == MISSION_LOG_TOAU || log == MISSION_LOG_WOTG {
+        mission_quest_port_current(snap, log)
+    } else {
+        snap.missions
+            .info
+            .as_ref()
+            .and_then(|info| mission_main_port_current(info, log))
+    };
+    let completed = mission_complete_bits(snap, log);
+    if let Some(id) = current.filter(|&id| !completed.contains(&(id as u16))) {
+        rows.push("Current:".to_string());
+        push_mission_name(&mut rows, log, id as u16);
+    }
+    if !completed.is_empty() {
+        rows.push("Completed:".to_string());
+        for id in completed {
+            push_mission_name(&mut rows, log, id);
         }
     }
+    // The wire port that named this window's data, kept on the inert rows.
+    let port = match log {
+        l if l <= MISSION_LOG_ZILART => 0x00D0,
+        MISSION_LOG_TOAU | MISSION_LOG_WOTG => 0x00D8,
+        _ => ffxi_proto::mission::PORT_MISSION_MAIN,
+    };
     let mut rows: Vec<DynamicMenuRow> = rows
         .into_iter()
         .map(|label| DynamicMenuRow {
@@ -6149,6 +6406,14 @@ pub fn mission_detail_rows(snap: &kuluu_snapshot::SceneSnapshot, port: u16) -> V
         });
     }
     rows
+}
+
+/// One named mission line; ids the vendor lattice carries no name for (unassigned
+/// completion words, commented category ids) draw nothing rather than a raw number.
+fn push_mission_name(rows: &mut Vec<String>, log: u8, id: u16) {
+    if let Some(name) = ffxi_vocab::mission_names::mission_name(log, id) {
+        rows.push((*name).to_string());
+    }
 }
 
 /// The `quest00` rows (vault main_menu.md §31): the chrome carries no captions,
@@ -6766,9 +7031,9 @@ fn dynamic_rows_for(
         // Region Info modes (vault main_menu.md §29): the rows also carry the
         // predicate gate notice for an unresolvable zone.
         MenuKind::RegionInfo { mode } => region_info_rows(mode, snap.zone_id),
-        // The missionm list follows the folded s2c 0x056 battery (vault main_menu.md §30).
-        MenuKind::MissionList => mission_list_rows(snap),
-        MenuKind::MissionDetail { port } => mission_detail_rows(snap, port),
+        // The missionm selector lists every chain and greys inactive ones (ur/62).
+        MenuKind::MissionList => mission_selector_rows(),
+        MenuKind::MissionDetail { log, member } => mission_detail_rows(snap, log, member),
         // The bazaar browser lists the zone's open player stalls (§33 wire law).
         MenuKind::BazaarStalls => bazaar_stall_rows(snap),
         // The quest00 list follows the folded s2c 0x056 quest ports (vault
@@ -8132,6 +8397,16 @@ pub fn update_menu_stack_windows(
     config_rows: Res<ConfigDatRows>,
     dock: Option<Res<crate::hud::dock::DockBoard>>,
     mut window_q: Query<(&MenuStackWindow, &mut Node, &mut ZIndex, &ComputedNode)>,
+    // One query for both scrollbar nodes (they are disjoint entities), so no
+    // `&mut Node` overlap with the frames or rows above.
+    mut scroll_q: Query<
+        (
+            Option<&MenuStackWindowScrollTrack>,
+            Option<&MenuStackWindowScrollThumb>,
+            &mut Node,
+        ),
+        (Without<MenuStackWindowRow>, Without<MenuStackWindow>),
+    >,
     mut title_q: Query<(&MenuStackWindowTitle, &mut Text), Without<MenuStackWindowRow>>,
     mut row_q: Query<
         (&MenuStackWindowRow, &mut Node, &mut Text, &mut TextColor),
@@ -8248,6 +8523,57 @@ pub fn update_menu_stack_windows(
         let want_color = menu_row_color(gated, tint, false);
         if color.0 != want_color {
             color.0 = want_color;
+        }
+    }
+
+    // ur/64: a capped window reports where its screen sits in the list through a
+    // right-edge scrollbar; every other kind keeps no bar. The furniture is anchored
+    // inside the chrome on the right edge at spawn, top to bottom of the fill.
+    let scroll_page = |window: usize| -> Option<(usize, usize, usize)> {
+        shown.get(window).and_then(|open| {
+            matches!(open.level.kind, MenuKind::MissionDetail { .. })
+                .then_some((open.start, open.total, open.visible))
+                .filter(|(_, total, visible)| total > visible)
+        })
+    };
+    for (track, thumb, mut node) in scroll_q.iter_mut() {
+        if let Some(track) = track {
+            let bar_wanted = scroll_page(track.window).is_some();
+            let want = if bar_wanted {
+                Display::Flex
+            } else {
+                Display::None
+            };
+            if node.display != want {
+                node.display = want;
+            }
+        } else if let Some(thumb) = thumb {
+            let Some((start, total, visible)) = scroll_page(thumb.window) else {
+                if node.display != Display::None {
+                    node.display = Display::None;
+                }
+                continue;
+            };
+            // `thumb_geometry` answers `None` exactly when the list fits its rows,
+            // i.e. whenever that window's track is hidden.
+            let Some((top_share, height_share)) =
+                crate::hud::list_view::thumb_geometry(start, total, visible)
+            else {
+                continue;
+            };
+            if node.display != Display::Flex {
+                node.display = Display::Flex;
+            }
+            let (want_top, want_height) = (
+                Val::Percent(top_share * 100.0),
+                Val::Percent(height_share * 100.0),
+            );
+            if node.top != want_top {
+                node.top = want_top;
+            }
+            if node.height != want_height {
+                node.height = want_height;
+            }
         }
     }
 }
@@ -9303,9 +9629,17 @@ fn root_aware_title(view: &PaneView) -> String {
 
 fn visible_window(kind: MenuKind, total: usize) -> usize {
     if kind == MenuKind::Root {
-        total
-    } else {
-        total.min(DYNAMIC_VISIBLE_ROWS)
+        return total;
+    }
+    let cap = mission_log_rows_cap(kind);
+    total.min(cap)
+}
+
+/// A log window draws at most its own screenful; every other window the shared pool.
+fn mission_log_rows_cap(kind: MenuKind) -> usize {
+    match kind {
+        MenuKind::MissionDetail { .. } => MISSION_LOG_VISIBLE_ROWS,
+        _ => DYNAMIC_VISIBLE_ROWS,
     }
 }
 
@@ -9324,14 +9658,15 @@ fn viewport_over(kind: MenuKind, cursor: usize, total: usize) -> (usize, usize) 
         let (start, end) = root_page_bounds(cursor);
         return (end, start);
     }
-    if total <= DYNAMIC_VISIBLE_ROWS {
+    let window_rows = mission_log_rows_cap(kind);
+    if total <= window_rows {
         return (total, 0);
     }
     // A list taller than the viewport (e.g. the 27-row Graphics menu) scrolls a
     // fixed window that keeps the cursor centered, so its bottom rows stay
     // reachable at the default window height instead of overflowing off-screen.
-    let half = DYNAMIC_VISIBLE_ROWS / 2;
-    let max_start = total.saturating_sub(DYNAMIC_VISIBLE_ROWS);
+    let half = window_rows / 2;
+    let max_start = total.saturating_sub(window_rows);
     let start = cursor.saturating_sub(half).min(max_start);
     (total, start)
 }
@@ -10703,7 +11038,13 @@ mod tests {
         for (kind, name) in [
             (MenuKind::QuestList, "quest00"),
             (MenuKind::QuestDetail { log: 1, id: 7 }, "quest01"),
-            (MenuKind::MissionDetail { port: 0x00D0 }, "miss00"),
+            (
+                MenuKind::MissionDetail {
+                    log: MISSION_LOG_BASTOK,
+                    member: 0,
+                },
+                "miss00",
+            ),
             (MenuKind::Trade, "trade"),
             (MenuKind::Linkshell, "link5"),
             (MenuKind::Search, "scresult"),
@@ -15312,16 +15653,87 @@ mod tests {
         );
     }
 
-    /// Mission law (vault main_menu.md §30): missionm lists exactly the logs the
-    /// s2c 0x056 state holds and every row drills that port's miss00 detail.
+    /// The selector law (ur/62): all seven chains listed with the captions read
+    /// off retail's screen (ur/61/ur/63); a row greys when the folded s2c 0x056
+    /// state reports nothing for its chains, and every row opens a log window.
     #[test]
-    fn mission_list_rows_follow_the_folded_battery() {
-        let empty = kuluu_snapshot::SceneSnapshot::default();
-        let rows = mission_list_rows(&empty);
-        assert_eq!(rows.len(), 1, "logged-out state keeps one hint row");
-        assert!(rows[0].label.contains("no mission logs"));
+    fn mission_selector_lists_every_chain_and_greys_the_inactive_ones() {
+        let rows = mission_selector_rows();
+        assert_eq!(rows.len(), 7);
+        assert_eq!(
+            labels(&rows),
+            [
+                "Nations",
+                "Zilart",
+                "Promathia",
+                "Ant Urghan",
+                "Altana",
+                "Adoulin",
+                "Add-ons"
+            ]
+        );
 
+        let empty = kuluu_snapshot::SceneSnapshot::default();
+        for idx in 0..7 {
+            assert!(
+                menu_row_disabled(MenuKind::MissionList, idx, &empty),
+                "row {idx} greys while no MISSION frame has folded"
+            );
+        }
+
+        // A Windurst character mid-mission: the Nations row lights; era rows stay
+        // grey until their own words report something.
         let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        snap.missions.info = Some(kuluu_snapshot::MissionInfo {
+            nation: 2,
+            nation_mission: 3,
+            rotz: 0,
+            cop: 0,
+            cop2: 0,
+            addon_acp: 0,
+            addon_amk: 0,
+            addon_asa: 0,
+            tales_beginning: 0,
+            soa: 0,
+            rov: 0,
+        });
+        assert!(!menu_row_disabled(MenuKind::MissionList, 0, &snap));
+        for idx in 1..7 {
+            assert!(menu_row_disabled(MenuKind::MissionList, idx, &snap));
+        }
+
+        // A completion bit on port 0x00D0 lights the row even at zero current.
+        let mut with_bit = kuluu_snapshot::SceneSnapshot::default();
+        with_bit
+            .missions
+            .logs
+            .push(kuluu_snapshot::MissionLogEntry {
+                port: 0x00D0,
+                data: [1, 0, 0, 0, 0, 0, 0, 0],
+            });
+        assert!(!menu_row_disabled(MenuKind::MissionList, 0, &with_bit));
+
+        // Every selector row opens its chain's log on the first cycle member.
+        for (idx, row) in rows.iter().enumerate() {
+            let chains = mission_selector_chains(idx);
+            assert!(
+                matches!(
+                    row.action,
+                    DynamicMenuAction::MissionOpenLog { log, member: 0 }
+                        if log == chains[0]
+                ),
+                "selector row {idx} must open its first chain"
+            );
+        }
+    }
+
+    /// The log-window law (ur/64): `Current:` then `Completed:` with the names from
+    /// the scraped `xi.mission.id` lattice; completion comes from the 0x00D0 word
+    /// LSB packs per chain (`log*2 + id/32`).
+    #[test]
+    fn mission_log_window_lists_named_missions_under_current_and_completed() {
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        // Windurst on rank-1 mission #3; Bastok's first six completed (word 2 = 0b111111).
         snap.missions.info = Some(kuluu_snapshot::MissionInfo {
             nation: 2,
             nation_mission: 3,
@@ -15337,42 +15749,147 @@ mod tests {
         });
         snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
             port: 0x00D0,
-            data: [1, 0, 0, 0, 0, 0, 0, 0],
+            data: [0, 0, 0b111111, 0, 0, 0, 0, 0],
         });
-        let rows = mission_list_rows(&snap);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].label, "Windurst: mission #3");
+        let rows = mission_detail_rows(&snap, MISSION_LOG_BASTOK, 0);
         assert_eq!(
-            rows[0].action,
-            DynamicMenuAction::MissionOpenLog {
-                port: ffxi_proto::mission::PORT_MISSION_MAIN
-            }
+            labels(&rows),
+            [
+                "Completed:",
+                "The Zeruhn Report",
+                "Geological Survey",
+                "Fetichism",
+                "The Crystal Line",
+                "Wading Beasts",
+                "The Emissary"
+            ]
         );
-        assert_eq!(rows[1].label, "Completed missions — Nations");
 
-        // A quest port carries data but belongs to the /quest seam, not here.
-        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
-            port: 0x0058,
-            data: [7; 8],
-        });
-        assert_eq!(mission_list_rows(&snap).len(), 2);
+        // The profile nation's current rides the main port.
 
-        // Detail rows are legible-only field dumps per the [I-pending] paging law.
-        let detail = mission_detail_rows(&snap, ffxi_proto::mission::PORT_MISSION_MAIN);
-        assert_eq!(detail[0].label, "Windurst: mission #3");
-        for row in &detail {
-            assert!(matches!(
-                row.action,
-                DynamicMenuAction::MissionLogRow { .. }
-            ));
+        let mut snap2 = snap.clone();
+        if let Some(info) = &mut snap2.missions.info {
+            info.nation = 0;
+            info.nation_mission = 4;
         }
+        let rows = mission_detail_rows(&snap2, MISSION_LOG_SANDORIA, 0);
+        assert_eq!(
+            labels(&rows)[..2],
+            ["Current:", "The Davoi Report"],
+            "main-port current names itself"
+        );
+
+        // A chain the wire reports nothing for shows only the empty note.
+        let rows = mission_detail_rows(&snap, MISSION_LOG_ROV, 0);
+        assert_eq!(labels(&rows), ["(nothing recorded)"]);
+    }
+
+    /// SoA/Rov main-port words carry LSB's wire offsets (`(current * 2) + 0x6E`
+    /// and `current + 0x6C`, 0x056_mission.cpp); ToAU/WoTG current mirror into the
+    /// Aht-Urhgan quest-offer frame instead (0x056_mission_other.cpp).
+    #[test]
+    fn mission_currents_decode_the_wire_offsets() {
+        let info = kuluu_snapshot::MissionInfo {
+            nation: 0,
+            nation_mission: 0,
+            rotz: 0,
+            cop: 110,
+            cop2: 0,
+            addon_acp: 3,
+            addon_amk: 0,
+            addon_asa: 0,
+            tales_beginning: 0,
+            soa: MISSION_MAIN_PORT_SOA_WIRE_OFFSET + 3,
+            rov: MISSION_MAIN_PORT_ROV_WIRE_OFFSET + 2,
+        };
+        assert_eq!(mission_main_port_current(&info, MISSION_LOG_COP), Some(110));
+        assert_eq!(mission_main_port_current(&info, MISSION_LOG_ACP), Some(3));
+        // LSB's own law answers an odd wire word too: (0x6E+3 - 0x6E)/2 = 1.
+        assert_eq!(mission_main_port_current(&info, MISSION_LOG_SOA), Some(1));
+        assert_eq!(mission_main_port_current(&info, MISSION_LOG_ROV), Some(2));
+
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        // QUEST_OFFER_PORTS[5] is Aht Urhgan's; word 5 mirrors ToAU current.
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: ffxi_proto::mission::QUEST_OFFER_PORTS[5],
+            data: [0, 0, 0, 0, 0, 4, 0, 0],
+        });
+        assert_eq!(mission_quest_port_current(&snap, MISSION_LOG_TOAU), Some(4));
+        let rows = mission_detail_rows(&snap, MISSION_LOG_TOAU, 0);
+        // Toau id 4 is `CONFESSIONS_OF_ROYALTY` in the vendor lattice.
+        assert_eq!(labels(&rows), ["Current:", "Confessions of Royalty"]);
+    }
+
+    /// Left/Right cycle the selector row's members (ur/64: "Left / Right by
+    /// nation .. has size limit") with wrap; single-chain rows stay put. The log
+    /// window draws at most `MISSION_LOG_VISIBLE_ROWS` lines of its list.
+    #[test]
+    fn mission_log_cycles_its_nations_and_frames_six_rows() {
+        assert_eq!(
+            mission_cycle_member(MISSION_LOG_SANDORIA, 0, true),
+            Some((MISSION_LOG_BASTOK, 1))
+        );
+        assert_eq!(
+            mission_cycle_member(MISSION_LOG_SANDORIA, 0, false),
+            Some((MISSION_LOG_WINDURST, 2)),
+            "wrap behind the first member"
+        );
+        assert_eq!(
+            mission_cycle_member(MISSION_LOG_COP, 0, true),
+            Some((MISSION_LOG_COP, 0))
+        );
+        assert_eq!(
+            mission_cycle_member(MISSION_LOG_WOTG, 1, false),
+            Some((MISSION_LOG_TOAU, 0))
+        );
+        assert_eq!(
+            list_page_rows(MenuKind::MissionDetail {
+                log: MISSION_LOG_SANDORIA,
+                member: 0
+            }),
+            MISSION_LOG_VISIBLE_ROWS
+        );
+
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: 0x00D0,
+            // Bastok word 2 set through id 17 (two full pages of names).
+            data: [0, 0, u32::MAX, u32::MAX & !(1 << 2), 0, 0, 0, 0],
+        });
+        let rows = mission_detail_rows(&snap, MISSION_LOG_BASTOK, 0);
+        assert!(rows.len() > MISSION_LOG_VISIBLE_ROWS);
+        let (total, start) = viewport_over(
+            MenuKind::MissionDetail {
+                log: MISSION_LOG_BASTOK,
+                member: 0,
+            },
+            rows.len() - 1,
+            rows.len(),
+        );
+        assert_eq!(total, rows.len());
+        assert_eq!(
+            start + MISSION_LOG_VISIBLE_ROWS,
+            rows.len(),
+            "the last cursor parks the bottom row inside the six-line frame"
+        );
     }
 
     #[test]
     fn mission_windows_are_dynamic_titled_and_rooted() {
         assert!(is_dynamic(MenuKind::MissionList));
-        assert!(is_dynamic(MenuKind::MissionDetail { port: 0xD0 }));
+        assert!(is_dynamic(MenuKind::MissionDetail {
+            log: 0xD0,
+            member: 0
+        }));
         assert_eq!(menu_title(MenuKind::MissionList), "Missions");
+        // ur/64: the window wears its chain's name.
+        assert_eq!(
+            menu_title(MenuKind::MissionDetail {
+                log: MISSION_LOG_BASTOK,
+                member: 0
+            }),
+            "Bastok"
+        );
         assert_eq!(
             root_child_kind("Missions", false, false),
             Some(MenuKind::MissionList)

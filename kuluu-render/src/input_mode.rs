@@ -469,11 +469,14 @@ pub enum MenuKind {
     /// until kuluu executes macros.
     MacroResult,
 
-    /// The `miss00` detail window for one port of that battery — missionm's
-    /// select tail name-opens it over itself (FFXiMain.dll retail-2026-09 RVA
-    /// 0x22DB40; vault main_menu.md §30), so selects push this payload.
+    /// The `miss00` log window for one chain member — missionm's select tail
+    /// name-opens it over itself (FFXiMain.dll retail-2026-09 RVA 0x22DB40; vault
+    /// main_menu.md §30). `log` is the `MissionLog`/`xi.mission.log_id` chain index
+    /// (`vendor/server/src/map/enums/mission_log.h`); `member` indexes that
+    /// selector row's Left/Right cycle table (ur/64: "Left / Right by nation").
     MissionDetail {
-        port: u16,
+        log: u8,
+        member: u8,
     },
 
     /// Page-2 row 2 fires the "/quest" text command, whose id-table handler resets

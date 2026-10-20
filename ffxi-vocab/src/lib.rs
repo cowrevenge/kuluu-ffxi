@@ -17,6 +17,7 @@ pub mod item_usable;
 pub mod job_names;
 pub mod key_item_names;
 pub mod magic;
+pub mod mission_names;
 pub mod msg_action_modifier;
 pub mod msg_area;
 pub mod msg_basic;

@@ -48,6 +48,39 @@ python3 scripts/macos.py --profile local key esc 0.2
 ```
 
 Use `launch` only when the client is not running.
+
+For a user-run local private-server profile, add `--startup-enter` to `setup` once.
+This explicit preference stores one known startup Enter action.
+Future `launch` commands use that preference without Jev or model classification.
+The destination must be loopback.
+Validated loader options include `--hairpin`, `--hide`, `--lang`, `--authport`, `--dataport`, `--viewport`, and `--profileport`.
+Port values must be decimal integers from 1 to 65535.
+Language values must be `JP`, `US`, `EU`, `0`, `1`, or `2`.
+Use separate option and value arguments.
+Server overrides, JSON configuration overrides, duplicate options, and unknown options are rejected.
+These rules follow the [xiloader argument parser](https://github.com/LandSandBoat/xiloader/blob/main/src/main.cpp).
+They validate the declared arguments; they do not independently verify a custom loader binary's behavior.
+The launcher rejects an existing game window before it starts another client.
+It waits up to 30 seconds for one new game window.
+After that window appears, it waits five seconds and checks the same window again.
+It then sends Enter once through the guarded Wine helper.
+This option assumes that the selected local profile presents the known startup prompt.
+It does not classify other dialogs or repeat input.
+Configuration and launch output show the requested action and caller policy.
+Existing profiles keep their previous behavior until this option is configured.
+
+An active caller can override the stored user-run policy:
+
+```bash
+python3 scripts/macos.py --profile local launch --agreement-policy confirmation_required
+```
+
+If the active Codex policy requires confirmation for the startup action, use this override.
+It starts the client but sends no startup input.
+Use `--agreement-policy caller` when the active caller must decide authorization separately.
+The user's own authorized launcher can use its stored `permitted` policy.
+Do not change an active harness policy to enable the startup action.
+
 Inspect captures to verify each visible result.
 A successful key command proves submission, not the game's response.
 Capture and input require one matching FFXI window.

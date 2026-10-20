@@ -3,6 +3,7 @@ import argparse
 import base64
 import fcntl
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -33,6 +34,13 @@ MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 PROFILE_VERSION = 1
 COMMAND_TIMEOUT_SECONDS = 30
 MAX_KEY_HOLD_SECONDS = 5
+STARTUP_WINDOW_TIMEOUT_SECONDS = 30
+STARTUP_WINDOW_POLL_SECONDS = 0.25
+STARTUP_ENTER_DELAY_SECONDS = 5
+STARTUP_PORT_OPTIONS = frozenset(('--authport', '--dataport', '--viewport', '--profileport'))
+STARTUP_FLAG_OPTIONS = frozenset(('--hairpin', '--hide'))
+STARTUP_LANGUAGES = frozenset(('JP', 'US', 'EU', '0', '1', '2'))
+MAX_TCP_PORT = 65535
 MAX_WHEEL_COUNT = 20
 MAX_TEXT_BYTES = 4096
 MAX_DRAG_PIXELS = 512
@@ -113,6 +121,7 @@ def install_ahk(archive=None):
 def setup(args, path):
     if path.exists() and not args.replace:
         raise ValueError('Profile already exists. Use --replace to update it.')
+    startup = startup_profile(args.server, getattr(args, 'startup_enter', False), args.loader_arg)
     runner = checked_file(shutil.which(args.runner) or args.runner, executable=True)
     prefix = Path(args.prefix).expanduser().resolve()
     checked_file(prefix / 'system.reg')
@@ -131,12 +140,117 @@ def setup(args, path):
     config = dict(schema=PROFILE_VERSION, runner=str(runner), runner_sha256=digest(runner),
                   runner_version=version, prefix=str(prefix), install=str(install),
                   client_sha256=digest(dll), loader=str(loader), loader_sha256=digest(loader),
-                  loader_args=args.loader_arg, server=args.server, window_title='FINAL FANTASY XI',
+                  loader_args=args.loader_arg, server=args.server, startup_enter=startup, window_title='FINAL FANTASY XI',
                   ahk=str(ahk), ahk_sha256=AHK_EXE_SHA256, jev_model=JEV_MODEL,
                   jev_key_file=str(Path(args.jev_key_file).expanduser().resolve()),
                   machine=platform.machine(), macos=platform.mac_ver()[0])
     private_write(path, (json.dumps(config, indent=2) + '\n').encode())
     print(f'Profile saved: {path}')
+    print(json.dumps(dict(startup_enter=config['startup_enter'])))
+
+
+def loopback_server(server):
+    if server == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(server).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_startup_loader_args(arguments):
+    options = {}
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option in options:
+            raise ValueError('Duplicate startup loader options are ambiguous. No startup input was sent.')
+        if option in STARTUP_FLAG_OPTIONS:
+            options[option] = True
+            index += 1
+            continue
+        if option not in STARTUP_PORT_OPTIONS and option != '--lang':
+            raise ValueError('Unsupported startup loader option. Server and JSON destination overrides are not permitted.')
+        if index + 1 >= len(arguments):
+            raise ValueError('A startup loader option has no value.')
+        value = arguments[index + 1]
+        if option in STARTUP_PORT_OPTIONS:
+            if not isinstance(value, str) or not re.fullmatch(r'[0-9]+', value) or not 1 <= int(value) <= MAX_TCP_PORT:
+                raise ValueError('Startup loader ports must be decimal integers from 1 to 65535.')
+            options[option] = int(value)
+        elif value not in STARTUP_LANGUAGES:
+            raise ValueError('Startup loader language must be JP, US, EU, 0, 1, or 2.')
+        else:
+            options[option] = value
+        index += 2
+    return options
+
+
+def startup_profile(server, enabled, loader_args=()):
+    if enabled and not loopback_server(server):
+        raise ValueError('Startup Enter requires an explicit local private-server profile with a loopback server.')
+    options = validate_startup_loader_args(loader_args) if enabled else {}
+    return dict(loader_options=options, enabled=enabled, local_private_server=enabled, action='enter', caller_policy='permitted' if enabled else 'caller',
+                delay_seconds=STARTUP_ENTER_DELAY_SECONDS, timeout_seconds=STARTUP_WINDOW_TIMEOUT_SECONDS)
+
+
+def submit_startup_enter(config, process):
+    deadline = time.monotonic() + STARTUP_WINDOW_TIMEOUT_SECONDS
+    target = None
+    while time.monotonic() < deadline:
+        if process.poll() not in (None, 0):
+            raise ValueError('The startup loader failed. No startup input was sent.')
+        target = window(config, allow_missing=True)
+        if target is not None:
+            break
+        time.sleep(STARTUP_WINDOW_POLL_SECONDS)
+    if target is None:
+        raise ValueError('The startup window wait expired. No startup input was sent.')
+    time.sleep(STARTUP_ENTER_DELAY_SECONDS)
+    if time.monotonic() >= deadline:
+        raise ValueError('The startup window wait expired. No startup input was sent.')
+    current = window(config)
+    if current != target:
+        raise ValueError('The startup window changed. No startup input was sent.')
+    key(config, 'enter', DEFAULT_HOLD_SECONDS)
+    return dict(status='submitted', action='enter', count=1, window=target, visible_result_verified=False)
+
+
+def launch(config, args):
+    unlocked()
+    user, password = os.environ.get('FFXI_USER'), os.environ.get('FFXI_PASS')
+    if not user or not password:
+        raise ValueError('Set FFXI_USER and FFXI_PASS before launch.')
+    arguments = [config['runner'], config['loader'], *config['loader_args'],
+                 '--server', config['server'], '--user', user, '--pass', password]
+    env = environment(config)
+    env['WINEDLLOVERRIDES'] = 'mscoree,mshtml='
+    profile = config.get('startup_enter', {})
+    if not profile.get('enabled'):
+        os.chdir(Path(config['loader']).parent)
+        os.execve(config['runner'], arguments, env)
+        return
+    if profile.get('action') != 'enter' or not profile.get('local_private_server') or not loopback_server(config['server']):
+        raise ValueError('Startup Enter is disabled for this profile. Configure an explicit local private-server profile first.')
+    startup_profile(config['server'], True, config['loader_args'])
+    policy = caller_policy(dict(screen='agreement'), getattr(args, 'agreement_policy', None) or profile.get('caller_policy', 'caller'))
+    output = dict(operation='launch', startup_enter_requested=True, startup_action='enter', caller_policy=policy)
+    if policy['status'] != 'permitted':
+        output.update(status=policy['status'], submitted=False, startup_enter_skipped=True)
+        print(json.dumps(output), flush=True)
+        os.chdir(Path(config['loader']).parent)
+        os.execve(config['runner'], arguments, env)
+        return output
+    if config.get('offscreen_control'):
+        raise ValueError('Startup Enter requires a visible window. Offscreen startup input is disabled.')
+    if window(config, allow_missing=True) is not None:
+        raise ValueError('A game window already exists. No startup input or launch was attempted.')
+    output.update(status='starting', submitted=False)
+    print(json.dumps(output), flush=True)
+    process = subprocess.Popen(arguments, cwd=Path(config['loader']).parent, env=env)
+    output.update(submit_startup_enter(config, process), launched=True, loader_pid=process.pid)
+    print(json.dumps(output), flush=True)
+    return output
 
 
 def load(path):
@@ -653,6 +767,7 @@ def main():
     for option in ('runner', 'prefix', 'install', 'loader'):
         setup_parser.add_argument('--' + option, required=True)
     setup_parser.add_argument('--server', default='127.0.0.1')
+    setup_parser.add_argument('--startup-enter', action='store_true', help='Enable one startup Enter for this local private-server profile')
     setup_parser.add_argument('--loader-arg', action='append', default=[])
     setup_parser.add_argument('--jev-key-file', default='~/.config/typesafe/api-key')
     setup_parser.add_argument('--ahk-archive')
@@ -686,7 +801,8 @@ def main():
     dialogue_parser.add_argument('--max-actions', type=int, default=MAX_DIALOGUE_ACTIONS)
     dialogue_parser.add_argument('--max-seconds', type=int, default=MAX_DIALOGUE_SECONDS)
     sub.add_parser('restore')
-    sub.add_parser('launch')
+    launch_parser = sub.add_parser('launch')
+    launch_parser.add_argument('--agreement-policy', choices=('caller', 'permitted', 'confirmation_required'))
     args = parser.parse_args()
     if sys.platform != 'darwin':
         raise ValueError('This command requires macOS.')
@@ -736,16 +852,7 @@ def main():
     elif args.command == 'restore':
         restore_window(config)
     elif args.command == 'launch':
-        unlocked()
-        user, password = os.environ.get('FFXI_USER'), os.environ.get('FFXI_PASS')
-        if not user or not password:
-            raise ValueError('Set FFXI_USER and FFXI_PASS before launch.')
-        arguments = [config['runner'], config['loader'], *config['loader_args'],
-                     '--server', config['server'], '--user', user, '--pass', password]
-        os.chdir(Path(config['loader']).parent)
-        env = environment(config)
-        env['WINEDLLOVERRIDES'] = 'mscoree,mshtml='
-        os.execve(config['runner'], arguments, env)
+        launch(config, args)
 
 
 if __name__ == '__main__':

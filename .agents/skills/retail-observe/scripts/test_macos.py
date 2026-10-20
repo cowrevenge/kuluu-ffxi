@@ -36,6 +36,142 @@ class MacosPackageTests(unittest.TestCase):
                 m.install_ahk(archive)
         self.assertEqual(list(self.root.rglob('*.exe')), [])
 
+    def startup_config(self, enabled=True):
+        return dict(runner='/test/wine', loader='/test/loader.exe', loader_args=[], server='127.0.0.1',
+                    startup_enter=m.startup_profile('127.0.0.1', enabled), prefix='/test/prefix')
+
+    def test_startup_profile_requires_explicit_loopback_opt_in(self):
+        self.assertFalse(m.startup_profile('127.0.0.1', False)['enabled'])
+        enabled = m.startup_profile('127.0.0.1', True)
+        self.assertEqual(enabled['action'], 'enter')
+        self.assertEqual(enabled['caller_policy'], 'permitted')
+        for host in ['example.com', '192.168.1.4', '127.0.0.1.example.com']:
+            with self.subTest(host=host), self.assertRaises(ValueError):
+                m.startup_profile(host, True)
+
+    def test_setup_persists_the_explicit_startup_choice(self):
+        runner = self.root / 'wine';runner.write_bytes(b'runner');runner.chmod(0o700)
+        prefix = self.root / 'prefix';prefix.mkdir();(prefix / 'system.reg').touch()
+        install = self.root / 'install';install.mkdir();(install / 'FFXiMain.dll').write_bytes(b'client')
+        loader = self.root / 'loader.exe';loader.write_bytes(b'loader')
+        ahk = self.root / 'ahk.exe';ahk.write_bytes(b'ahk')
+        args = type('Args', (), dict(replace=False, runner=str(runner), prefix=str(prefix), install=str(install),
+                                     loader=str(loader), server='127.0.0.1', loader_arg=[], startup_enter=True,
+                                     ahk_archive=None, jev_key_file=str(self.root / 'key')))()
+        profile = self.root / 'startup-profile.json'
+        with patch.dict(m.os.environ, XDG_CACHE_HOME=str(self.root / 'cache')), \
+                patch.object(m, 'install_ahk', return_value=ahk), \
+                patch.object(m, 'run', return_value=type('Result', (), dict(stdout='Wine test'))()):
+            m.setup(args, profile)
+        saved = json.loads(profile.read_text())
+        self.assertTrue(saved['startup_enter']['enabled'])
+        self.assertEqual(saved['startup_enter']['caller_policy'], 'permitted')
+        self.assertEqual(saved['startup_enter']['action'], 'enter')
+        self.assertEqual(profile.stat().st_mode & 0o777, 0o600)
+
+    def test_startup_enter_uses_persisted_choice_without_jev(self):
+        config = self.startup_config()
+        config['loader_args'] = ['--hairpin', '--authport', '57432', '--viewport', '57003', '--dataport', '57433']
+        args = type('Args', (), dict(agreement_policy=None))()
+        process = type('Process', (), dict(pid=123, poll=lambda self: None))()
+        target = dict(id=456, pid=123, name='FINAL FANTASY XI', w=800, h=600)
+        with patch.dict(m.os.environ, FFXI_USER='private-user', FFXI_PASS='private-password'), \
+                patch.object(m, 'unlocked'), patch.object(m, 'environment', return_value={}), \
+                patch.object(m, 'window', side_effect=[None, target, target]), \
+                patch.object(m.subprocess, 'Popen', return_value=process) as spawn, \
+                patch.object(m.time, 'monotonic', side_effect=[0, 0, m.STARTUP_ENTER_DELAY_SECONDS]), \
+                patch.object(m.time, 'sleep'), patch.object(m, 'key') as key, patch.object(m, 'jev_decide') as jev:
+            output = m.launch(config, args)
+        spawn.assert_called_once()
+        self.assertEqual(spawn.call_args.args[0][2:2 + len(config['loader_args'])], config['loader_args'])
+        self.assertEqual(spawn.call_args.args[0][-6:-4], ['--server', '127.0.0.1'])
+        key.assert_called_once_with(config, 'enter', m.DEFAULT_HOLD_SECONDS)
+        jev.assert_not_called()
+        self.assertEqual(output['status'], 'submitted')
+        self.assertEqual(output['count'], 1)
+        self.assertNotIn('private-password', json.dumps(output))
+        self.assertNotIn('private-user', json.dumps(output))
+
+    def test_startup_policy_override_launches_without_input(self):
+        for policy, status in [('confirmation_required', 'policy_required'), ('caller', 'caller_policy_required')]:
+            args = type('Args', (), dict(agreement_policy=policy))()
+            with self.subTest(policy=policy), patch.dict(m.os.environ, FFXI_USER='test', FFXI_PASS='private'), \
+                    patch.object(m, 'unlocked'), patch.object(m, 'environment', return_value={}), \
+                    patch.object(m.os, 'chdir'), patch.object(m.os, 'execve') as execute, \
+                    patch.object(m.subprocess, 'Popen') as spawn, patch.object(m, 'key') as key:
+                output = m.launch(self.startup_config(), args)
+            execute.assert_called_once()
+            spawn.assert_not_called()
+            key.assert_not_called()
+            self.assertEqual(output['status'], status)
+            self.assertTrue(output['startup_enter_skipped'])
+
+    def test_existing_profile_without_startup_choice_keeps_normal_launch(self):
+        config = self.startup_config();del config['startup_enter']
+        with patch.dict(m.os.environ, FFXI_USER='test', FFXI_PASS='private'), \
+                patch.object(m, 'unlocked'), patch.object(m, 'environment', return_value={}), \
+                patch.object(m.os, 'chdir'), patch.object(m.os, 'execve') as execute, \
+                patch.object(m, 'key') as key, patch.object(m, 'window') as window:
+            m.launch(config, type('Args', (), {})())
+        execute.assert_called_once()
+        key.assert_not_called()
+        window.assert_not_called()
+
+    def test_existing_window_prevents_startup_input_and_duplicate_launch(self):
+        with patch.dict(m.os.environ, FFXI_USER='test', FFXI_PASS='private'), \
+                patch.object(m, 'unlocked'), patch.object(m, 'environment', return_value={}), \
+                patch.object(m, 'window', return_value=dict(id=1)), \
+                patch.object(m.subprocess, 'Popen') as spawn, patch.object(m, 'key') as key, self.assertRaises(ValueError):
+            m.launch(self.startup_config(), type('Args', (), dict(agreement_policy=None))())
+        spawn.assert_not_called()
+        key.assert_not_called()
+
+    def test_startup_rejects_actual_destination_overrides(self):
+        for server, arguments in [('example.com', []), ('127.0.0.1', ['--server', 'example.com']),
+                                  ('127.0.0.1', ['--server=example.com']), ('127.0.0.1', ['--unknown'])]:
+            config = self.startup_config();config.update(server=server, loader_args=arguments)
+            with self.subTest(server=server, arguments=arguments), \
+                    patch.dict(m.os.environ, FFXI_USER='test', FFXI_PASS='private'), \
+                    patch.object(m, 'unlocked'), patch.object(m, 'environment', return_value={}), \
+                    patch.object(m.subprocess, 'Popen') as spawn, patch.object(m.os, 'execve') as execute, \
+                    patch.object(m, 'key') as key, self.assertRaises(ValueError):
+                m.launch(config, type('Args', (), dict(agreement_policy=None))())
+            spawn.assert_not_called()
+            execute.assert_not_called()
+            key.assert_not_called()
+        with self.assertRaises(ValueError):
+            m.startup_profile('127.0.0.1', True, ['--server', 'example.com'])
+
+    def test_actual_local_profile_port_arguments_are_supported(self):
+        arguments = ['--hairpin', '--authport', '57432', '--viewport', '57003', '--dataport', '57433']
+        saved = m.startup_profile('127.0.0.1', True, arguments)
+        self.assertEqual(saved['loader_options'], {'--hairpin': True, '--authport': 57432,
+                                                  '--viewport': 57003, '--dataport': 57433})
+        options = m.validate_startup_loader_args(arguments + ['--lang', 'EU', '--profileport', '51220', '--hide'])
+        self.assertEqual(options['--lang'], 'EU')
+        self.assertEqual(options['--profileport'], 51220)
+        self.assertTrue(options['--hide'])
+
+    def test_startup_loader_argument_validation_rejects_ambiguity(self):
+        for arguments in [['--authport'], ['--authport', '0'], ['--authport', str(m.MAX_TCP_PORT + 1)],
+                          ['--dataport', '-1'], ['--viewport', '1.5'], ['--lang', 'unknown'],
+                          ['--authport', '1234', '--authport', '4321'], ['--hairpin', '--hairpin'],
+                          ['--json', 'remote.json'], ['--json-file=remote.json'],
+                          ['--server', '127.0.0.1'], ['--trust']]:
+            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
+                m.validate_startup_loader_args(arguments)
+
+    def test_startup_wait_and_window_change_never_send_input(self):
+        process = type('Process', (), dict(poll=lambda self: None))()
+        for windows, times in [([None], [0, 0, m.STARTUP_WINDOW_TIMEOUT_SECONDS]),
+                               ([dict(id=1), dict(id=2)], [0, 0, m.STARTUP_ENTER_DELAY_SECONDS]),
+                               ([dict(id=1)], [0, 0, m.STARTUP_WINDOW_TIMEOUT_SECONDS])]:
+            with self.subTest(windows=windows), patch.object(m, 'window', side_effect=windows), \
+                    patch.object(m.time, 'monotonic', side_effect=times), patch.object(m.time, 'sleep'), \
+                    patch.object(m, 'key') as key, self.assertRaises(ValueError):
+                m.submit_startup_enter(self.startup_config(), process)
+            key.assert_not_called()
+
     def test_profile_name_cannot_escape_configuration_directory(self):
         with self.assertRaises(ValueError):
             m.profile_path('../other')

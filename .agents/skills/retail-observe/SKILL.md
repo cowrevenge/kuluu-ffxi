@@ -91,6 +91,12 @@ Use `permitted` only when the active harness and session authorize the proposed 
 If Codex requires confirmation for that action, select `confirmation_required`.
 That result reports `policy_required`, not a vision failure.
 Jev proposes actions; the caller applies authorization and the active harness policy.
+For a user's own local-server launcher, macOS setup can store the explicit `--startup-enter` preference.
+This performs one known startup Enter without model classification.
+Read the [macOS host reference](references/host-macos.md) before configuring it.
+If the active Codex policy requires confirmation, launch with `--agreement-policy confirmation_required` to suppress that input.
+The stored user-run preference does not override an active harness policy.
+
 Keep one input driver per client.
 Inspect key evidence images before making a visual claim.
 

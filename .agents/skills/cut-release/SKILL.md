@@ -85,6 +85,8 @@ exact candidate commit for a supported `publish=false` input.
 After applicable approval, dispatch that candidate branch with the selected tag and `publish=false`.
 Verify the workflow commit, CI, bundle, and hashes.
 If build-only controls are absent, report that blocker before dispatch.
+Pushes to `release/v*` automatically run `release.yml` with publication disabled.
+Reuse that run instead of dispatching a duplicate build-only workflow.
 Keep branch push, build-only dispatch, and publication authorization distinct.
 A user can authorize several named operations together.
 Reuse that authorization within its stated candidate and scope.

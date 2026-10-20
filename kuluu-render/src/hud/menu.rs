@@ -4667,9 +4667,9 @@ pub fn menu_row_disabled(
     snap: &kuluu_snapshot::SceneSnapshot,
 ) -> bool {
     match kind {
-        // ur/62: a chain the snapshot reports nothing for draws grey. Like the
-        // roomlist's gated row it stays selectable — browsing an empty log is
-        // information, and the wire says nothing more about why.
+        // ur/62: a chain the snapshot reports nothing for draws grey, and
+        // ur/65 overrides browsing: "if its grey.. why can i click it" — a grey
+        // row's select is refused like the roomlist's gated row.
         MenuKind::MissionList => !mission_selector_row_active(snap, index),
         MenuKind::Status => crate::hud::status_panel::STATUS_ENTRIES
             .get(index)
@@ -5929,19 +5929,40 @@ pub fn region_info_rows(mode: u8, zone: Option<u16>) -> Vec<DynamicMenuRow> {
 /// vendor/server/src/map/enums/mission_log.h).
 pub const MISSION_NATION_NAMES_PINNED: [&str; 3] = ["Sandoria", "Bastok", "Windurst"];
 
-/// The seven selector rows the Missions battery draws, in capture order with the
-/// captions read off retail's screen (owner captures ur/61/ur/63): `Nations`,
-/// `Zilart`, `Promathia`, `Ant Urghan`, `Altana`, `Adoulin`, `Add-ons`. kuluu
-/// lists them all and greys the chains its s2c 0x056 state reports nothing for
-/// (owner ruling ur/62: "it should list them all, and grey the ones that are not active").
+/// The seven selector rows the Missions battery draws, captions pinned from
+/// retail's own window (ur/66): `Aht Urhgan` — not a re-reading of the smaller
+/// capture — and rows in the order retail's list shows them. kuluu lists them all
+/// and greys the chains its s2c 0x056 state reports nothing for (owner ruling
+/// ur/62: "it should list them all, and grey the ones that are not active").
 pub const MISSION_SELECTOR_LABELS_PINNED: [&str; 7] = [
-    "Nations",
-    "Zilart",
-    "Promathia",
-    "Ant Urghan",
-    "Altana",
-    "Adoulin",
     "Add-ons",
+    "Adoulin",
+    "Aht Urhgan",
+    "Altana",
+    "Nations",
+    "Promathia",
+    "Zilart",
+];
+
+/// The selector rows chain-by-chain, same order as the labels: a row's index in
+/// its list is that window's Left/Right member slot. Nations walks its three
+/// native logs (ur/64 shows `← Bastok →`); the addons row walks the three add-on
+/// chains; Zilart/Promathia/Altana/Adoulin stand alone — retail's log ports carry
+/// no WoTG chain selector apart from Aht Urhgan, and TVR stays snapshot-only
+/// (LSB marks its own `log_id` guess in vendor/server/scripts/globals/
+/// missions.lua).
+pub const MISSION_SELECTOR_CHAINS_PINNED: [&[u8]; 7] = [
+    &[MISSION_LOG_ACP, MISSION_LOG_AMK, MISSION_LOG_ASA],
+    &[MISSION_LOG_ROV],
+    &[MISSION_LOG_TOAU, MISSION_LOG_WOTG],
+    &[MISSION_LOG_SOA],
+    &[
+        MISSION_LOG_SANDORIA,
+        MISSION_LOG_BASTOK,
+        MISSION_LOG_WINDURST,
+    ],
+    &[MISSION_LOG_COP],
+    &[MISSION_LOG_ZILART],
 ];
 
 /// Chain indices (`xi.mission.log_id`, vendor/server/scripts/globals/missions.lua;
@@ -5970,27 +5991,12 @@ pub struct MissionSelectorRow {
     pub member: u8,
 }
 
-/// The chains one selector row cycles with Left/Right, in capture order. Nations
-/// walks its three native logs (ur/64 shows `← Bastok →`); the addons row walks the
-/// three add-on chains; Zilart/Promathia/Altana/Adoulin stand alone — retail's log
-/// ports carry no WoTG chain selector apart from Aht Urhgan, and TVR stays
-/// snapshot-only (LSB marks its own `log_id` guess in vendor/server/scripts/
-/// globals/missions.lua).
+/// The chains one selector row cycles with Left/Right.
 pub fn mission_selector_chains(label_idx: usize) -> &'static [u8] {
-    match label_idx {
-        0 => &[
-            MISSION_LOG_SANDORIA,
-            MISSION_LOG_BASTOK,
-            MISSION_LOG_WINDURST,
-        ],
-        1 => &[MISSION_LOG_ZILART],
-        2 => &[MISSION_LOG_COP],
-        3 => &[MISSION_LOG_TOAU, MISSION_LOG_WOTG],
-        4 => &[MISSION_LOG_SOA],
-        5 => &[MISSION_LOG_ROV],
-        6 => &[MISSION_LOG_ACP, MISSION_LOG_AMK, MISSION_LOG_ASA],
-        _ => &[],
-    }
+    MISSION_SELECTOR_CHAINS_PINNED
+        .get(label_idx)
+        .copied()
+        .unwrap_or(&[])
 }
 
 /// The row each selector line opens (ur/62), first member at cursor.
@@ -15653,9 +15659,10 @@ mod tests {
         );
     }
 
-    /// The selector law (ur/62): all seven chains listed with the captions read
-    /// off retail's screen (ur/61/ur/63); a row greys when the folded s2c 0x056
-    /// state reports nothing for its chains, and every row opens a log window.
+    /// The selector law (ur/62): all seven chains listed with the captions and
+    /// order pinned off retail's own window (ur/66); a row greys when the folded
+    /// s2c 0x056 state reports nothing for its chains, and every active row opens
+    /// a log window.
     #[test]
     fn mission_selector_lists_every_chain_and_greys_the_inactive_ones() {
         let rows = mission_selector_rows();
@@ -15663,13 +15670,13 @@ mod tests {
         assert_eq!(
             labels(&rows),
             [
-                "Nations",
-                "Zilart",
-                "Promathia",
-                "Ant Urghan",
-                "Altana",
+                "Add-ons",
                 "Adoulin",
-                "Add-ons"
+                "Aht Urhgan",
+                "Altana",
+                "Nations",
+                "Promathia",
+                "Zilart"
             ]
         );
 
@@ -15697,9 +15704,16 @@ mod tests {
             soa: 0,
             rov: 0,
         });
-        assert!(!menu_row_disabled(MenuKind::MissionList, 0, &snap));
-        for idx in 1..7 {
-            assert!(menu_row_disabled(MenuKind::MissionList, idx, &snap));
+        let nations = MISSION_SELECTOR_LABELS_PINNED
+            .iter()
+            .position(|l| *l == "Nations")
+            .unwrap();
+        assert!(!menu_row_disabled(MenuKind::MissionList, nations, &snap));
+        for idx in 0..7 {
+            assert_eq!(
+                menu_row_disabled(MenuKind::MissionList, idx, &snap),
+                idx != nations
+            );
         }
 
         // A completion bit on port 0x00D0 lights the row even at zero current.
@@ -15711,7 +15725,11 @@ mod tests {
                 port: 0x00D0,
                 data: [1, 0, 0, 0, 0, 0, 0, 0],
             });
-        assert!(!menu_row_disabled(MenuKind::MissionList, 0, &with_bit));
+        assert!(!menu_row_disabled(
+            MenuKind::MissionList,
+            nations,
+            &with_bit
+        ));
 
         // Every selector row opens its chain's log on the first cycle member.
         for (idx, row) in rows.iter().enumerate() {

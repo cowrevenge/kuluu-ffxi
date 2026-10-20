@@ -811,6 +811,16 @@ pub(super) fn confirm_menu_at_cursor(
             // retail-2026-09 RVA 0x22DB40; vault main_menu.md §30) — kuluu pushes that
             // chain's log window the same way (ur/62: one row per chain).
             if let A::MissionOpenLog { log, member } = action {
+                // "if its grey.. why can i click it" (ur/65): a grey selector row
+                // refuses its select through the same dim/gate law as the roomlist
+                // patio row — key or mouse press changes nothing.
+                if kuluu_render::hud::menu::menu_row_disabled(
+                    MenuKind::MissionList,
+                    cursor,
+                    &scene_state.snapshot,
+                ) {
+                    return None;
+                }
                 stack.push(MenuKind::MissionDetail { log, member });
                 return None;
             }
@@ -3047,8 +3057,20 @@ mod menu_key_tests {
         harness.scene_state.snapshot = snap;
         harness.dynamic.rows = kuluu_render::hud::menu::mission_selector_rows();
 
-        // The Nations row opens its first chain's log (ur/62: one row per chain).
+        // ur/65: the grey Add-ons row (this snapshot reports nothing for it)
+        // refuses its select — no window opens.
         stack.current_mut().unwrap().cursor = 0;
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        assert_eq!(stack.current().unwrap().kind, MenuKind::MissionList);
+        assert_eq!(stack.levels.len(), 2, "a grey row pushes nothing");
+
+        // The Nations row opens its first chain's log (ur/62: one row per chain).
+        let nations = kuluu_render::hud::menu::MISSION_SELECTOR_LABELS_PINNED
+            .iter()
+            .position(|l| *l == "Nations")
+            .unwrap();
+        stack.current_mut().unwrap().cursor = nations;
         let markers = world.resource_mut::<MapMarkers>();
         harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
 

@@ -50,11 +50,59 @@ python3 scripts/macos.py --profile local key esc 0.2
 Use `launch` only when the client is not running.
 Inspect captures to verify each visible result.
 A successful key command proves submission, not the game's response.
-Capture and input require one visible FFXI window.
+Capture and input require one matching FFXI window.
 The capture result includes the pixel dimensions, window dimensions, and scale.
+Capture can read a unique offscreen host window and reports its on-screen status.
+It wakes the display before host-window discovery.
+This read-only option does not prove that hidden-window input works.
 Input rejects a locked screen, ambiguous windows, unknown keys, and holds longer than five seconds.
 A prefix lock excludes concurrent packaged inputs; other tools and human input can still interfere.
 Background operation without macOS focus changes remains unverified.
+
+If the host window is offscreen, use explicit offscreen control with a fresh packaged capture.
+The capture must be unchanged and no more than 60 seconds old.
+The helper checks the host window ID and process ID against that capture.
+The unique guest-window, active-window, unlocked-desktop, and prefix-lock checks still apply.
+The default input mode requires an on-screen host window.
+
+```bash
+python3 scripts/macos.py --profile local capture /tmp/ffxi-current.png
+python3 scripts/macos.py --profile local --offscreen --frame /tmp/ffxi-current.png key enter 0.2
+```
+
+For `drive-dialogue`, add `--offscreen` before the command.
+The controller binds each input to its own fresh capture and validated decision.
+
+For literal text, use a private UTF-8 file or standard input.
+The file must belong to the current user and have no group or other permissions.
+Text permits one printable line of up to 4096 UTF-8 bytes.
+The operation does not press Enter or report the text.
+Inspect the result before you submit a chat command.
+
+```bash
+python3 scripts/macos.py --profile local text /private/path/input.txt
+python3 scripts/macos.py --profile local text - < /private/path/input.txt
+python3 scripts/macos.py --profile local wheel up 1
+python3 scripts/macos.py --profile local wheel down 1
+python3 scripts/macos.py --profile local drag 120 0 1
+```
+
+Wheel input permits `up` or `down` and a count from 1 to 20.
+Start with one wheel step.
+Text and wheel input use the same prefix lock and visible-window checks as keyboard input.
+Literal text uses AutoHotkey `SendText`; braces and modifier characters cannot become key instructions.
+Wheel input uses AutoHotkey `SendEvent` at the center of the selected game window.
+It checks the active window and pointer target immediately before input.
+It restores the pointer position after input and rejects a held mouse button.
+AutoHotkey sends wheel events at the [current pointer position](https://www.autohotkey.com/docs/v2/lib/Send.htm#mouse-buttons).
+
+For a right-button drag, specify horizontal displacement, vertical displacement, and hold duration.
+Displacements use integer client pixels, with a maximum absolute value of 512 on each axis.
+The duration must be at least one millisecond and no more than five seconds.
+The drag starts at the client center and rejects an endpoint outside the client area.
+It moves to the endpoint, holds the right button for the specified duration, then releases it.
+It releases the button and restores the pointer if the operation fails.
+Inspect a capture before and after each drag.
 
 ## Jev or native vision
 
@@ -82,9 +130,36 @@ python3 scripts/macos.py --profile local decide /tmp/ffxi-menu.png \
   --character 'Exact Name' --result /tmp/vision-result.json
 ```
 
-The decision format covers login only: `enter`, `wait`, or `stop`.
+The default decision task covers login: `enter`, `wait`, or `stop`.
+Use `--task dialogue` for plain story or NPC dialogue.
+This task permits Enter only when a visible advance marker appears without choices or a menu.
+It stops for choices, agreements, errors, gameplay, or low confidence.
+The dialogue task derives its action from one screen classification with confidence of at least 0.9.
+
+```bash
+python3 scripts/macos.py --profile local decide /tmp/ffxi-dialogue.png \
+  --character 'Exact Name' --task dialogue
+```
+
 Neither provider accepts agreements or sends input automatically.
 Use existing session approval for separate agreement handling when the harness permits it.
+
+For routine dialogue, use the bounded Jev controller after the session permits screenshot uploads and game input.
+Reuse approval for the same service and comparison scope.
+
+```bash
+python3 scripts/macos.py --profile local drive-dialogue /private/path/new-capture-folder \
+  --character 'Exact Name' --max-actions 40 --max-seconds 300
+```
+
+The controller captures each state and executes only validated plain-dialogue decisions.
+It allows a short interval after Enter before the next capture.
+It waits while plain dialogue text is still appearing without an advance marker.
+Local text recognition detects two unchanged dialogue results and stops further input.
+Choices, low confidence, unexpected screens, and action or time limits also stop the controller.
+It saves captures, hashes, decisions, and a summary in the new folder.
+Inspect key evidence and exceptions with the current agent's vision.
+Routine dialogue captures do not require repeated full-model inspection.
 
 ## Optional local OrbStack server supplement
 
@@ -127,6 +202,17 @@ See [client-and-server.md](client-and-server.md) for loader and client-version c
 `doctor` checks local dependencies and permissions; it does not prove login or correct client registration.
 If no window exists, it reports a null window; launch before the visible input check.
 If capture fails, check Screen Recording permission and the display state.
+If the process runs but its host window is absent, try the packaged restore operation before another launch.
+
+```bash
+python3 scripts/macos.py --profile local restore
+```
+
+Restore requires an unlocked desktop and exactly one matching guest window.
+It uses the prefix lock and sends no keyboard or mouse input.
+It hides and shows that guest window once, while it preserves the window rectangle.
+Guest restoration may not expose a hidden macOS application or a window in another Space.
+Capture the restored window before continuing.
 If inputs have no visible effect, stop before diagnosing a stale window or another active driver.
 For explicit VM or host OCR/pointer work, use `observe.sh help` and `observe.sh doctor`.
 That separate host input path requires Accessibility permission and uses shell `.conf` profiles.

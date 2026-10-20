@@ -56,6 +56,108 @@ class MacosPackageTests(unittest.TestCase):
                     m.key({}, name, duration)
                 unlocked.assert_not_called()
 
+    def test_wheel_rejects_invalid_input_before_host_access(self):
+        for direction, count in [('left', 1), ('up', 0), ('down', m.MAX_WHEEL_COUNT + 1), ('up', 1.5), ('up', True)]:
+            with self.subTest(direction=direction, count=count), patch.object(m, 'unlocked') as unlocked:
+                with self.assertRaises(ValueError):
+                    m.wheel_input({}, direction, count)
+                unlocked.assert_not_called()
+
+    def test_wheel_passes_bounded_count_to_shared_input(self):
+        with patch.object(m, 'wine_input') as submit:
+            m.wheel_input({}, 'up', m.MAX_WHEEL_COUNT)
+        submit.assert_called_once_with({}, ['wheel', 'up', m.MAX_WHEEL_COUNT])
+
+    def test_restore_uses_shared_lock_without_sending_a_key(self):
+        with patch.object(m, 'wine_input') as submit:
+            m.restore_window({})
+        submit.assert_called_once_with({}, ['restore', 'visible', 'only'], allow_missing_window=True)
+
+    def test_drag_rejects_invalid_displacement_and_duration_before_host_access(self):
+        requests = [(0, 0, '1'), (m.MAX_DRAG_PIXELS + 1, 0, '1'), (1.5, 0, '1'),
+                    (True, 0, '1'), (1, 0, 'nan'), (1, 0, 'inf'), (1, 0, '0'),
+                    (1, 0, '-1'), (1, 0, str(m.MAX_KEY_HOLD_SECONDS + 1)), (1, 0, '0.00001')]
+        for dx, dy, seconds in requests:
+            with self.subTest(dx=dx, dy=dy, seconds=seconds), patch.object(m, 'unlocked') as unlocked:
+                with self.assertRaises(ValueError):
+                    m.drag_input({}, dx, dy, seconds)
+                unlocked.assert_not_called()
+
+    def test_drag_passes_bounded_displacement_and_duration(self):
+        with patch.object(m, 'wine_input') as submit:
+            m.drag_input({}, 120, -30, '1')
+        submit.assert_called_once_with({}, ['drag', 120, -30, m.MILLISECONDS_PER_SECOND])
+
+    def test_text_rejects_unsafe_files_and_control_characters(self):
+        source = self.root / 'text.txt'
+        source.write_text('hello')
+        source.chmod(0o644)
+        with self.assertRaises(ValueError):
+            m.literal_text({}, source)
+        source.chmod(0o600)
+        for data in [b'', b'hello\n', b'hello\r', b'hello\t', b'hello\x00', b'\xff', b'x' * (m.MAX_TEXT_BYTES + 1)]:
+            source.write_bytes(data)
+            with self.subTest(data=data[:20]), patch.object(m, 'wine_input') as submit:
+                with self.assertRaises(ValueError):
+                    m.literal_text({}, source)
+                submit.assert_not_called()
+
+    def test_text_passes_literal_utf8_without_logging_the_payload(self):
+        source = self.root / 'text.txt'
+        payload = 'hello {Enter} ! ^ + # ` " \\ é'
+        source.write_text(payload, encoding='utf-8')
+        source.chmod(0o600)
+        output = io.StringIO()
+        with patch.object(m, 'wine_input') as submit, contextlib.redirect_stdout(output):
+            m.literal_text({}, source)
+        submit.assert_called_once_with({}, [], payload.encode('utf-8'))
+        self.assertNotIn(payload, output.getvalue())
+        self.assertTrue(json.loads(output.getvalue())['submitted'])
+
+    def test_text_standard_input_has_the_same_bounds(self):
+        for data in [b'hello', b'x' * (m.MAX_TEXT_BYTES + 1)]:
+            stream = type('Input', (), dict(buffer=io.BytesIO(data)))()
+            with patch.object(m.sys, 'stdin', stream), patch.object(m, 'wine_input') as submit:
+                if len(data) > m.MAX_TEXT_BYTES:
+                    with self.assertRaises(ValueError):
+                        m.literal_text({}, '-')
+                    submit.assert_not_called()
+                else:
+                    m.literal_text({}, '-')
+                    submit.assert_called_once_with({}, [], data)
+
+    def test_shared_input_uses_private_payload_file_and_removes_it(self):
+        config = dict(prefix='/prefix', runner='/wine', ahk='/ahk', window_title='FFXI')
+        payload = b'hello {Enter} ! ^'
+        files = []
+        def execute(arguments, **kwargs):
+            if arguments[1] == 'winepath.exe':
+                return type('Result', (), dict(stdout=str(arguments[-1])))()
+            self.assertEqual(arguments[-3], 'text')
+            self.assertEqual(arguments[-1], 'literal')
+            path = Path(arguments[-2])
+            self.assertEqual(path.read_bytes(), payload)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn(payload.decode(), arguments)
+            files.append(path)
+        with patch.object(m, 'unlocked'), patch.object(m, 'window'), \
+                patch.object(m, 'environment', return_value={}), \
+                patch.object(m, 'profile_path', return_value=self.root / 'input.lock'), \
+                patch.object(m, 'run', side_effect=execute):
+            m.wine_input(config, [], payload)
+        self.assertEqual(len(files), 1)
+        self.assertFalse(files[0].exists())
+
+    def test_shared_input_refuses_another_prefix_driver(self):
+        config = dict(prefix='/prefix', runner='/wine', ahk='/ahk', window_title='FFXI')
+        with patch.object(m, 'unlocked'), patch.object(m, 'window'), \
+                patch.object(m, 'profile_path', return_value=self.root / 'input.lock'), \
+                patch.object(m.fcntl, 'flock', side_effect=BlockingIOError), \
+                patch.object(m, 'run') as execute:
+            with self.assertRaisesRegex(ValueError, 'Another packaged input'):
+                m.wine_input(config, ['wheel', 'up', 1])
+            execute.assert_not_called()
+
     def test_key_file_must_be_private(self):
         key = self.root / 'key'
         key.write_text('test-key')
@@ -147,6 +249,118 @@ class MacosPackageTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 m.validate_decision({**result, **changes}, self.image)
 
+    def test_dialogue_policy_cannot_select_choices_or_login_prompts(self):
+        result = dict(image_sha256=m.digest(self.image), screen='dialogue', next_key='enter', confidence=1)
+        self.assertEqual(m.validate_decision(result, self.image, 'dialogue'), result)
+        with self.assertRaises(ValueError):
+            m.validate_decision(result, self.image)
+        for screen in ('choice', 'agreement', 'gameplay', 'error', 'other', 'character_confirm'):
+            with self.subTest(screen=screen), self.assertRaises(ValueError):
+                m.validate_decision({**result, 'screen': screen}, self.image, 'dialogue')
+        with self.assertRaises(ValueError):
+            m.validate_decision({**result, 'confidence': .5}, self.image, 'dialogue')
+        typing = {**result, 'screen': 'dialogue_typing', 'next_key': 'wait'}
+        self.assertEqual(m.validate_decision(typing, self.image, 'dialogue'), typing)
+        with self.assertRaises(ValueError):
+            m.validate_decision(typing, self.image)
+
+    def test_dialogue_jev_request_preserves_explicit_policy(self):
+        self.args.task = 'dialogue'
+        submitted = []
+        def response(request, **kwargs):
+            body = json.loads(request.data)
+            submitted.append(body)
+            return io.StringIO(json.dumps({'answers': {
+                'screen': {'choice': 'dialogue', 'confidence': 1},
+                'next_key': {'choice': 'enter', 'confidence': 1}}}))
+        config = dict(jev_model=m.JEV_MODEL, jev_key_file='/not-read')
+        with patch.object(m, 'run', side_effect=self.resize_stub), \
+                patch.object(m, 'credential', return_value='test'), \
+                patch.object(m.urllib.request, 'urlopen', side_effect=response):
+            m.decide(config, self.args)
+        saved = json.loads(self.image.with_suffix('.decision.json').read_text())
+        self.assertEqual(saved['task'], 'dialogue')
+        self.assertEqual(saved['decision']['screen'], 'dialogue')
+        self.assertEqual(submitted[0]['state']['task'], 'dialogue')
+        self.assertIn('choice', submitted[0]['questions']['screen']['criteria'])
+        self.assertNotIn('next_key', submitted[0]['questions'])
+
+    def test_dialogue_screen_policy_stops_on_choices_and_low_confidence(self):
+        self.args.task = 'dialogue'
+        config = dict(jev_model=m.JEV_MODEL, jev_key_file='/not-read')
+        for screen, confidence, status, action in [('choice', 1, 'decision', 'stop'),
+                                                  ('dialogue', .5, 'needs_vision', None),
+                                                  ('dialogue', 1, 'decision', 'enter')]:
+            payload = {'answers': {'screen': {'choice': screen, 'confidence': confidence}}}
+            with self.subTest(screen=screen, confidence=confidence), \
+                    patch.object(m, 'run', side_effect=self.resize_stub), \
+                    patch.object(m, 'credential', return_value='test'), \
+                    patch.object(m.urllib.request, 'urlopen', return_value=io.StringIO(json.dumps(payload))):
+                m.decide(config, self.args)
+            saved = json.loads(self.image.with_suffix('.decision.json').read_text())
+            self.assertEqual(saved['status'], status)
+            if action:
+                self.assertEqual(saved['decision']['next_key'], action)
+
+    def dialogue_driver_stubs(self, screen='dialogue', status='decision'):
+        def capture(config, destination):
+            destination.write_bytes(self.image.read_bytes())
+            return destination
+        def decide(config, args):
+            output = dict(status=status, decision=dict(image_sha256=m.digest(args.image),
+                          screen=screen, next_key='enter' if screen == 'dialogue' else 'stop', confidence=1))
+            args.image.with_suffix('.decision.json').write_text(json.dumps(output))
+        return capture, decide
+
+    def test_dialogue_driver_stops_after_two_unchanged_outcomes(self):
+        args = type('Args', (), dict(folder=self.root / 'drive', character='Test', max_actions=10, max_seconds=10))()
+        capture, decide = self.dialogue_driver_stubs()
+        with patch.object(m, 'capture', side_effect=capture), patch.object(m, 'decide', side_effect=decide), \
+                patch.object(m, 'dialogue_fingerprint', return_value='same'), patch.object(m, 'key') as key, \
+                patch.object(m.time, 'sleep') as settle:
+            m.drive_dialogue({}, args)
+        self.assertEqual(key.call_count, m.MAX_UNCHANGED_DIALOGUE_OUTCOMES)
+        self.assertEqual(settle.call_count, key.call_count)
+        summary = json.loads((args.folder / 'summary.json').read_text())
+        self.assertEqual(summary['reason'], 'unchanged_dialogue')
+        self.assertEqual(len(summary['captures']), key.call_count + 1)
+
+    def test_dialogue_driver_stops_on_choice_or_vision_request(self):
+        for screen, status in [('choice', 'decision'), ('dialogue', 'needs_vision')]:
+            args = type('Args', (), dict(folder=self.root / status, character='Test', max_actions=10, max_seconds=10))()
+            capture, decide = self.dialogue_driver_stubs(screen, status)
+            with patch.object(m, 'capture', side_effect=capture), patch.object(m, 'decide', side_effect=decide), \
+                    patch.object(m, 'key') as key:
+                m.drive_dialogue({}, args)
+            key.assert_not_called()
+
+    def test_dialogue_driver_rejects_excessive_limits_before_host_access(self):
+        args = type('Args', (), dict(folder=self.root / 'drive', character='Test', max_actions=m.MAX_DIALOGUE_ACTIONS + 1, max_seconds=10))()
+        with patch.object(m, 'capture') as capture, self.assertRaises(ValueError):
+            m.drive_dialogue({}, args)
+        capture.assert_not_called()
+
+    def test_dialogue_driver_records_capture_failure_without_input(self):
+        args = type('Args', (), dict(folder=self.root / 'failure', character='Test', max_actions=10, max_seconds=10))()
+        with patch.object(m, 'capture', side_effect=ValueError('No matching window.')), patch.object(m, 'key') as key:
+            result = m.drive_dialogue({}, args)
+        key.assert_not_called()
+        self.assertEqual(result['status'], 'blocked')
+        self.assertEqual(result['actions'], 0)
+        self.assertEqual(json.loads((args.folder / 'summary.json').read_text()), result)
+
+    def test_dialogue_driver_binds_offscreen_input_to_its_current_capture(self):
+        args = type('Args', (), dict(folder=self.root / 'offscreen-drive', character='Test', max_actions=1, max_seconds=10))()
+        capture, decide = self.dialogue_driver_stubs()
+        config = dict(offscreen_control=True)
+        with patch.object(m, 'capture', side_effect=capture), patch.object(m, 'decide', side_effect=decide), \
+                patch.object(m, 'dialogue_fingerprint', side_effect=['first', 'next']), \
+                patch.object(m.time, 'sleep'), patch.object(m, 'key') as key:
+            m.drive_dialogue(config, args)
+        key.assert_called_once()
+        self.assertEqual(key.call_args.args[0]['input_frame'], args.folder.resolve() / 'frame-000.png')
+        self.assertNotIn('input_frame', config)
+
     def test_native_vision_result_is_validated_and_saved(self):
         result = dict(image_sha256=m.digest(self.image), screen='gameplay', next_key='stop', confidence=1)
         self.args.result = self.root / 'vision.json'
@@ -192,6 +406,45 @@ class MacosPackageTests(unittest.TestCase):
         with patch.object(m, 'environment', return_value={}), patch.object(m, 'run', return_value=response):
             with self.assertRaisesRegex(ValueError, 'found 2'):
                 m.window(dict(window_title='FINAL FANTASY XI'))
+
+    def test_capture_can_read_one_offscreen_window_without_input(self):
+        config = dict(window_title='FINAL FANTASY XI')
+        target = dict(id=123, w=800, on_screen=False)
+        output = self.root / 'offscreen.png'
+        def execute(arguments, **kwargs):
+            if arguments[0] == 'screencapture':
+                Path(arguments[-1]).write_bytes(self.image.read_bytes())
+        with patch.object(m, 'permissions'), patch.object(m, 'window', side_effect=[None, target]) as windows, \
+                patch.object(m, 'run', side_effect=execute), patch.object(m, 'key') as key:
+            m.capture(config, output)
+        self.assertEqual(windows.call_args_list[0].kwargs, dict(allow_missing=True))
+        self.assertEqual(windows.call_args_list[1].kwargs, dict(include_offscreen=True))
+        key.assert_not_called()
+        self.assertTrue(output.is_file())
+
+    def test_offscreen_input_requires_fresh_matching_capture_and_host_identity(self):
+        target = dict(id=123, pid=456)
+        metadata = dict(image_sha256=m.digest(self.image), captured_unix=m.time.time(), window=target)
+        record = self.image.with_suffix('.capture.json')
+        record.write_text(json.dumps(metadata))
+        config = dict(input_frame=self.image)
+        with patch.object(m, 'window', return_value=target):
+            self.assertEqual(m.validate_input_capture(config), target)
+        with patch.object(m, 'window', return_value={**target, 'pid': target['pid'] + 1}), self.assertRaises(ValueError):
+            m.validate_input_capture(config)
+        record.write_text(json.dumps({**metadata, 'captured_unix': m.time.time() - m.MAX_INPUT_CAPTURE_AGE_SECONDS - 1}))
+        with patch.object(m, 'window') as windows, self.assertRaises(ValueError):
+            m.validate_input_capture(config)
+        windows.assert_not_called()
+        record.write_text(json.dumps(metadata))
+        self.image.write_bytes(self.image.read_bytes() + b'changed')
+        with self.assertRaises(ValueError):
+            m.validate_input_capture(config)
+
+    def test_offscreen_input_rejects_missing_capture_before_window_access(self):
+        with patch.object(m, 'window') as windows, self.assertRaises(ValueError):
+            m.validate_input_capture({})
+        windows.assert_not_called()
 
 
 if __name__ == '__main__':

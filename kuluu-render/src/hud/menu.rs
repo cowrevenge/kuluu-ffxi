@@ -9340,12 +9340,22 @@ pub fn update_menu_stack_windows(
                     {
                         return None;
                     }
-                    let rows = stacked_rows_for(level.kind, &dynamic);
+                    // A pooled window reads its rows where the refresh left them:
+                    // levels under focus in `stacked_rows`, but the FOCUSED child
+                    // (ur/94-98 - it draws here too now) always in `dynamic.rows`.
+                    // Reading stacked for the focused level found nothing and drew
+                    // a lone `(empty)` hint line where the log belonged (ur/100).
+                    let focused_entry = Some(stack_index) == focus_index && layout.covered_child();
+                    let rows: &[DynamicMenuRow] = if focused_entry {
+                        &dynamic.rows
+                    } else {
+                        stacked_rows_for(level.kind, &dynamic)
+                    };
                     let count = rows_entry_count(level.kind, rows, settings.dlss_supported);
                     let (total, start) = viewport_over(level.kind, level.cursor, count);
                     Some(Shown {
                         stack_index,
-                        focused: Some(stack_index) == focus_index && layout.covered_child(),
+                        focused: focused_entry,
                         frame,
                         level,
                         rows,
@@ -9415,8 +9425,9 @@ pub fn update_menu_stack_windows(
         let label = rows_entry_label(kind, idx, open.rows, &dynamic);
         // ur/77: same law as the mirror arm — windows under focus drop the `>`
         // mark and keep the selected line in cursor gold. The focused framed
-        // child (ur/94-98) is the live top window though, so it wears its mark.
-        let want = if open.focused {
+        // child (ur/94-98) is the live top window, so it wears the mark - on its
+        // cursor line only, exactly like a selector standing on its own.
+        let want = if open.focused && open.level.cursor == idx {
             format!("> {label}")
         } else {
             format!("  {label}")
@@ -10617,9 +10628,11 @@ fn stack_pool_hit(
     {
         return None;
     }
+    // The hit is always against the focused level - and its rows are in
+    // `dynamic.rows`, never in `stacked_rows` (see the same law in
+    // `update_menu_stack_windows`).
     let level = &stack.levels[focus_index];
-    let rows = stacked_rows_for(level.kind, dynamic);
-    let count = rows_entry_count(level.kind, rows, true);
+    let count = rows_entry_count(level.kind, &dynamic.rows, true);
     let (_total, start) = viewport_over(level.kind, level.cursor, count);
     Some((focus_index, start))
 }
@@ -10682,11 +10695,10 @@ pub fn menu_mouse_hover_system(
             continue;
         };
         let open = &stack.levels[level];
-        let rows = stacked_rows_for(open.kind, &dynamic);
         let (total, _) = viewport_over(
             open.kind,
             open.cursor,
-            rows_entry_count(open.kind, rows, settings.dlss_supported),
+            rows_entry_count(open.kind, &dynamic.rows, settings.dlss_supported),
         );
         let list_idx = viewport_start + row.slot;
         if list_idx >= total
@@ -10757,11 +10769,10 @@ pub fn menu_mouse_click_system(
             continue;
         }
         let open = &stack.levels[level_index];
-        let pool_rows = stacked_rows_for(open.kind, &dynamic);
         let (total, _) = viewport_over(
             open.kind,
             open.cursor,
-            rows_entry_count(open.kind, pool_rows, settings.dlss_supported),
+            rows_entry_count(open.kind, &dynamic.rows, settings.dlss_supported),
         );
         let list_idx = viewport_start + row.slot;
         if list_idx < total && row.slot < visible_window(open.kind, total) {
@@ -17400,6 +17411,84 @@ mod tests {
             pane_rows(&mut app),
             before,
             "and ESC returns to those very same nodes"
+        );
+    }
+
+    /// ur/100 (the `(empty)` regression): a framed child drawn in the pooled
+    /// windows reads its rows where the refresh left them - the FOCUSED level's
+    /// live rows, not its `stacked_rows` entry (which by construction only ever
+    /// holds levels under focus). Reading the wrong source drew the log window as
+    /// a lone hint line instead of its Current:/Completed: sections. The child
+    /// also wears its `>` mark on one line only - its cursor.
+    #[test]
+    fn pooled_mission_log_draws_its_own_rows_not_an_empty_hint() {
+        let mut app = App::new();
+        app.init_resource::<GraphicsSettings>()
+            .init_resource::<crate::hud::HudPanels>()
+            .init_resource::<crate::hud::network_status::NetStatusVisible>()
+            .init_resource::<crate::snapshot::SceneState>();
+        #[cfg(not(target_arch = "wasm32"))]
+        app.init_resource::<crate::audio::AudioMuteState>();
+        app.init_resource::<crate::hud::item_detail::SortOptions>()
+            .init_resource::<crate::hud::item_screen::ItemScreenContainer>()
+            .init_resource::<MagicSchoolTable>()
+            .init_resource::<ConfigDatRows>()
+            .init_resource::<CommandSelectorCaptions>()
+            .init_resource::<EquipRecords>()
+            .init_resource::<crate::keybinds::Bindings>()
+            .init_resource::<crate::hud::unity_fp::UnityFpDat>()
+            .init_resource::<crate::hud::merit_windows::MeritDat>()
+            .init_resource::<DynamicMenu>();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::MissionList);
+        stack.push(MenuKind::MissionDetail {
+            log: MISSION_LOG_BASTOK,
+            member: 0,
+        });
+        app.insert_resource(InputMode::Menu(stack));
+        app.add_systems(Startup, spawn_main_menu);
+        app.add_systems(
+            Update,
+            (
+                refresh_dynamic_menu_rows,
+                update_main_menu,
+                update_menu_stack_windows,
+            )
+                .chain(),
+        );
+        for _ in 0..2 {
+            app.update();
+        }
+
+        let want: Vec<String> = app
+            .world()
+            .resource::<DynamicMenu>()
+            .rows
+            .iter()
+            .map(|r| r.label.clone())
+            .collect();
+        assert!(!want.is_empty(), "the log has rows to show");
+        let child = drawn_stack_windows(&mut app);
+        assert_eq!(child.len(), 1, "one framed child on screen");
+        let got: Vec<&str> = child[0]
+            .rows
+            .iter()
+            .map(|row| row.trim_start_matches("> ").trim_start())
+            .collect();
+        assert_eq!(
+            got,
+            want.iter().map(String::as_str).collect::<Vec<_>>(),
+            "the log window lists its own rows - never a placeholder"
+        );
+        assert_eq!(
+            child[0]
+                .rows
+                .iter()
+                .filter(|row| row.starts_with("> "))
+                .count(),
+            1,
+            "exactly one cursor mark on the live window: {:?}",
+            child[0].rows
         );
     }
 

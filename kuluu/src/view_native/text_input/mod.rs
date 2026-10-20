@@ -39,7 +39,9 @@ pub use shop::{shop_mode_sync_system, shop_mouse_activate_system};
 mod map_screen;
 
 mod menu;
-pub use menu::{arrange_request_send_system, unity_chat_send_system};
+pub use menu::{
+    arrange_request_send_system, mission_log_arrow_press_system, unity_chat_send_system,
+};
 use menu::{confirm_menu_at_cursor, handle_menu_key};
 
 mod slash_apply;

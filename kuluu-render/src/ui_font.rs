@@ -168,7 +168,7 @@ mod tests {
         let font = FontArc::try_from_slice(DEJAVU_SANS_MONO).expect("valid ttf");
         // glyph_id 0 is .notdef (tofu). These render as [] in Bevy's default
         // FiraMono subset; the whole point of vendoring DejaVu is to cover them.
-        for ch in ['▶', '▸', '»', '→', '↑', '↓'] {
+        for ch in ['▶', '▸', '»', '→', '↑', '↓', '◄', '►'] {
             assert_ne!(
                 font.glyph_id(ch).0,
                 0,

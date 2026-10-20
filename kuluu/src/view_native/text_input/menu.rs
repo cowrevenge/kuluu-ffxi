@@ -1,5 +1,44 @@
 use super::map_screen::handle_map_key;
 use super::slash_apply::{apply_keybind_update, apply_menu_text_command};
+
+/// ur/76: ◄ ► on a mission log's caption band step its members exactly as the
+/// Left/Right keys do - one law, `mission_cycle_member`'s greyed-skip included.
+pub fn mission_log_arrow_press_system(
+    mut mode: ResMut<InputMode>,
+    scene_state: Res<SceneState>,
+    arrows: Query<
+        (
+            &kuluu_render::hud::menu::MissionLogArrow,
+            &bevy::prelude::Interaction,
+        ),
+        Changed<bevy::prelude::Interaction>,
+    >,
+) {
+    let InputMode::Menu(stack) = &mut *mode else {
+        return;
+    };
+    for (arrow, interaction) in &arrows {
+        if *interaction != bevy::prelude::Interaction::Pressed {
+            continue;
+        }
+        let Some(level) = stack.current_mut() else {
+            continue;
+        };
+        let MenuKind::MissionDetail { log, member } = level.kind else {
+            continue;
+        };
+        if let Some((log, member)) = kuluu_render::hud::menu::mission_cycle_member(
+            &scene_state.snapshot,
+            log,
+            member,
+            arrow.forward,
+        ) {
+            level.kind = MenuKind::MissionDetail { log, member };
+            level.cursor = 0;
+        }
+    }
+}
+
 use super::*;
 use kuluu_render::input_mode::ConfirmDefault;
 
@@ -2464,7 +2503,12 @@ pub(super) fn handle_menu_key(
         if let Some(forward) = forward {
             if let (Some(level), Some((log, member))) = (
                 stack.current_mut(),
-                kuluu_render::hud::menu::mission_cycle_member(log, member, forward),
+                kuluu_render::hud::menu::mission_cycle_member(
+                    &scene_state.snapshot,
+                    log,
+                    member,
+                    forward,
+                ),
             ) {
                 level.kind = MenuKind::MissionDetail { log, member };
                 level.cursor = 0;

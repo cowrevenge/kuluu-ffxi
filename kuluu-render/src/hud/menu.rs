@@ -4872,6 +4872,15 @@ pub struct MainMenu;
 #[derive(Component)]
 pub struct MainMenuTitle;
 
+/// One ◄ ► mark of a mission log window's caption band. Retail wears the pair on
+/// every log window, even one showing a single chain member (ur/76), and a press
+/// steps members as Left/Right keys do.
+#[derive(Component)]
+pub struct MissionLogArrow {
+    /// True for ►, which steps to the next member; false is ◄.
+    pub forward: bool,
+}
+
 /// The strip of pane fill behind a window title, breaking the frame's top line where the word sits.
 /// Same law as persona (`status_panel::StatusCaptionMask`): absolute children measure from the
 /// padding edge, so the band lies one border above them.
@@ -5765,6 +5774,34 @@ fn spawn_pane_column(parent: &mut ChildSpawnerCommands) {
                 TextColor(theme::TITLE),
             ));
 
+            // ur/76: the pair that makes a log window cycle its members, hung on
+            // the caption band's two ends. Hidden until the focused window is one.
+            for forward in [false, true] {
+                let (glyph, left, right) = if forward {
+                    ("►", Val::Auto, Val::Px(MENU_TITLE_MASK_PAD_PX))
+                } else {
+                    ("◄", Val::Px(MENU_TITLE_MASK_PAD_PX), Val::Auto)
+                };
+                c.spawn((
+                    MissionLogArrow { forward },
+                    Button,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        top: Val::Px(
+                            -(crate::ui_font::line_height_px(MENU_TITLE_FONT_PX) / 2.0)
+                                - MENU_BORDER_PX / 2.0,
+                        ),
+                        left,
+                        right,
+                        ..default()
+                    },
+                    Text::new(glyph),
+                    text_nowrap(),
+                    style::text_font(MENU_TITLE_FONT_PX),
+                    TextColor(menu_row_color(false, None, true)),
+                ));
+            }
+
             for slot in 0..MAX_ENTRY_COUNT {
                 c.spawn((
                     MainMenuRow { slot },
@@ -6172,16 +6209,34 @@ pub fn mission_chain_name(log: u8) -> Option<&'static str> {
 }
 
 /// Left/Right on a log window cycles the selector row's members (ur/64: "Left /
-/// Right by nation .. w/ scroll, has size limit"), wrapping like Up/Down do.
-pub fn mission_cycle_member(log: u8, member: u8, forward: bool) -> Option<(u8, u8)> {
+/// Right by nation .. w/ scroll, has size limit"), wrapping like Up/Down do and
+/// never landing on a member the selector would draw grey (ur/76).
+pub fn mission_cycle_member(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    log: u8,
+    member: u8,
+    forward: bool,
+) -> Option<(u8, u8)> {
     let chains = mission_selector_chains_by_log(log)?;
-    let len = chains.len() as u8;
-    if len < 2 {
+    let at = chains.iter().position(|&c| c == log)? as i32;
+    if chains.len() < 2 {
         return Some((log, member));
     }
-    let at = (chains.iter().position(|&c| c == log)? as i32 + if forward { 1 } else { -1 })
-        .rem_euclid(len as i32) as usize;
-    Some((chains[at], at as u8))
+    let dir = if forward { 1 } else { -1 };
+    for step in 1..=chains.len() as i32 {
+        let at = (at + dir * step).rem_euclid(chains.len() as i32) as usize;
+        if mission_member_lit(snap, chains[at]) {
+            return Some((chains[at], at as u8));
+        }
+    }
+    Some((log, member))
+}
+
+/// Whether a chain member stands lit in its selector row (ur/70's installed-
+/// content law): era logs always stand, only the addon micro-chains grey out.
+fn mission_member_lit(snap: &kuluu_snapshot::SceneSnapshot, log: u8) -> bool {
+    !matches!(log, MISSION_LOG_ACP | MISSION_LOG_AMK | MISSION_LOG_ASA)
+        || mission_chain_reported(snap, log)
 }
 
 /// Which selector row a log window belongs to, by chain.
@@ -8036,6 +8091,7 @@ pub fn update_main_menu(
             Without<MainMenuRow>,
             Without<MainMenuPane>,
             Without<MainMenuCompanionFrame>,
+            Without<MissionLogArrow>,
         ),
     >,
     mut pane_q: Query<
@@ -8045,6 +8101,7 @@ pub fn update_main_menu(
             Without<MainMenuRow>,
             Without<MainMenuCompanionFrame>,
             Without<CompanionRow>,
+            Without<MissionLogArrow>,
         ),
     >,
     // One fill for both windows: mirror nodes carry the same title/row
@@ -8059,9 +8116,10 @@ pub fn update_main_menu(
             &mut TextColor,
             &mut BackgroundColor,
         ),
-        Without<MainMenuTitle>,
+        (Without<MainMenuTitle>, Without<MissionLogArrow>),
     >,
     mut title_q: Query<(&MainMenuTitle, Option<&CompanionTitle>, &mut Text)>,
+    mut arrow_q: Query<(&MissionLogArrow, &mut Node)>,
     mut comp_frame_q: Query<
         (&mut Node, &mut ZIndex, &ComputedNode),
         (
@@ -8069,6 +8127,7 @@ pub fn update_main_menu(
             Without<MainMenuRow>,
             Without<MainMenuPane>,
             Without<MainMenu>,
+            Without<MissionLogArrow>,
         ),
     >,
 ) {
@@ -8157,6 +8216,22 @@ pub fn update_main_menu(
         };
         if **text != want {
             **text = want;
+        }
+    }
+
+    // ur/76: a mission log window wears its ◄ ► on the caption band; no other
+    // window shows them.
+    let arrows_wanted = view
+        .as_ref()
+        .is_some_and(|view| matches!(view.kind, MenuKind::MissionDetail { .. }));
+    for (_, mut node) in arrow_q.iter_mut() {
+        let want = if arrows_wanted {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if node.display != want {
+            node.display = want;
         }
     }
 
@@ -15978,21 +16053,23 @@ mod tests {
     /// window draws at most `MISSION_LOG_VISIBLE_ROWS` lines of its list.
     #[test]
     fn mission_log_cycles_its_nations_and_frames_six_rows() {
+        let snap = kuluu_snapshot::SceneSnapshot::default();
         assert_eq!(
-            mission_cycle_member(MISSION_LOG_SANDORIA, 0, true),
+            mission_cycle_member(&snap, MISSION_LOG_SANDORIA, 0, true),
             Some((MISSION_LOG_BASTOK, 1))
         );
         assert_eq!(
-            mission_cycle_member(MISSION_LOG_SANDORIA, 0, false),
+            mission_cycle_member(&snap, MISSION_LOG_SANDORIA, 0, false),
             Some((MISSION_LOG_WINDURST, 2)),
             "wrap behind the first member"
         );
         assert_eq!(
-            mission_cycle_member(MISSION_LOG_COP, 0, true),
-            Some((MISSION_LOG_COP, 0))
+            mission_cycle_member(&snap, MISSION_LOG_COP, 0, true),
+            Some((MISSION_LOG_COP, 0)),
+            "a single-member row stays put"
         );
         assert_eq!(
-            mission_cycle_member(MISSION_LOG_WOTG, 1, false),
+            mission_cycle_member(&snap, MISSION_LOG_WOTG, 1, false),
             Some((MISSION_LOG_TOAU, 0))
         );
         assert_eq!(
@@ -16027,6 +16104,72 @@ mod tests {
         );
     }
 
+    /// ur/76: the arrows never land on a grey member. Only addon chains grey
+    /// (ur/70), so that is the row where the law bites: step past unreported
+    /// members, and stay put when both neighbours are grey.
+    #[test]
+    fn mission_arrows_never_land_on_a_greyed_member() {
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        // Only `A Moogle Kupo d'Etat` is reported (a main-port current of its own).
+        snap.missions.info = Some(kuluu_snapshot::MissionInfo {
+            nation: 0,
+            nation_mission: 0,
+            rotz: 0,
+            cop: 0,
+            cop2: 0,
+            addon_acp: 0,
+            addon_amk: 3,
+            addon_asa: 0,
+            tales_beginning: 0,
+            soa: 0,
+            rov: 0,
+        });
+        assert_eq!(
+            mission_cycle_member(&snap, MISSION_LOG_ACP, 0, true),
+            Some((MISSION_LOG_AMK, 1)),
+            "step past the unreported member to the reported one"
+        );
+        assert_eq!(
+            mission_cycle_member(&snap, MISSION_LOG_AMK, 1, false),
+            Some((MISSION_LOG_AMK, 1)),
+            "both neighbours grey: stay put"
+        );
+    }
+
+    /// ur/76: the ◄ ► pair rides a mission log window's caption band — both are
+    /// shown whenever such a window focuses, and no other window shows them.
+    #[test]
+    fn mission_log_windows_wear_their_caption_band_arrows() {
+        let arrows_shown = |app: &mut App| -> usize {
+            app.world_mut()
+                .query::<(&MissionLogArrow, &Node)>()
+                .iter(app.world())
+                .filter(|(_, node)| node.display != Display::None)
+                .count()
+        };
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::MissionDetail {
+            log: MISSION_LOG_COP,
+            member: 0,
+        });
+        let mut app = root_menu_app(0);
+        app.insert_resource(InputMode::Menu(stack));
+        app.update();
+        assert_eq!(arrows_shown(&mut app), 2, "a log window wears both arrows");
+
+        if let InputMode::Menu(stack) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            stack.pop();
+        }
+        app.update();
+        assert_eq!(arrows_shown(&mut app), 0, "no log, no arrows");
+
+        if let InputMode::Menu(stack) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            stack.push(MenuKind::MissionList);
+        }
+        app.update();
+        assert_eq!(arrows_shown(&mut app), 0, "the selector shows none either");
+    }
+
     #[test]
     fn mission_windows_are_dynamic_titled_and_rooted() {
         assert!(is_dynamic(MenuKind::MissionList));
@@ -16046,6 +16189,101 @@ mod tests {
         assert_eq!(
             root_child_kind("Missions", false, false),
             Some(MenuKind::MissionList)
+        );
+    }
+
+    /// ur/74+75: opening a mission log and closing it again must never draw the
+    /// selector in a state without its grey or cursor colour — on one pinned
+    /// snapshot every frame of that cycle draws byte-identical rows.
+    #[test]
+    fn mission_selector_draws_identically_across_log_open_and_close() {
+        let mut app = App::new();
+        app.init_resource::<GraphicsSettings>()
+            .init_resource::<crate::hud::HudPanels>()
+            .init_resource::<crate::hud::network_status::NetStatusVisible>()
+            .init_resource::<crate::snapshot::SceneState>();
+        #[cfg(not(target_arch = "wasm32"))]
+        app.init_resource::<crate::audio::AudioMuteState>();
+        app.init_resource::<crate::hud::item_detail::SortOptions>()
+            .init_resource::<crate::hud::item_screen::ItemScreenContainer>()
+            .init_resource::<MagicSchoolTable>()
+            .init_resource::<ConfigDatRows>()
+            .init_resource::<CommandSelectorCaptions>()
+            .init_resource::<EquipRecords>()
+            .init_resource::<crate::keybinds::Bindings>()
+            .init_resource::<crate::hud::unity_fp::UnityFpDat>()
+            .init_resource::<crate::hud::merit_windows::MeritDat>()
+            .init_resource::<DynamicMenu>();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::MissionList);
+        stack.current_mut().unwrap().cursor = 3;
+        app.insert_resource(InputMode::Menu(stack));
+        app.add_systems(Startup, spawn_main_menu);
+        app.add_systems(
+            Update,
+            (refresh_dynamic_menu_rows, update_main_menu).chain(),
+        );
+
+        let drawn = |app: &mut App| -> Vec<(String, bevy::color::Color)> {
+            let mut rows: Vec<(usize, String, bevy::color::Color)> = app
+                .world_mut()
+                .query::<(
+                    &MainMenuRow,
+                    Option<&CompanionRow>,
+                    &Node,
+                    &Text,
+                    &TextColor,
+                )>()
+                .iter(app.world())
+                .filter(|(_, companion, node, _, _)| {
+                    companion.is_none() && node.display != Display::None
+                })
+                .map(|(row, _, _, text, color)| (row.slot, text.0.clone(), color.0))
+                .collect();
+            rows.sort_by_key(|(slot, _, _)| *slot);
+            rows.into_iter().map(|(_, t, c)| (t, c)).collect()
+        };
+
+        app.update();
+        let first = drawn(&mut app);
+        assert_eq!(first.len(), 7, "every selector line draws: {first:?}");
+        let addons = first.last().unwrap();
+        assert!(addons.0.contains("Add-ons"), "{first:?}");
+        assert_eq!(
+            addons.1,
+            theme::TEXT_DISABLED,
+            "the unreported addon row draws grey"
+        );
+        let cursor_row = first.iter().find(|(t, _)| t.starts_with('>')).unwrap();
+        assert_eq!(
+            cursor_row.1,
+            menu_row_color(false, None, true),
+            "the cursor row wears its colour"
+        );
+
+        if let InputMode::Menu(stack) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            stack.push(MenuKind::MissionDetail {
+                log: MISSION_LOG_TOAU,
+                member: 0,
+            });
+        }
+        app.update();
+        let detail = drawn(&mut app);
+        assert!(
+            !detail
+                .iter()
+                .any(|(t, _)| t.contains("Add-ons") || t.contains("<unknown>")),
+            "the pane never keeps stale selector labels under the log: {detail:?}"
+        );
+
+        if let InputMode::Menu(stack) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            assert!(stack.pop());
+        }
+        app.update();
+        assert_eq!(
+            drawn(&mut app),
+            first,
+            "the selector redraws exactly as it sat before the log opened"
         );
     }
 

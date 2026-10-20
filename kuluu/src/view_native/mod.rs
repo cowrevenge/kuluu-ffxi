@@ -831,6 +831,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             text_input::text_input_system,
             text_input::auto_enter_cs_system,
             text_input::mouse_nav_dispatch_system,
+            // ur/76: the mission log's caption-band arrows step members; own system, own widgets.
+            text_input::mission_log_arrow_press_system,
             input::dispatch_target_change_system,
             input::engage_locks_target_system,
             input::sync_target_lock_system,

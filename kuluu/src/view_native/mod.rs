@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::disallowed_methods))]
+
 mod app_icon;
 pub mod auto_target;
 pub mod bridge;

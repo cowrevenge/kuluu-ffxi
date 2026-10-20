@@ -67,6 +67,10 @@ fn main() {
         .init_resource::<ActorLoadInFlight>()
         .init_resource::<perf_hud::PerfMonitor>()
         .init_resource::<perf_hud::AssetChurn>()
+        .insert_resource(
+            bevy_framepace::FramepaceSettings::default()
+                .with_limiter(bevy_framepace::Limiter::from_framerate(120.0)),
+        )
         .add_systems(Startup, (setup, perf_hud::spawn_perf_hud))
         .add_systems(First, perf_hud::mark_frame_start)
         .add_systems(PostUpdate, perf_hud::mark_frame_end)

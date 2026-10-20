@@ -12,7 +12,10 @@ const GRAPH_W: f32 = 720.0;
 const GRAPH_H: f32 = 64.0;
 const BAR_PERCENT: f32 = 100.0 / SAMPLES as f32;
 const GRAPH_MAX_MS: f32 = 60.0;
-const TARGET_MS: f32 = 1000.0 / 60.0;
+const PERCENTILE_95: f32 = 0.95;
+const PERCENTILE_99: f32 = 0.99;
+const WARN_BUDGET_RATIO: f32 = 1.25;
+const SEVERE_BUDGET_RATIO: f32 = 2.0;
 const FONT: f32 = 12.0;
 const LOG_COOLDOWN_S: f32 = 1.0;
 const SUMMARY_PERIOD_S: f32 = 5.0;
@@ -30,6 +33,9 @@ pub struct PerfPanel;
 pub struct PerfGraphBar(usize);
 
 #[derive(Component)]
+pub struct PerfBudgetLine(f32);
+
+#[derive(Component)]
 pub struct PerfTextLine(usize);
 
 #[derive(Resource)]
@@ -40,6 +46,9 @@ pub struct PerfMonitor {
     frame_start: Option<std::time::Instant>,
     last_cpu_us: u64,
     last_main_us: u64,
+    thread_cpu_start: Option<std::time::Duration>,
+    last_thread_cpu_us: Option<u64>,
+    sample_count: usize,
     spike_cpu_us: u64,
     spike_main_us: u64,
 
@@ -106,6 +115,9 @@ impl Default for PerfMonitor {
             frame_start: None,
             last_cpu_us: 0,
             last_main_us: 0,
+            thread_cpu_start: None,
+            last_thread_cpu_us: None,
+            sample_count: 0,
             spike_cpu_us: 0,
             spike_main_us: 0,
             seen_first: false,
@@ -209,8 +221,17 @@ pub fn track_asset_churn(
         .count() as u64;
 }
 
-pub fn mark_frame_start(mut m: ResMut<PerfMonitor>) {
+pub fn mark_frame_start(
+    mut m: ResMut<PerfMonitor>,
+    panels: Res<HudPanels>,
+    _main_thread: bevy::ecs::system::NonSendMarker,
+) {
     m.frame_start = Some(std::time::Instant::now());
+    m.thread_cpu_start = panels
+        .perf
+        .then(|| cpu_time::ThreadTime::try_now().ok())
+        .flatten()
+        .map(|clock| clock.as_duration());
 }
 
 pub fn mark_frame_end(mut m: ResMut<PerfMonitor>) {
@@ -219,10 +240,17 @@ pub fn mark_frame_end(mut m: ResMut<PerfMonitor>) {
     }
 }
 
-pub fn mark_last_end(mut m: ResMut<PerfMonitor>) {
+pub fn mark_last_end(mut m: ResMut<PerfMonitor>, _main_thread: bevy::ecs::system::NonSendMarker) {
     if let Some(start) = m.frame_start {
         m.last_main_us = start.elapsed().as_micros() as u64;
     }
+    m.last_thread_cpu_us = m.thread_cpu_start.and_then(|start| {
+        cpu_time::ThreadTime::try_now()
+            .ok()?
+            .as_duration()
+            .checked_sub(start)
+            .map(|elapsed| elapsed.as_micros() as u64)
+    });
 }
 
 fn top_render_spans(diag: &DiagnosticsStore) -> String {
@@ -307,6 +335,7 @@ pub fn update_perf_monitor(
     let cpu_us = m.last_cpu_us;
     let head = m.head;
     m.samples[head] = dt_ms;
+    m.sample_count = (m.sample_count + 1).min(SAMPLES);
     m.head = (head + 1) % SAMPLES;
     m.secs_since_spike += dt;
     if m.log_cooldown_s > 0.0 {
@@ -545,14 +574,16 @@ pub fn spawn_perf_hud(mut commands: Commands) {
                         BackgroundColor(theme::GOOD),
                     ));
                 }
-                spawn_ref_line(g, TARGET_MS, theme::GOOD);
-                spawn_ref_line(g, TARGET_MS * 2.0, theme::WARN);
+                spawn_ref_line(g, 1.0, theme::GOOD);
+                spawn_ref_line(g, SEVERE_BUDGET_RATIO, theme::WARN);
             });
 
             spawn_text_line(p, 1, theme::TEXT);
             spawn_text_line(p, 2, theme::TEXT);
             spawn_text_line(p, 3, theme::MUTED);
             spawn_text_line(p, 4, theme::MUTED);
+            spawn_text_line(p, 5, theme::TEXT);
+            spawn_text_line(p, 6, theme::TEXT);
             p.spawn((
                 super::dev_diagnostics::DevelopmentSummaryText,
                 Text::new("Collecting diagnostics..."),
@@ -577,13 +608,14 @@ fn spawn_text_line(p: &mut ChildSpawnerCommands, index: usize, color: Color) {
     ));
 }
 
-fn spawn_ref_line(g: &mut ChildSpawnerCommands, ms: f32, color: Color) {
+fn spawn_ref_line(g: &mut ChildSpawnerCommands, ratio: f32, color: Color) {
     g.spawn((
+        PerfBudgetLine(ratio),
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(0.0),
             width: Val::Percent(100.0),
-            bottom: Val::Px((ms / GRAPH_MAX_MS).clamp(0.0, 1.0) * GRAPH_H),
+            bottom: Val::Px(0.0),
             height: Val::Px(1.0),
             ..default()
         },
@@ -648,21 +680,37 @@ pub fn update_perf_graph(
     m: Res<PerfMonitor>,
     source: Res<NativeSource>,
     diag: Res<DiagnosticsStore>,
+    settings: Option<Res<bevy_framepace::FramepaceSettings>>,
+    limit: Option<Res<bevy_framepace::FrametimeLimit>>,
     mut bars: Query<(&PerfGraphBar, &mut Node, &mut BackgroundColor)>,
+    mut budget_lines: Query<(&PerfBudgetLine, &mut Node, &mut Visibility), Without<PerfGraphBar>>,
     mut lines: Query<(&PerfTextLine, &mut Text, &mut TextColor)>,
 ) {
     if !panels.perf {
         return;
     }
 
+    let budget_ms = settings
+        .as_deref()
+        .and_then(|settings| frame_budget_ms(&settings.limiter, limit.as_deref()));
+    for (line, mut node, mut visibility) in &mut budget_lines {
+        *visibility = if budget_ms.is_some() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if let Some(budget) = budget_ms {
+            node.bottom = Val::Px((budget * line.0 / GRAPH_MAX_MS).clamp(0.0, 1.0) * GRAPH_H);
+        }
+    }
     for (bar, mut node, mut bg) in bars.iter_mut() {
         let ms = m.samples[(m.head + bar.0) % SAMPLES];
         let frac = (ms / GRAPH_MAX_MS).clamp(0.0, 1.0);
         node.height = Val::Px(frac * GRAPH_H);
-        bg.0 = sample_color(ms);
+        bg.0 = sample_color(ms, budget_ms);
     }
 
-    let text = build_text_lines(&m, &source, &diag);
+    let text = build_text_lines(&m, &source, &diag, budget_ms);
     for (line, mut t, mut tc) in lines.iter_mut() {
         if let Some((s, c)) = text.get(line.0) {
             if **t != *s {
@@ -677,6 +725,7 @@ fn build_text_lines(
     m: &PerfMonitor,
     source: &NativeSource,
     diag: &DiagnosticsStore,
+    budget_ms: Option<f32>,
 ) -> Vec<(String, Color)> {
     let fps = diag
         .get(&FrameTimeDiagnosticsPlugin::FPS)
@@ -742,7 +791,35 @@ fn build_text_lines(
         theme::MUTED,
     );
 
-    vec![title, spike, split, rp_split, cause]
+    let mut samples = m.samples[..m.sample_count].to_vec();
+    samples.sort_by(f32::total_cmp);
+    let intervals = if let Some(budget) = budget_ms {
+        let over = samples.iter().filter(|&&ms| ms > budget).count();
+        let severe = samples
+            .iter()
+            .filter(|&&ms| ms > budget * SEVERE_BUDGET_RATIO)
+            .count();
+        format!(
+            "Budget {budget:.2}ms | intervals over budget {over}/{} | over 2x {severe}",
+            samples.len()
+        )
+    } else {
+        "Budget unavailable (limiter off or monitor rate unknown)".into()
+    };
+    let budget = (
+        format!(
+            "{intervals} | p95 {:.2}ms p99 {:.2}ms",
+            percentile(&samples, PERCENTILE_95),
+            percentile(&samples, PERCENTILE_99)
+        ),
+        theme::TEXT,
+    );
+    let cpu = m
+        .last_thread_cpu_us
+        .map(|us| format!("{:.2}ms", us as f64 / 1000.0))
+        .unwrap_or_else(|| "unavailable".into());
+    let timing = (format!("App schedule wall {:.2}ms | main thread CPU {cpu}\nWall includes worker waits and OS scheduling. Use a profiler to identify the cause.", m.last_main_us as f64 / 1000.0), theme::TEXT);
+    vec![title, spike, split, rp_split, cause, budget, timing]
 }
 
 /// Formats the rprep sub-spans as "[xtr N ast N vws N que N prp N]" (µs).
@@ -760,10 +837,34 @@ fn fmt_rprep_spans(us: &[u64; 5]) -> String {
     out
 }
 
-fn sample_color(ms: f32) -> Color {
-    if ms <= TARGET_MS * 1.25 {
+fn frame_budget_ms(
+    limiter: &bevy_framepace::Limiter,
+    limit: Option<&bevy_framepace::FrametimeLimit>,
+) -> Option<f32> {
+    let duration = match limiter {
+        bevy_framepace::Limiter::Manual(duration) => *duration,
+        bevy_framepace::Limiter::Auto => *limit?.0.try_lock().ok()?,
+        bevy_framepace::Limiter::Off => return None,
+    };
+    (!duration.is_zero()).then_some(duration.as_secs_f32() * 1000.0)
+}
+
+fn percentile(sorted: &[f32], fraction: f32) -> f32 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    sorted[((sorted.len() as f32 * fraction).ceil() as usize)
+        .saturating_sub(1)
+        .min(sorted.len() - 1)]
+}
+
+fn sample_color(ms: f32, budget_ms: Option<f32>) -> Color {
+    let Some(budget) = budget_ms else {
+        return theme::MUTED;
+    };
+    if ms <= budget * WARN_BUDGET_RATIO {
         theme::GOOD
-    } else if ms <= TARGET_MS * 2.0 {
+    } else if ms <= budget * SEVERE_BUDGET_RATIO {
         theme::WARN
     } else {
         theme::DANGER
@@ -774,6 +875,26 @@ fn sample_color(ms: f32) -> Color {
 mod tests {
     use super::*;
     use kuluu_render::mouse::MousePointer;
+
+    #[test]
+    fn budget_uses_the_active_limiter_and_rejects_unknown_rates() {
+        use bevy_framepace::Limiter;
+        let budget = frame_budget_ms(&Limiter::from_framerate(120.0), None).unwrap();
+        assert!((budget - 1000.0 / 120.0).abs() < f32::EPSILON * 100.0);
+        assert!(frame_budget_ms(&Limiter::Off, None).is_none());
+        assert!(frame_budget_ms(&Limiter::Auto, None).is_none());
+        assert!(frame_budget_ms(&Limiter::Auto, Some(&default())).is_none());
+    }
+
+    #[test]
+    fn percentiles_keep_long_frames_and_ignore_unused_history() {
+        assert_eq!(percentile(&[], PERCENTILE_99), 0.0);
+        assert_eq!(percentile(&[8.0], PERCENTILE_95), 8.0);
+        let mut samples = vec![8.0; 99];
+        samples.push(40.0);
+        assert_eq!(percentile(&samples, PERCENTILE_95), 8.0);
+        assert_eq!(percentile(&samples, 1.0), 40.0);
+    }
 
     #[test]
     fn only_a_visible_hovered_panel_claims_camera_scroll() {

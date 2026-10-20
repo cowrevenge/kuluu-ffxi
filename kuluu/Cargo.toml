@@ -47,6 +47,7 @@ default = ["native-window"]
 # main thread on macOS, so main.rs handles the dispatch specially when
 # this feature is active.
 native-window = [
+    "dep:cpu-time",
     "dep:winit",
     "dep:bevy",
     "dep:bevy_framepace",
@@ -138,6 +139,7 @@ ffxi-dat = { path = "../ffxi-dat" }
 ffxi-install = { path = "../ffxi-install" }
 
 anyhow.workspace = true
+cpu-time = { version = "1.0", optional = true }
 clap.workspace = true
 dirs = "7"
 # Already linked transitively via ffxi-nav-recast with the identical

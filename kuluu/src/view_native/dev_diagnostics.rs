@@ -25,9 +25,11 @@ pub fn update_summary(
     mesh_assets: Res<Assets<Mesh>>,
     mut text: Query<&mut Text, With<DevelopmentSummaryText>>,
     mut next_refresh: Local<f32>,
+    mut process_clock: Local<Option<(cpu_time::ProcessTime, std::time::Instant)>>,
 ) {
     if !panels.perf {
         *next_refresh = 0.0;
+        *process_clock = None;
         return;
     }
     let Ok(mut text) = text.single_mut() else {
@@ -62,11 +64,31 @@ pub fn update_summary(
         .iter()
         .map(|(_, image)| kuluu_render::gpu_assets::image_bytes(image))
         .sum();
-    let process_cpu = process_measurement(
-        &diagnostics,
-        &SystemInformationDiagnosticsPlugin::PROCESS_CPU_USAGE,
-        "% of machine",
-    );
+    let current_clock = cpu_time::ProcessTime::try_now().ok();
+    let process_cpu = process_clock
+        .take()
+        .and_then(|(clock, wall)| {
+            let seconds = wall.elapsed().as_secs_f64();
+            clock
+                .try_elapsed()
+                .ok()
+                .filter(|_| seconds > 0.0)
+                .map(|cpu| {
+                    format!(
+                        "{:.1}% (100% = one logical CPU)",
+                        cpu.as_secs_f64() / seconds * 100.0
+                    )
+                })
+        })
+        .unwrap_or_else(|| {
+            if current_clock.is_some() {
+                "collecting CPU time"
+            } else {
+                "unavailable (CPU clock)"
+            }
+            .into()
+        });
+    *process_clock = current_clock.map(|clock| (clock, std::time::Instant::now()));
     let process_memory = process_measurement(
         &diagnostics,
         &SystemInformationDiagnosticsPlugin::PROCESS_MEM_USAGE,

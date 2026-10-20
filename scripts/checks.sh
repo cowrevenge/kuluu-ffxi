@@ -74,10 +74,12 @@ run_fmt() {
 }
 
 run_clippy() {
+  python3 scripts/check-blocking-policy.py
   # --all-targets also compiles tests/examples, so stale constructors and
   # broken examples surface as errors here, not just lint warnings. --locked
   # additionally fails on an out-of-date Cargo.lock.
-  cargo clippy --workspace --all-targets --locked "${FEATURES[@]}" -- -D warnings
+  # The method list is workspace-wide; viewer modules enable its blocking-call restriction.
+  cargo clippy --workspace --all-targets --locked "${FEATURES[@]}" -- -D warnings -A clippy::disallowed_methods
   run_style
 }
 

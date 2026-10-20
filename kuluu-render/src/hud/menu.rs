@@ -5148,6 +5148,15 @@ pub struct MenuStackWindowRow {
     pub slot: usize,
 }
 
+/// ur/76 law for the pooled windows: when a framed mission/quest child draws as
+/// its own surface (ur/94-98) it wears the same caption-band ◄ ► pair there.
+#[derive(Component)]
+pub struct MenuStackWindowArrow {
+    pub window: usize,
+    /// True for ►, which steps to the next member; false is ◄.
+    pub forward: bool,
+}
+
 /// A stack window's right-edge scrollbar (ur/64), shown only for the kinds that
 /// carry a visible-row cap.
 #[derive(Component)]
@@ -5548,6 +5557,9 @@ pub enum MenuWindowSeat {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MenuStackLayout {
     pub windows: Vec<(usize, MenuWindowSeat)>,
+    /// The focused level's kind, kept so the covered-child law (ur/94-98) can
+    /// check which family owns the routing without walking the stack.
+    focused_kind: Option<MenuKind>,
 }
 
 impl MenuStackLayout {
@@ -5564,6 +5576,50 @@ impl MenuStackLayout {
             .find(|(_, seat)| !matches!(seat, MenuWindowSeat::Record(_)))
     }
 
+    /// Owner law (ur/94-98): the newest opener under focus that keeps drawing in
+    /// or beside the selector column while a framed child is on top of it. Only
+    /// the mission/quest family owns this routing - those chains open their log
+    /// windows as separate surfaces over a live selector (Commands and the
+    /// Missions list both). A dockable side list (`emotes`) that happens to sit
+    /// at a left record frame is NOT such a child: it stays drawn in place.
+    fn covered_opener(&self) -> Option<usize> {
+        let (focus_index, focus_seat) = self.focused()?;
+        let MenuWindowSeat::Record(_) = focus_seat else {
+            return None;
+        };
+        let Some(focused_kind) = self.focused_kind else {
+            return None;
+        };
+        if !matches!(
+            focused_kind,
+            MenuKind::MissionDetail { .. }
+                | MenuKind::MissionText { .. }
+                | MenuKind::QuestMenu
+                | MenuKind::QuestList { .. }
+                | MenuKind::QuestDetail { .. }
+        ) {
+            return None;
+        }
+        let (_, below) = self.windows.split_last()?;
+        below
+            .iter()
+            .rev()
+            // Index 0 is the Commands root: it never opens these chains itself
+            // (ur/62 - they run off their own selector), and a framed child
+            // focused directly over Commands keeps its pre-ur/94 pane placement.
+            .filter(|(index, _)| *index > 0)
+            .find(|(_, seat)| !matches!(seat, MenuWindowSeat::Record(_)))
+            .filter(|(index, _)| *index < focus_index)
+            .map(|(index, _)| *index)
+    }
+
+    /// True while a framed record-frame child holds focus over an opener that is
+    /// still drawing its own rows: the child renders as its own window and the
+    /// opener updates IN PLACE (ur/94-98 ruling - no re-formed selector).
+    pub fn covered_child(&self) -> bool {
+        self.covered_opener().is_some()
+    }
+
     /// The windows under the focused one drawn at their own record frames, oldest first.
     pub fn record_windows(&self) -> Vec<(usize, RecordFrame)> {
         let below = self
@@ -5577,6 +5633,27 @@ impl MenuStackLayout {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Every record-frame window the pooled window surfaces (`MenuStackWindow`) must draw.
+    /// Under a covered child (see `covered_child`) that includes the focused framed child
+    /// itself - it is a window like any other, newest on top - while the opener keeps its
+    /// own column surface untouched (ur/94-98).
+    pub fn pool_windows(&self) -> Vec<(usize, RecordFrame)> {
+        let covered = self.covered_child();
+        let mut windows: Vec<(usize, RecordFrame)> = if covered {
+            self.windows
+                .iter()
+                .filter_map(|&(index, seat)| match seat {
+                    MenuWindowSeat::Record(frame) => Some((index, frame)),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            self.record_windows()
+        };
+        windows.sort_by_key(|(index, _)| *index);
+        windows
     }
 }
 
@@ -5644,7 +5721,10 @@ pub fn menu_stack_layout(stack: &MenuStack, frames: &ConfigDatRows) -> MenuStack
         focused,
         focused_frame.map_or(MenuWindowSeat::Column, MenuWindowSeat::Record),
     ));
-    MenuStackLayout { windows }
+    MenuStackLayout {
+        windows,
+        focused_kind: Some(levels[focused].kind),
+    }
 }
 
 /// Wider pane for the Graphics menu: its rows are `label:<16>[value]` pairs
@@ -5765,6 +5845,38 @@ fn spawn_stacked_window(parent: &mut ChildSpawnerCommands, slot: usize) {
                 },
                 BackgroundColor(theme::CELL_BG),
             ));
+            // ur/94-98: the caption pair, hung exactly as the pane wears it -
+            // a framed child drawn in this surface shows them (mission/quest
+            // kinds only) and pressing one steps members like Left/Right.
+            for forward in [false, true] {
+                let (glyph, left, right) = if forward {
+                    ("►", Val::Auto, Val::Px(MENU_TITLE_MASK_PAD_PX))
+                } else {
+                    ("◄", Val::Px(MENU_TITLE_MASK_PAD_PX), Val::Auto)
+                };
+                w.spawn((
+                    MenuStackWindowArrow {
+                        window: slot,
+                        forward,
+                    },
+                    Button,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        top: Val::Px(
+                            -(crate::ui_font::line_height_px(MENU_TITLE_FONT_PX) / 2.0)
+                                - MENU_BORDER_PX / 2.0,
+                        ),
+                        left,
+                        right,
+                        display: Display::None,
+                        ..default()
+                    },
+                    Text::new(glyph),
+                    text_nowrap(),
+                    style::text_font(MENU_TITLE_FONT_PX),
+                    TextColor(menu_row_color(false, None, true)),
+                ));
+            }
             w.spawn((
                 MenuStackWindowScrollThumb { window: slot },
                 Node {
@@ -5784,6 +5896,10 @@ fn spawn_stacked_window(parent: &mut ChildSpawnerCommands, slot: usize) {
                         window: slot,
                         slot: row,
                     },
+                    // ur/94-98: a framed child drawn here while its opener keeps the
+                    // column is still the live top window - its rows take mouse like
+                    // any selector. The systems gate on stack position.
+                    Button,
                     Node {
                         display: Display::None,
                         ..default()
@@ -8722,9 +8838,24 @@ pub fn update_main_menu(
         node.display = Display::Flex;
     }
     let layout = menu_stack_layout(stack, &config_rows);
-    let Some((view_index, view_seat)) = layout.focused() else {
+    let Some((focus_index, focus_seat)) = layout.focused() else {
         hide(&mut node);
         return;
+    };
+    // Owner law (ur/94-98 rounds): every stacked window is its OWN drawn
+    // surface. Opening a framed child draws that child in its record-frame
+    // window (`update_menu_stack_windows`); the opener keeps painting its very
+    // same rows, untouched - only its `>` mark and cursor colour update there.
+    // No pane transfer, no re-formed selector: that hop (and the stale-layout
+    // frames it produced) was the flash/beetlejuice stretch.
+    let covered_child = layout.covered_child();
+    let (view_index, view_seat) = if covered_child {
+        (
+            layout.covered_opener().expect("covered_child"),
+            MenuWindowSeat::Column,
+        )
+    } else {
+        (focus_index, focus_seat)
     };
     // The width follows the level that actually draws in this window, not the top of the stack: a
     // `statcom2` detail opens as its own framed window and leaves the list drawing here (`menu_stack_layout`
@@ -8750,7 +8881,13 @@ pub fn update_main_menu(
     };
     let view = level_view(view_index);
     let column_window = layout.column_window();
-    let parent_view = column_window.and_then(|(index, _)| level_view(index));
+    // Under a framed child the pane itself paints the opener (ur/94-98), so
+    // nothing is mirrored on the companion frame for this stack.
+    let parent_view = if covered_child {
+        None
+    } else {
+        column_window.and_then(|(index, _)| level_view(index))
+    };
     let parent_rows = parent_view.map_or(&[][..], |p| stacked_rows_for(p.kind, &dynamic));
 
     for (_, comp, mut text) in title_q.iter_mut() {
@@ -8796,8 +8933,22 @@ pub fn update_main_menu(
         return;
     };
 
-    let (total, viewport_start) =
-        resolve_viewport(view.kind, view.cursor, &dynamic, settings.dlss_supported);
+    // Covered opener (ur/94-98): its rows are the stacked entry it keeps while
+    // the child draws above - `dynamic.rows` belongs to the focused child now.
+    let pane_rows: &[DynamicMenuRow] = if covered_child {
+        stacked_rows_for(view.kind, &dynamic)
+    } else {
+        &dynamic.rows
+    };
+    let (total, viewport_start) = if covered_child {
+        viewport_over(
+            view.kind,
+            view.cursor,
+            rows_entry_count(view.kind, pane_rows, settings.dlss_supported),
+        )
+    } else {
+        resolve_viewport(view.kind, view.cursor, &dynamic, settings.dlss_supported)
+    };
     let window = visible_window(view.kind, total);
     // Mirror-side totals for the selector frame: the opener keeps its viewport while a
     // child holds focus — Root pages and scrolling lists follow the same `viewport_over`
@@ -8869,7 +9020,9 @@ pub fn update_main_menu(
             row_node.display = Display::Flex;
         }
 
-        let label_owned: String = if is_dynamic(view.kind) {
+        let label_owned: String = if covered_child {
+            rows_entry_label(view.kind, list_idx, pane_rows, &dynamic).to_string()
+        } else if is_dynamic(view.kind) {
             entry_label(view.kind, list_idx, &dynamic).to_string()
         } else {
             entries_for(view.kind, settings.dlss_supported)
@@ -8905,7 +9058,9 @@ pub fn update_main_menu(
         // Beyond cursor/grey, a builder may hand the row one of retail's two item tints —
         // wearable-now lime or same-kind-equipped green (`.text FFXiMain.dll retail-2026-09
         // 0x1DE143` paints these regardless of selection; only the dim outranks them).
-        let tint = if is_dynamic(view.kind) {
+        let tint = if covered_child {
+            pane_rows.get(list_idx).and_then(|r| r.tint)
+        } else if is_dynamic(view.kind) {
             dynamic.rows.get(list_idx).and_then(|r| r.tint)
         } else {
             None
@@ -8913,11 +9068,21 @@ pub fn update_main_menu(
         let base_color = menu_row_color(gated, tint, is_cursor);
         // ur/90: the quest hub keeps a third column free for its blue dots.
         let bullet_col = view.kind == MenuKind::QuestMenu;
-        let (want, want_color, want_bg) = match (is_cursor, bullet_col) {
-            (true, false) => (format!("> {body}"), base_color, Color::NONE),
-            (false, false) => (format!("  {body}"), base_color, Color::NONE),
-            (true, true) => (format!(">  {body}"), base_color, Color::NONE),
-            (false, true) => (format!("   {body}"), base_color, Color::NONE),
+        // Owner law (ur/94-98): under a framed child the opener's rows update
+        // IN PLACE - only the `>` mark drops and the cursor line goes gold.
+        let (want, want_color, want_bg) = if covered_child {
+            (
+                format!("  {body}"),
+                menu_row_color(gated, tint, is_cursor),
+                Color::NONE,
+            )
+        } else {
+            match (is_cursor, bullet_col) {
+                (true, false) => (format!("> {body}"), base_color, Color::NONE),
+                (false, false) => (format!("  {body}"), base_color, Color::NONE),
+                (true, true) => (format!(">  {body}"), base_color, Color::NONE),
+                (false, true) => (format!("   {body}"), base_color, Color::NONE),
+            }
         };
         if **text != want {
             **text = want;
@@ -9110,7 +9275,10 @@ pub fn update_menu_stack_windows(
     dynamic: Res<DynamicMenu>,
     config_rows: Res<ConfigDatRows>,
     dock: Option<Res<crate::hud::dock::DockBoard>>,
-    mut window_q: Query<(&MenuStackWindow, &mut Node, &mut ZIndex, &ComputedNode)>,
+    mut window_q: Query<
+        (&MenuStackWindow, &mut Node, &mut ZIndex, &ComputedNode),
+        Without<MenuStackWindowArrow>,
+    >,
     // One query for both scrollbar nodes (they are disjoint entities), so no
     // `&mut Node` overlap with the frames or rows above.
     mut scroll_q: Query<
@@ -9119,16 +9287,27 @@ pub fn update_menu_stack_windows(
             Option<&MenuStackWindowScrollThumb>,
             &mut Node,
         ),
-        (Without<MenuStackWindowRow>, Without<MenuStackWindow>),
+        (
+            Without<MenuStackWindowRow>,
+            Without<MenuStackWindow>,
+            Without<MenuStackWindowArrow>,
+        ),
     >,
-    mut title_q: Query<(&MenuStackWindowTitle, &mut Text), Without<MenuStackWindowRow>>,
+    // ur/94-98: the pooled caption pairs ride with their window's kind law.
+    #[allow(clippy::type_complexity)] mut title_q: Query<
+        (&MenuStackWindowTitle, &mut Text),
+        (Without<MenuStackWindowRow>, Without<MenuStackWindowArrow>),
+    >,
     mut row_q: Query<
         (&MenuStackWindowRow, &mut Node, &mut Text, &mut TextColor),
-        Without<MenuStackWindow>,
+        (Without<MenuStackWindow>, Without<MenuStackWindowArrow>),
     >,
+    mut arrow_q: Query<(&MenuStackWindowArrow, &mut Node)>,
 ) {
     struct Shown<'a> {
         stack_index: usize,
+        /// The live top window of the stack (ur/94-98): its cursor row wears the `>` mark.
+        focused: bool,
         frame: RecordFrame,
         level: &'a MenuLevel,
         rows: &'a [DynamicMenuRow],
@@ -9138,7 +9317,12 @@ pub fn update_menu_stack_windows(
     }
     let shown: Vec<Shown> = match &*mode {
         InputMode::Menu(stack) => {
-            let records = menu_stack_layout(stack, &config_rows).record_windows();
+            // ur/94-98: under a covered child the pool draws that focused framed
+            // child too - it is one window of the stack like any other. The
+            // opener never enters here; its column surface keeps painting in place.
+            let layout = menu_stack_layout(stack, &config_rows);
+            let focus_index = layout.focused().map(|(index, _)| index);
+            let records = layout.pool_windows();
             // While the Status flow is open nothing else on the stack may be seen — retail
             // hides it under statcom2 at the Commands spot (owner ruling 2026-10-19: "that
             // menu should not be seen... IT will be hidden"), and kuluu now hides it in code.
@@ -9161,6 +9345,7 @@ pub fn update_menu_stack_windows(
                     let (total, start) = viewport_over(level.kind, level.cursor, count);
                     Some(Shown {
                         stack_index,
+                        focused: Some(stack_index) == focus_index && layout.covered_child(),
                         frame,
                         level,
                         rows,
@@ -9229,8 +9414,13 @@ pub fn update_menu_stack_windows(
         let kind = open.level.kind;
         let label = rows_entry_label(kind, idx, open.rows, &dynamic);
         // ur/77: same law as the mirror arm — windows under focus drop the `>`
-        // mark and keep the selected line in cursor gold.
-        let want = format!("  {label}");
+        // mark and keep the selected line in cursor gold. The focused framed
+        // child (ur/94-98) is the live top window though, so it wears its mark.
+        let want = if open.focused {
+            format!("> {label}")
+        } else {
+            format!("  {label}")
+        };
         if **text != want {
             **text = want;
         }
@@ -9239,6 +9429,20 @@ pub fn update_menu_stack_windows(
         let want_color = menu_row_color(gated, tint, open.level.cursor == idx);
         if color.0 != want_color {
             color.0 = want_color;
+        }
+    }
+
+    // ur/76 on pooled surfaces (ur/94-98): a framed mission log - and only one -
+    // wears the caption pair; hidden with an undrawn window so it never steals
+    // clicks from what sits behind the surface.
+    for (arrow, mut node) in arrow_q.iter_mut() {
+        let want = shown
+            .get(arrow.window)
+            .is_some_and(|open| matches!(open.level.kind, MenuKind::MissionDetail { .. }))
+            .then_some(Display::Flex)
+            .unwrap_or(Display::None);
+        if node.display != want {
+            node.display = want;
         }
     }
 
@@ -10387,11 +10591,46 @@ fn viewport_over(kind: MenuKind, cursor: usize, total: usize) -> (usize, usize) 
     (total, start)
 }
 
+/// ur/94-98: while a framed child draws in the pooled windows above the column,
+/// a pointer hit on one of those rows belongs to that window's level, not to
+/// whatever the pane happens to be painting underneath. Answers `(stack index,
+/// viewport start)` for the pool row under `window` - only ever the focused
+/// framed child; every other pooled surface stays inert as it always was.
+fn stack_pool_hit(
+    stack: &MenuStack,
+    frames: &ConfigDatRows,
+    dynamic: &DynamicMenu,
+    window: usize,
+) -> Option<(usize, usize)> {
+    let layout = menu_stack_layout(stack, frames);
+    if !layout.covered_child() {
+        return None;
+    }
+    let focus_index = stack.levels.len().checked_sub(1)?;
+    // Only the focused child answers through the pool, and only from the surface
+    // it actually draws into (`pool_windows` is slot-ordered like `Shown`).
+    if !layout
+        .pool_windows()
+        .into_iter()
+        .enumerate()
+        .any(|(slot, (index, _))| index == focus_index && slot == window)
+    {
+        return None;
+    }
+    let level = &stack.levels[focus_index];
+    let rows = stacked_rows_for(level.kind, dynamic);
+    let count = rows_entry_count(level.kind, rows, true);
+    let (_total, start) = viewport_over(level.kind, level.cursor, count);
+    Some((focus_index, start))
+}
+
 pub fn menu_mouse_hover_system(
     mut mode: ResMut<InputMode>,
     settings: Res<GraphicsSettings>,
     dynamic: Res<DynamicMenu>,
+    config_rows: Option<Res<ConfigDatRows>>,
     rows: Query<(&Interaction, &MainMenuRow), Changed<Interaction>>,
+    pool_q: Query<(&Interaction, &MenuStackWindowRow), Changed<Interaction>>,
 ) {
     let InputMode::Menu(stack) = &mut *mode else {
         return;
@@ -10405,20 +10644,59 @@ pub fn menu_mouse_hover_system(
     if draws_itself(kind) {
         return;
     }
-    for (interaction, row) in &rows {
+    // ur/94-98: under a covered child the pane's buttons belong to the opener's
+    // drawn rows - they must not reach through to the focused child's cursor.
+    let covered = config_rows
+        .as_deref()
+        .is_some_and(|frames| menu_stack_layout(stack, frames).covered_child());
+    if !covered {
+        for (interaction, row) in &rows {
+            if !matches!(interaction, Interaction::Hovered | Interaction::Pressed) {
+                continue;
+            }
+            let cursor = stack.levels[level_idx].cursor;
+            let (total, viewport_start) =
+                resolve_viewport(kind, cursor, &dynamic, settings.dlss_supported);
+            let window = visible_window(kind, total);
+            let list_idx = viewport_start + row.slot;
+            if list_idx >= total
+                || row.slot >= window
+                || stack.levels[level_idx].row_locked(list_idx)
+            {
+                continue;
+            }
+            if stack.levels[level_idx].cursor != list_idx {
+                stack.levels[level_idx].cursor = list_idx;
+            }
+        }
+    }
+    for (interaction, row) in &pool_q {
         if !matches!(interaction, Interaction::Hovered | Interaction::Pressed) {
             continue;
         }
-        let cursor = stack.levels[level_idx].cursor;
-        let (total, viewport_start) =
-            resolve_viewport(kind, cursor, &dynamic, settings.dlss_supported);
-        let window = visible_window(kind, total);
+        let Some(frames) = config_rows.as_deref() else {
+            continue;
+        };
+        let Some((level, viewport_start)) = stack_pool_hit(stack, frames, &dynamic, row.window)
+        else {
+            continue;
+        };
+        let open = &stack.levels[level];
+        let rows = stacked_rows_for(open.kind, &dynamic);
+        let (total, _) = viewport_over(
+            open.kind,
+            open.cursor,
+            rows_entry_count(open.kind, rows, settings.dlss_supported),
+        );
         let list_idx = viewport_start + row.slot;
-        if list_idx >= total || row.slot >= window || stack.levels[level_idx].row_locked(list_idx) {
+        if list_idx >= total
+            || row.slot >= visible_window(open.kind, total)
+            || open.row_locked(list_idx)
+        {
             continue;
         }
-        if stack.levels[level_idx].cursor != list_idx {
-            stack.levels[level_idx].cursor = list_idx;
+        if matches!(interaction, Interaction::Hovered) && open.cursor != list_idx {
+            stack.levels[level].cursor = list_idx;
         }
     }
 }
@@ -10427,7 +10705,9 @@ pub fn menu_mouse_click_system(
     mode: Res<InputMode>,
     settings: Res<GraphicsSettings>,
     dynamic: Res<DynamicMenu>,
+    config_rows: Option<Res<ConfigDatRows>>,
     rows: Query<(&Interaction, &MainMenuRow), Changed<Interaction>>,
+    pool_q: Query<(&Interaction, &MenuStackWindowRow), Changed<Interaction>>,
     mut out: MessageWriter<MenuRowActivated>,
 ) {
     let InputMode::Menu(stack) = &*mode else {
@@ -10440,16 +10720,54 @@ pub fn menu_mouse_click_system(
     if draws_itself(kind) {
         return;
     }
-    for (interaction, row) in &rows {
+    // ur/94-98: same law as hover - while a framed child covers the column, the
+    // pane's buttons draw the opener and take no activation; clicks route to the
+    // focused child through its pooled rows instead.
+    let covered = config_rows
+        .as_deref()
+        .is_some_and(|frames| menu_stack_layout(stack, frames).covered_child());
+    if !covered {
+        for (interaction, row) in &rows {
+            if *interaction != Interaction::Pressed {
+                continue;
+            }
+            let (total, viewport_start) =
+                resolve_viewport(kind, level.cursor, &dynamic, settings.dlss_supported);
+            let window = visible_window(kind, total);
+            let list_idx = viewport_start + row.slot;
+            if list_idx < total && row.slot < window && !level.row_locked(list_idx) {
+                out.write(MenuRowActivated { slot: list_idx });
+            }
+        }
+    }
+    for (interaction, row) in &pool_q {
         if *interaction != Interaction::Pressed {
             continue;
         }
-        let (total, viewport_start) =
-            resolve_viewport(kind, level.cursor, &dynamic, settings.dlss_supported);
-        let window = visible_window(kind, total);
+        let Some(frames) = config_rows.as_deref() else {
+            continue;
+        };
+        let Some((level_index, viewport_start)) =
+            stack_pool_hit(stack, frames, &dynamic, row.window)
+        else {
+            continue;
+        };
+        // Only the focused level's rows answer - MenuRowActivated reaches it.
+        if level_index != stack.levels.len().saturating_sub(1) {
+            continue;
+        }
+        let open = &stack.levels[level_index];
+        let pool_rows = stacked_rows_for(open.kind, &dynamic);
+        let (total, _) = viewport_over(
+            open.kind,
+            open.cursor,
+            rows_entry_count(open.kind, pool_rows, settings.dlss_supported),
+        );
         let list_idx = viewport_start + row.slot;
-        if list_idx < total && row.slot < window && !level.row_locked(list_idx) {
-            out.write(MenuRowActivated { slot: list_idx });
+        if list_idx < total && row.slot < visible_window(open.kind, total) {
+            if !open.row_locked(list_idx) {
+                out.write(MenuRowActivated { slot: list_idx });
+            }
         }
     }
 }
@@ -16907,9 +17225,16 @@ mod tests {
         stack.current_mut().unwrap().cursor = 3;
         app.insert_resource(InputMode::Menu(stack));
         app.add_systems(Startup, spawn_main_menu);
+        // ur/94-98: the log opens as its own pooled window - the probe runs the
+        // real HUD's pair of draw passes.
         app.add_systems(
             Update,
-            (refresh_dynamic_menu_rows, update_main_menu).chain(),
+            (
+                refresh_dynamic_menu_rows,
+                update_main_menu,
+                update_menu_stack_windows,
+            )
+                .chain(),
         );
 
         let drawn = |app: &mut App| -> Vec<(String, bevy::color::Color)> {
@@ -16956,29 +17281,58 @@ mod tests {
             });
         }
         app.update();
+        // ur/94-98 (the owner's continuity law): opening the log never re-forms
+        // the selector. The very same seven pane rows stay drawn - only the `>`
+        // mark drops, and the selected line keeps its gold while Add-ons stays grey.
         let detail = drawn(&mut app);
+        assert_eq!(
+            detail.len(),
+            7,
+            "the opener keeps painting under its log: {detail:?}"
+        );
         assert!(
-            !detail
-                .iter()
-                .any(|(t, _)| t.contains("Add-ons") || t.contains("<unknown>")),
-            "the pane never keeps stale selector labels under the log: {detail:?}"
+            !detail.iter().any(|(t, _)| t.contains('>')),
+            "no marker while a child holds focus: {detail:?}"
         );
 
-        // ur/77: mirrored under the open log the selector drops its `>` mark,
-        // and the selected line keeps its gold while Add-ons stays grey.
+        // ...and the child is a NEW drawn surface (the pooled window), not a
+        // repaint of this one; nothing mirrors onto the companion frame any more.
+        let mirror_rows = app
+            .world_mut()
+            .query::<(&CompanionRow, &Node)>()
+            .iter(app.world())
+            .filter(|(_, node)| node.display != Display::None)
+            .count();
+        // The companion frame is hidden while the opener keeps its own surface.
+        assert_eq!(
+            mirror_rows, 0,
+            "no mirror under a per-window stack: {mirror_rows}"
+        );
+        let child = drawn_stack_windows(&mut app);
+        assert_eq!(child.len(), 1, "the log draws as its own window");
+        assert_eq!(
+            child[0].title,
+            menu_title(MenuKind::MissionDetail {
+                log: MISSION_LOG_TOAU,
+                member: 0
+            })
+        );
+
         let mut mirror: Vec<(String, bevy::color::Color)> = app
             .world_mut()
-            .query::<(&CompanionRow, &Node, &Text, &TextColor)>()
+            .query::<(
+                &MainMenuRow,
+                Option<&CompanionRow>,
+                &Node,
+                &Text,
+                &TextColor,
+            )>()
             .iter(app.world())
-            .filter(|(_, node, _, _)| node.display != Display::None)
-            .map(|(_, _, text, color)| (text.0.clone(), color.0))
+            .filter(|(_, comp, node, _, _)| comp.is_none() && node.display != Display::None)
+            .map(|(_, _, _, text, color)| (text.0.clone(), color.0))
             .collect();
         mirror.sort_by_key(|(t, _)| t.clone());
         assert_eq!(mirror.len(), 7, "{mirror:?}");
-        assert!(
-            !mirror.iter().any(|(t, _)| t.contains('>')),
-            "no marker on an unfocused window: {mirror:?}"
-        );
         let selected = mirror
             .iter()
             .find(|(t, _)| t.contains("Aht Urhgan"))
@@ -16995,6 +17349,57 @@ mod tests {
             drawn(&mut app),
             first,
             "the selector redraws exactly as it sat before the log opened"
+        );
+    }
+
+    /// ur/94-98 continuity law, entity-level: opening a framed child must not
+    /// swap the selector's row entities at all - no transfer, no re-form. The
+    /// very same nodes keep painting (the Beetlejuice flash was freshly-revealed
+    /// replacements drawing stale layout); only styling updates under the child.
+    #[test]
+    fn opening_a_log_keeps_the_selectors_very_row_entities() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::MissionList);
+        stack.current_mut().unwrap().cursor = 3;
+        let mut app = stack_app(stack.clone(), &[]);
+
+        let pane_rows = |app: &mut App| -> Vec<(bevy::ecs::entity::Entity, usize)> {
+            let mut rows: Vec<(usize, bevy::ecs::entity::Entity)> = app
+                .world_mut()
+                .query::<(Entity, &MainMenuRow, Option<&CompanionRow>, &Node)>()
+                .iter(app.world())
+                .filter(|(_, _, comp, node)| comp.is_none() && node.display != Display::None)
+                .map(|(e, row, _, _)| (row.slot, e))
+                .collect();
+            rows.sort();
+            rows.into_iter().map(|(slot, e)| (e, slot)).collect()
+        };
+
+        app.update();
+        let before = pane_rows(&mut app);
+        assert!(!before.is_empty(), "the selector draws its rows");
+
+        if let InputMode::Menu(stack) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            stack.push(MenuKind::MissionDetail {
+                log: MISSION_LOG_TOAU,
+                member: 0,
+            });
+        }
+        app.update();
+        assert_eq!(
+            pane_rows(&mut app),
+            before,
+            "the child opens as a new window; the selector's own nodes are untouched"
+        );
+
+        if let InputMode::Menu(stack) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            assert!(stack.pop());
+        }
+        app.update();
+        assert_eq!(
+            pane_rows(&mut app),
+            before,
+            "and ESC returns to those very same nodes"
         );
     }
 

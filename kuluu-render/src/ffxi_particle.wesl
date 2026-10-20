@@ -18,9 +18,9 @@ import bevy_pbr::render::fog as fog_fns;
 // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp NonZeroTwoTSS — the
 // textured default: stage 0 MODULATE2X(CURRENT=D, TEXTURE=T) on both channels, stage 1
 // MODULATE2X(CURRENT, TFACTOR) rgb / MODULATE4X(CURRENT, TFACTOR) alpha. D is the doubled
-// upload colour (CMoD3m.cpp PrepDX: `2 * byte`, clamped at 0xFF). in.color carries the D3m/sheet
-// byte/128 (ffxi_dat::d3m::VERTEX_COLOR_DIVISOR) unclamped, and fragment() saturates it to
-// reproduce that clamp.
+// upload colour (CMoD3m.cpp PrepDX: `2 * byte`, clamped at 0xFF). D3m input uses
+// byte/128 (ffxi_dat::d3m::VERTEX_COLOR_DIVISOR); ordinary SpriteSheet input uses byte/255.
+// .agents/skills/retail-observe/references/2026-10-20-sprite-sheet-color-stages.md Vertex color.
 // NonZeroOneTSS — same with stage 0 alpha SELECTARG1(DIFFUSE): the texture alpha drops out.
 // ZeroOneTSS — untextured (CMoD3m.cpp Draw: `data[0x04] == 0` -> SetTexture(0, nullptr)):
 // single stage MODULATE2X(CURRENT=D, TFACTOR) rgb / MODULATE4X(DIFFUSE, TFACTOR) alpha.
@@ -191,9 +191,8 @@ fn stage1(s0: vec4<f32>, d: vec4<f32>, f: vec4<f32>) -> vec4<f32> {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    // CMoD3m.cpp PrepDX clamps the doubled upload byte at 0xFF; the D3m/sheet templates store
-    // byte/128 unclamped, so a >128 byte reads above 1.0 and must saturate here. MMB colours
-    // are already <= 1.0 (byte/255).
+    // CMoD3m.cpp PrepDX clamps the doubled upload byte at 0xFF; D3m templates use byte/128.
+    // SpriteSheet and MMB colours are already <= 1.0 (byte/255).
     let d = min(in.color, vec4<f32>(1.0));
     var texel = vec4<f32>(1.0);
     if (data.params.w == PATH_D3M_TEXTURED

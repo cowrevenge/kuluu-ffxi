@@ -204,10 +204,9 @@ struct SpriteTemplate {
 // The fixed-function colour tables live in ffxi_particle.wesl (per stage, with D3D8 saturation
 // after every op): CMoD3m.cpp's TSS blocks for the D3m path (NonZeroTwoTSS textured default,
 // NonZeroOneTSS when renderStateFlags 0x1000 drops the texture alpha, ZeroOneTSS untextured) and
-// ZoneRenderer.cpp DoD3mDraw's tables for MMB meshes. The path selects which table; nothing is
-// pre-scaled on the CPU — D3m/sheet template colours carry stage 0's MODULATE2X via the /128
-// normalise (ffxi_dat::d3m::VERTEX_COLOR_DIVISOR), MMB colours are raw byte/255, and the factor
-// attribute carries the particle's TEXTUREFACTOR.
+// ZoneRenderer.cpp DoD3mDraw supplies the MMB tables.
+// D3m templates use byte/128; SpriteSheet and MMB templates use byte/255.
+// The factor attribute carries the particle's TEXTUREFACTOR.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum D3mDrawPath {
     // CMoD3m.cpp NonZeroTwoTSS / NonZeroOneTSS (the ignore flag picks between them).
@@ -3806,9 +3805,6 @@ fn rebuild_mesh(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock, mesh
             };
             positions.push((draw.world + oriented).to_array());
             uvs.push([uv[0] + g.tex_translate.x, uv[1] + g.tex_translate.y]);
-            // The template colour is stage 0's D argument verbatim (D3m/sheet: /128-normalised,
-            // MMB: raw byte/255); the per-particle F rides its own attribute. ffxi_particle.wesl
-            // runs the selected table against both, so nothing is folded in here.
             colors.push(vertex.to_array());
             factors.push(draw.factor_rgb.extend(draw.factor_alpha).to_array());
         }
@@ -4052,14 +4048,12 @@ fn sprite_sheet_templates(ss: &ParticleSpriteSheet) -> Vec<SpriteTemplate> {
                 positions: f.positions.iter().map(|p| Vec3::from_array(*p)).collect(),
                 uvs: f.uvs.clone(),
                 indices: (0..f.positions.len() as u32).collect(),
-                // FFXI vertex colors are 2x-overbright (see d3m.rs color parse); the venom-cloud
-                // tint is then modulated by the generator's init_color in rebuild_mesh.
                 colors: f
                     .colors
                     .iter()
                     .map(|c| {
                         Vec4::new(c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32)
-                            / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR
+                            / f32::from(u8::MAX)
                     })
                     .collect(),
             })
@@ -4786,6 +4780,31 @@ mod tests {
     }
 
     #[test]
+    fn real_woods_sprite_sheets_select_normal_alpha_stages() {
+        const WOODS_PINNED_DAT_ID: u32 = 341;
+        let Some(assets) = retail_assets(WOODS_PINNED_DAT_ID) else {
+            return;
+        };
+        for id in [*b"gl01", *b"gl04"] {
+            let generator = assets.particle_def(*b"myro", &id).unwrap();
+            assert_eq!(generator.mesh_kind, ParticleMeshKind::SpriteSheet);
+            assert_eq!(generator.blend_byte, 0);
+            assert!(!generator.ignore_texture_alpha);
+            assert!(!ignores_texture_alpha(generator, D3mDrawPath::D3m));
+            let sheet = assets.sprite_sheet(*b"myro", &generator.mesh_id).unwrap();
+            let templates = sprite_sheet_templates(sheet);
+            for (frame, template) in sheet.frames.iter().zip(&templates) {
+                for (bytes, diffuse) in frame.colors.iter().zip(&template.colors) {
+                    assert_eq!(
+                        *diffuse,
+                        Vec4::from_array(bytes.map(f32::from)) / f32::from(u8::MAX)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn lamp_sprite_keeps_authored_color_and_alpha() {
         const AUTHORED_COLOR: [f32; 4] = [0.25, 0.5, 0.75, 0.071];
         let mut d = def(ROUTINE_FPS, 1.0, 1);
@@ -5180,11 +5199,6 @@ mod tests {
         const STAGE_MODULATE_2X: f32 = 2.0;
         const STAGE_MODULATE_4X: f32 = 4.0;
 
-        // Mirror of ffxi_particle.wesl fragment(): d is the template colour (D3m/sheet stored
-        // /128, MMB raw byte/255), texel the sampled T (white on untextured paths), f the
-        // per-particle factor in raw byte/255. DoD3mDraw's textured table modulates TEXTURE
-        // against CURRENT with a4 set and against TFACTOR with it clear, stage 1 taking the
-        // other argument — both channels.
         fn retail_stages(
             path: D3mDrawPath,
             ignore_texture_alpha: bool,
@@ -5272,6 +5286,32 @@ mod tests {
             );
             assert_eq!(one[..3], two[..3]);
             assert!((one[3] - two[3] / 2.0).abs() < 1e-6);
+        }
+
+        #[test]
+        fn sprite_sheet_vertex_bytes_enter_stages_once() {
+            const SPRITE_COLOR_PINNED_BYTE: u8 = 128;
+            let sheet = ParticleSpriteSheet {
+                category: String::new(),
+                id: String::new(),
+                frames: vec![ffxi_dat::sprite_sheet::SpriteFrame {
+                    positions: vec![[0.0; 3]],
+                    uvs: vec![[0.0; 2]],
+                    colors: vec![[SPRITE_COLOR_PINNED_BYTE; 4]],
+                }],
+            };
+            let diffuse = sprite_sheet_templates(&sheet)[0].colors[0];
+            let normalized = f32::from(SPRITE_COLOR_PINNED_BYTE) / f32::from(u8::MAX);
+            assert_eq!(diffuse, Vec4::splat(normalized));
+            let output = retail_stages(
+                D3mDrawPath::D3m,
+                false,
+                diffuse,
+                Vec4::splat(0.25),
+                Vec4::splat(0.25),
+            );
+            assert_eq!(output[..3], [normalized / STAGE_MODULATE_4X; 3]);
+            assert_eq!(output[3], normalized / STAGE_MODULATE_2X);
         }
 
         // D3D saturates each stage on its own: a byte-255 vertex (stored 2.0 at /128) clips to

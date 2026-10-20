@@ -55,14 +55,13 @@ pub enum InputMode {
     Arrange,
 }
 
-/// The right mouse button's law (owner ruling, no capture: "RMB is supposed to
-/// be ESC/Cancel"): over a window surface its press acts as the bound `NavCancel`
-/// key, so every surface keeps its own Esc handler and none gains a mouse path.
-/// Two places already own RMB: World, where it feeds drag-aim and item rotation
-/// (`mouse_camera_system` spends both only in that mode), which is why there
-/// nothing answers except an open trade - the trade window does not change
-/// `InputMode` at all; and Chat/Arrange, where a stray cancel would eat typed
-/// text or drop furniture mid-placement [I].
+/// The right mouse button's law (owner ruling, no capture: "RMB is supposed to be ESC/Cancel";
+/// holding it - either button - IS the camera drag). Over a window surface a click press + release
+/// that never engaged as a drag acts as the bound `NavCancel` key, so every surface keeps its own
+/// Esc handler and none gains a mouse path. Two places already own RMB: World, where it feeds
+/// drag-aim and item rotation (`mouse_camera_system` spends both only in that mode), which is why there nothing answers except an
+/// open trade - the trade window does not change `InputMode` at all; and Chat/Arrange, where a stray cancel would eat typed text or
+/// drop furniture mid-placement [I].
 pub fn right_button_is_cancel(mode: &InputMode, trade_open: bool) -> bool {
     match mode {
         InputMode::World => trade_open,

@@ -117,12 +117,15 @@ python3 scripts/macos.py --profile local decide /tmp/ffxi-menu.png --character '
 Only `decide` sends an image to Jev.
 It uses the pinned model `jev-1.14.0` and resizes a temporary image to the API limits.
 Jev image support remains [experimental](https://docs.typesafe.ai/images).
-Missing credentials, API failures, invalid responses, and low confidence produce `status: needs_vision`.
-The result supplies a capture path, hash, instructions, and JSON schema.
-Use `--vision` to select native vision without an API call.
-
-Open the capture with the current agent's image tool, or give the request to a vision-capable subagent.
-If vision is unavailable, stop and report the missing capability.
+The request includes `TypeSafe-Danger-Zone-Images: true` and an image asset referenced by `state.screen_image`.
+Results distinguish `credential_error`, `api_error`, `schema_error`, `capture_changed`, `local_error`, and `low_confidence`.
+Each failure supplies a diagnostic and capture hash.
+Low confidence also supplies the classification, proposed action, and measured confidence.
+Correct access or schema problems before retrying Jev.
+For low confidence, capture a fresh frame or select native vision explicitly.
+A Jev failure does not automatically transfer routine frames to a full model.
+Use `--vision` to request native vision without an API call.
+Use native vision for an explicit request or a true exception that requires inspection.
 Save the returned JSON and validate it:
 
 ```bash
@@ -132,17 +135,30 @@ python3 scripts/macos.py --profile local decide /tmp/ffxi-menu.png \
 
 The default decision task covers login: `enter`, `wait`, or `stop`.
 Use `--task dialogue` for plain story or NPC dialogue.
-This task permits Enter only when a visible advance marker appears without choices or a menu.
-It stops for choices, agreements, errors, gameplay, or low confidence.
-The dialogue task derives its action from one screen classification with confidence of at least 0.9.
+For plain dialogue, Enter requires a visible advance marker without choices or a menu.
+It stops for choices, errors, or gameplay.
+For low confidence, the controller waits and captures a fresh frame without input.
+It permits at most two consecutive retries within the overall time limit.
+A valid decision resets that retry count.
+Agreement actions use the separate caller policy.
+The dialogue task derives routine actions from the screen classification.
+The minimum confidence is 0.9.
+For an agreement, Jev separately proposes the visible action.
 
 ```bash
 python3 scripts/macos.py --profile local decide /tmp/ffxi-dialogue.png \
   --character 'Exact Name' --task dialogue
 ```
 
-Neither provider accepts agreements or sends input automatically.
-Use existing session approval for separate agreement handling when the harness permits it.
+The `decide` command sends no input.
+The bounded controller applies the caller policy before input.
+Its portable default, `--agreement-policy caller`, reports `caller_policy_required` for an agreement proposal.
+When the active harness and session permit the action, select `--agreement-policy permitted`.
+The controller can then execute that validated proposal within its action and time limits.
+When Codex requires confirmation for that action, select `--agreement-policy confirmation_required`.
+The result reports `policy_required` and preserves the Jev proposal.
+Jev does not decide authorization.
+Do not report a caller-policy requirement as a vision failure.
 
 For routine dialogue, use the bounded Jev controller after the session permits screenshot uploads and game input.
 Reuse approval for the same service and comparison scope.

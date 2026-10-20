@@ -168,14 +168,16 @@ class MacosPackageTests(unittest.TestCase):
         self.assertEqual(m.credential(key), 'test-key')
 
     def test_missing_key_http_timeout_and_bad_answer_request_vision(self):
-        errors = [FileNotFoundError(), ValueError('HTTP 503'), TimeoutError(), KeyError('answers')]
-        for error in errors:
+        errors = [(m.DecisionFailure('credential_error', 'Missing private credential.'), 'credential_error'),
+                  (m.DecisionFailure('api_error', 'HTTP 503'), 'api_error'),
+                  (TimeoutError(), 'api_error'), (KeyError('answers'), 'schema_error')]
+        for error, expected in errors:
             with self.subTest(error=type(error)), patch.object(m, 'jev_decide', side_effect=error):
                 m.decide({}, self.args)
                 result = json.loads(self.image.with_suffix('.decision.json').read_text())
-                self.assertEqual(result['status'], 'needs_vision')
+                self.assertEqual(result['status'], expected)
                 self.assertEqual(result['image_sha256'], m.digest(self.image))
-                self.assertIn('schema', result)
+                self.assertIn('diagnostic', result)
 
     def resize_stub(self, arguments, **kwargs):
         Path(arguments[-1]).write_bytes(Path(arguments[3]).read_bytes())
@@ -190,7 +192,7 @@ class MacosPackageTests(unittest.TestCase):
                     patch.object(m.urllib.request, 'urlopen', return_value=io.StringIO(json.dumps(payload))):
                 m.decide(config, self.args)
                 result = json.loads(self.image.with_suffix('.decision.json').read_text())
-                self.assertEqual(result['status'], 'needs_vision')
+                self.assertEqual(result['status'], 'schema_error')
 
     def test_capture_replacement_cannot_relabel_an_old_decision(self):
         original = self.image.read_bytes()
@@ -209,7 +211,7 @@ class MacosPackageTests(unittest.TestCase):
             m.decide(config, self.args)
         result = json.loads(self.image.with_suffix('.decision.json').read_text())
         self.assertEqual(submitted, [original])
-        self.assertEqual(result['status'], 'needs_vision')
+        self.assertEqual(result['status'], 'capture_changed')
         raw = json.loads(self.image.with_suffix('.jev.json').read_text())
         self.assertEqual(raw['image_sha256'], hashlib.sha256(original).hexdigest())
         self.assertNotEqual(raw['image_sha256'], result['image_sha256'])
@@ -233,7 +235,50 @@ class MacosPackageTests(unittest.TestCase):
         with patch.object(m, 'jev_decide', return_value=response):
             m.decide({}, self.args)
         result = json.loads(self.image.with_suffix('.decision.json').read_text())
-        self.assertEqual(result['status'], 'needs_vision')
+        self.assertEqual(result['status'], 'low_confidence')
+
+    def test_image_request_header_assets_and_reference(self):
+        payload = {'answers': {'screen': {'choice': 'gameplay', 'confidence': 1},
+                               'next_key': {'choice': 'stop', 'confidence': 1}}}
+        def response(request, **kwargs):
+            body = json.loads(request.data)
+            headers = {key.lower(): value for key, value in request.header_items()}
+            self.assertEqual(headers['typesafe-danger-zone-images'], 'true')
+            asset = body['assets'][body['state']['screen_image']]
+            self.assertEqual(asset['type'], 'image')
+            self.assertEqual(asset['format'], 'png')
+            self.assertEqual(base64.b64decode(asset['data_base64']), self.image.read_bytes())
+            return io.StringIO(json.dumps(payload))
+        with patch.object(m, 'run', side_effect=self.resize_stub), \
+                patch.object(m, 'credential', return_value='private-test-key'), \
+                patch.object(m.urllib.request, 'urlopen', side_effect=response):
+            output = m.decide(dict(jev_model=m.JEV_MODEL, jev_key_file='/not-read'), self.args)
+        self.assertEqual(output['status'], 'decision')
+        self.assertNotIn('private-test-key', json.dumps(output))
+
+    def test_agreement_perception_is_independent_of_caller_policy(self):
+        response = dict(seconds=.1, image_sha256=m.digest(self.image), response=dict(answers={
+            'screen': dict(choice='agreement', confidence=1),
+            'next_key': dict(choice='enter', confidence=1)}))
+        for policy, status in [('permitted', 'decision'), ('confirmation_required', 'policy_required'),
+                               ('caller', 'caller_policy_required')]:
+            self.args.agreement_policy = policy
+            with self.subTest(policy=policy), patch.object(m, 'jev_decide', return_value=response):
+                output = m.decide({}, self.args)
+            self.assertEqual(output['status'], status)
+            self.assertEqual(output['decision']['screen'], 'agreement')
+            self.assertEqual(output['decision']['next_key'], 'enter')
+            self.assertEqual(output['provider'], 'jev')
+
+    def test_invalid_confidence_is_schema_error_not_low_confidence(self):
+        for confidence in [None, '0.8', float('nan'), True]:
+            response = dict(seconds=.1, image_sha256=m.digest(self.image), response=dict(answers={
+                'screen': dict(choice='dialogue', confidence=confidence),
+                'next_key': dict(choice='enter', confidence=1)}))
+            with self.subTest(confidence=confidence), patch.object(m, 'jev_decide', return_value=response):
+                output = m.decide({}, self.args)
+            self.assertEqual(output['status'], 'schema_error')
+            self.assertIn('confidence', output['diagnostic'].lower())
 
     def test_forced_vision_never_calls_jev(self):
         self.args.vision = True
@@ -283,13 +328,13 @@ class MacosPackageTests(unittest.TestCase):
         self.assertEqual(saved['decision']['screen'], 'dialogue')
         self.assertEqual(submitted[0]['state']['task'], 'dialogue')
         self.assertIn('choice', submitted[0]['questions']['screen']['criteria'])
-        self.assertNotIn('next_key', submitted[0]['questions'])
+        self.assertIn('next_key', submitted[0]['questions'])
 
     def test_dialogue_screen_policy_stops_on_choices_and_low_confidence(self):
         self.args.task = 'dialogue'
         config = dict(jev_model=m.JEV_MODEL, jev_key_file='/not-read')
         for screen, confidence, status, action in [('choice', 1, 'decision', 'stop'),
-                                                  ('dialogue', .5, 'needs_vision', None),
+                                                  ('dialogue', .5, 'low_confidence', None),
                                                   ('dialogue', 1, 'decision', 'enter')]:
             payload = {'answers': {'screen': {'choice': screen, 'confidence': confidence}}}
             with self.subTest(screen=screen, confidence=confidence), \
@@ -326,13 +371,69 @@ class MacosPackageTests(unittest.TestCase):
         self.assertEqual(len(summary['captures']), key.call_count + 1)
 
     def test_dialogue_driver_stops_on_choice_or_vision_request(self):
-        for screen, status in [('choice', 'decision'), ('dialogue', 'needs_vision')]:
+        for screen, status in [('choice', 'decision'), ('dialogue', 'low_confidence')]:
             args = type('Args', (), dict(folder=self.root / status, character='Test', max_actions=10, max_seconds=10))()
             capture, decide = self.dialogue_driver_stubs(screen, status)
             with patch.object(m, 'capture', side_effect=capture), patch.object(m, 'decide', side_effect=decide), \
                     patch.object(m, 'key') as key:
                 m.drive_dialogue({}, args)
             key.assert_not_called()
+
+    def test_controller_applies_injected_agreement_policy_before_input(self):
+        for policy, count, reason in [('permitted', 1, 'action_or_time_limit'),
+                                      ('confirmation_required', 0, 'policy_required')]:
+            args = type('Args', (), dict(folder=self.root / policy, character='Test', max_actions=1,
+                                         max_seconds=10, agreement_policy=policy))()
+            capture, unused = self.dialogue_driver_stubs()
+            def decide(config, decision_args):
+                decision = dict(image_sha256=m.digest(decision_args.image), screen='agreement',
+                                next_key='enter', confidence=1)
+                output = dict(status='decision', decision=decision)
+                decision_args.image.with_suffix('.decision.json').write_text(json.dumps(output))
+            with self.subTest(policy=policy), patch.object(m, 'capture', side_effect=capture), \
+                    patch.object(m, 'decide', side_effect=decide), patch.object(m, 'key') as key, \
+                    patch.object(m, 'dialogue_fingerprint', return_value='agreement'), patch.object(m.time, 'sleep'):
+                result = m.drive_dialogue({}, args)
+            self.assertEqual(key.call_count, count)
+            self.assertEqual(result['reason'], reason)
+
+    def test_controller_rejects_low_confidence_permitted_agreement(self):
+        args = type('Args', (), dict(folder=self.root / 'low-agreement', character='Test', max_actions=1,
+                                     max_seconds=10, agreement_policy='permitted'))()
+        capture, unused = self.dialogue_driver_stubs()
+        def decide(config, decision_args):
+            decision = dict(image_sha256=m.digest(decision_args.image), screen='agreement',
+                            next_key='enter', confidence=.5)
+            decision_args.image.with_suffix('.decision.json').write_text(json.dumps(dict(status='decision', decision=decision)))
+        with patch.object(m, 'capture', side_effect=capture), patch.object(m, 'decide', side_effect=decide), \
+                patch.object(m, 'key') as key:
+            result = m.drive_dialogue({}, args)
+        key.assert_not_called()
+        self.assertEqual(result['reason'], 'low_confidence')
+
+    def test_controller_retries_low_confidence_without_input(self):
+        for recover in (True, False):
+            args = type('Args', (), dict(folder=self.root / ('recover' if recover else 'exhaust'), character='Test',
+                                         max_actions=10, max_seconds=10))()
+            capture, unused = self.dialogue_driver_stubs()
+            statuses = ['low_confidence'] * m.MAX_LOW_CONFIDENCE_RETRIES
+            statuses += (['decision'] + ['low_confidence'] * m.MAX_LOW_CONFIDENCE_RETRIES + ['gameplay']) if recover else ['low_confidence']
+            statuses = iter(statuses)
+            def decide(config, decision_args):
+                status = next(statuses)
+                screen = 'gameplay' if status == 'gameplay' else 'dialogue'
+                decision = dict(image_sha256=m.digest(decision_args.image), screen=screen,
+                                next_key='stop' if screen == 'gameplay' else 'enter', confidence=1)
+                decision_args.image.with_suffix('.decision.json').write_text(json.dumps(
+                    dict(status='decision' if status == 'gameplay' else status, decision=decision)))
+            with self.subTest(recover=recover), patch.object(m, 'capture', side_effect=capture), \
+                    patch.object(m, 'decide', side_effect=decide), patch.object(m, 'key') as key, \
+                    patch.object(m, 'dialogue_fingerprint', return_value='text'), patch.object(m.time, 'sleep'):
+                result = m.drive_dialogue({}, args)
+            self.assertEqual(key.call_count, int(recover))
+            self.assertEqual(result['reason'], 'gameplay' if recover else 'low_confidence')
+            self.assertEqual(sum(entry.get('recovery') == 'fresh_capture_without_input'
+                                 for entry in result['captures']), m.MAX_LOW_CONFIDENCE_RETRIES * (2 if recover else 1))
 
     def test_dialogue_driver_rejects_excessive_limits_before_host_access(self):
         args = type('Args', (), dict(folder=self.root / 'drive', character='Test', max_actions=m.MAX_DIALOGUE_ACTIONS + 1, max_seconds=10))()

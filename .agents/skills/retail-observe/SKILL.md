@@ -70,16 +70,27 @@ Stop if two consecutive inputs produce no visible change.
 Prefer a bounded Jev controller for routine login and dialogue when Jev is configured.
 Give the controller an observable goal, permitted actions, time limit, and failure conditions.
 Let it classify fresh captures and execute validated actions without full-model review of each image.
-Stop for unexpected screens, low confidence, or two consecutive actions without the expected change.
+Stop for unexpected screens or two consecutive actions without the expected change.
+For low confidence, permit at most two fresh-capture retries without input.
+Keep the overall time limit.
 Use the main agent for failed actions, unusual states, and key evidence images.
 Do not duplicate every image inspection across agents.
 
 On macOS, `decide` uses Jev when configured.
-If it returns `needs_vision`, open the named capture with native vision or a vision-capable subagent.
-Give a subagent the request and capture, without input control.
-Validate its JSON with `decide --result` before use.
-If vision is unavailable, stop with a clear diagnostic.
-A bounded controller can execute decisions after schema, confidence, and capture-hash validation.
+The result separates perception failures from caller policy decisions.
+For `low_confidence`, capture a fresh frame or explicitly select native vision.
+For `api_error` or `credential_error`, correct the reported access problem.
+For `schema_error` or `capture_changed`, correct the response or capture binding before input.
+Do not automatically send routine frames to a full model after a Jev failure.
+Use native vision when explicitly selected or when a true exception needs inspection.
+Validate its JSON with `decide --result` and the same task before use.
+A bounded controller can execute decisions after schema, confidence, capture-hash, and caller-policy validation.
+Pass the active caller policy with `--agreement-policy`.
+The portable default, `caller`, requests a policy decision without changing the Jev classification.
+Use `permitted` only when the active harness and session authorize the proposed agreement action.
+If Codex requires confirmation for that action, select `confirmation_required`.
+That result reports `policy_required`, not a vision failure.
+Jev proposes actions; the caller applies authorization and the active harness policy.
 Keep one input driver per client.
 Inspect key evidence images before making a visual claim.
 

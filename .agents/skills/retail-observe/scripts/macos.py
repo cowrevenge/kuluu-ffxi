@@ -44,6 +44,7 @@ DIALOGUE_TEXT_TOP_FRACTION = 0.75
 DIALOGUE_TEXT_RIGHT_FRACTION = 0.8
 DIALOGUE_WAIT_SECONDS = 1
 MAX_INPUT_CAPTURE_AGE_SECONDS = 60
+MAX_LOW_CONFIDENCE_RETRIES = 2
 DECISION_CONFIDENCE_THRESHOLD = 0.9
 DEFAULT_HOLD_SECONDS = '0.2'
 WIN32_KEY_COLUMN = 3
@@ -335,6 +336,19 @@ def credential(path):
     return value
 
 
+class DecisionFailure(ValueError):
+    def __init__(self, status, diagnostic):
+        super().__init__(diagnostic)
+        self.status = status
+
+
+def jev_credential(config):
+    try:
+        return credential(Path(config['jev_key_file']))
+    except (OSError, ValueError, KeyError):
+        raise DecisionFailure('credential_error', 'Jev credentials are absent, unreadable, or not private.') from None
+
+
 def jev_decide(config, image, character, task='login'):
     image = image.expanduser().resolve()
     png_size(image)
@@ -362,12 +376,12 @@ def jev_decide(config, image, character, task='login'):
                                         'gameplay': 'A character is inside a game zone with a gameplay HUD.',
                                         'error': 'An error dialog.', 'other': 'An unclear or different screen.'}},
                 'next_key': {'type': 'choice',
-                             'instructions': 'Suggest one action. Never accept agreements or dismiss errors. '
+                             'instructions': 'Propose one visible action. Do not send input or decide authorization. '
                                              'Use state.character as the exact character name.',
                              'criteria': {'enter': 'Select Character is highlighted, or the exact requested character '
-                                                  'is highlighted, or Yes is highlighted for that character login.',
+                                                  'is highlighted, Yes is highlighted for that character login, or the agreement continue action is selected.',
                                           'wait': 'Loading or connecting requires no input.',
-                                          'stop': 'Gameplay, agreement, error, different character, or unclear state.'}}}}
+                                          'stop': 'Gameplay, error, different character, or unclear action.'}}}}
     if task == 'dialogue':
         body['state']['task'] = task
         body['questions']['screen']['criteria'] = {
@@ -379,9 +393,16 @@ def jev_decide(config, image, character, task='login'):
             'gameplay': 'A controllable character in a zone without active story or NPC dialogue.',
             'error': 'An error dialog.',
             'other': 'An unclear or different screen.'}
-        del body['questions']['next_key']
+        body['questions']['next_key']['instructions'] = ('Propose one visible action for this dialogue task. '
+            'Use Enter for plain dialogue with an advance marker or a selected agreement continue action. '
+            'Use Wait for loading or text that is still appearing. Otherwise use Stop. '
+            'Do not send input or decide authorization.')
+        body['questions']['next_key']['criteria'] = {
+            'enter': 'Plain dialogue has an advance marker, or the agreement continue action is selected.',
+            'wait': 'Loading or dialogue text is still appearing.',
+            'stop': 'Choices, gameplay, errors, or an unclear action.'}
     request = urllib.request.Request(JEV_URL, data=json.dumps(body).encode(),
-                                     headers={'Authorization': 'Bearer ' + credential(Path(config['jev_key_file'])),
+                                     headers={'Authorization': 'Bearer ' + jev_credential(config),
                                               'Content-Type': 'application/json',
                                               'TypeSafe-Danger-Zone-Images': 'true'})
     started = time.monotonic()
@@ -389,19 +410,19 @@ def jev_decide(config, image, character, task='login'):
         with urllib.request.urlopen(request, timeout=COMMAND_TIMEOUT_SECONDS) as response:
             result = json.load(response)
     except urllib.error.HTTPError as error:
-        raise ValueError(f'Jev returned HTTP {error.code}. No input was sent.') from None
+        raise DecisionFailure('api_error', f'Jev returned HTTP {error.code}. No input was sent.') from None
     if not isinstance(result, dict) or not isinstance(result.get('answers'), dict):
-        raise ValueError('Jev returned an invalid answer structure. No input was sent.')
+        raise DecisionFailure('schema_error', 'Jev answers must contain screen and next_key objects.')
     answers = result['answers']
-    if task == 'dialogue' and isinstance(answers.get('screen'), dict):
+    if task == 'dialogue' and isinstance(answers.get('screen'), dict) and answers['screen'].get('choice') != 'agreement':
         screen = answers['screen']
         action = {'dialogue': 'enter', 'dialogue_typing': 'wait', 'loading': 'wait'}.get(screen.get('choice'), 'stop')
         answers['next_key'] = dict(type='choice', choice=action, confidence=screen.get('confidence'),
                                    policy='dialogue-screen')
     if any(not isinstance(answers.get(field), dict) for field in ('screen', 'next_key')):
-        raise ValueError('Jev returned an invalid answer structure. No input was sent.')
+        raise DecisionFailure('schema_error', 'Jev answers must contain screen and next_key objects.')
     if answers['next_key'].get('choice') not in ('enter', 'wait', 'stop'):
-        raise ValueError('Jev returned an unsupported decision. No input was sent.')
+        raise DecisionFailure('schema_error', 'Jev next_key must be enter, wait, or stop.')
     output = dict(image=str(image), image_sha256=source_hash,
                   submitted_sha256=hashlib.sha256(image_data).hexdigest(),
                   seconds=round(time.monotonic() - started, 3), response=result)
@@ -441,48 +462,95 @@ def validate_decision(result, image, task='login'):
     return result
 
 
+def caller_policy(decision, agreement_policy='caller'):
+    if agreement_policy not in ('caller', 'permitted', 'confirmation_required'):
+        raise DecisionFailure('policy_error', 'Unsupported caller agreement policy.')
+    if decision['screen'] != 'agreement' or agreement_policy == 'permitted':
+        return dict(status='permitted', reason='caller_authorized' if decision['screen'] == 'agreement' else 'routine_task')
+    if agreement_policy == 'confirmation_required':
+        return dict(status='policy_required', reason='active_harness_policy',
+                    diagnostic='The active harness requires confirmation for this agreement action.')
+    return dict(status='caller_policy_required', reason='policy_not_supplied',
+                diagnostic='The caller must apply its active harness policy to the proposed agreement action.')
+
+
+def validate_proposal(decision, image, task):
+    if not isinstance(decision, dict) or set(decision) != set(DECISION_SCHEMA['required']):
+        raise DecisionFailure('schema_error', 'Decision fields do not match the requested schema.')
+    if decision['image_sha256'] != digest(image):
+        raise DecisionFailure('capture_changed', 'The capture changed after classification. Capture a fresh image.')
+    screens = SCREENS + ('dialogue', 'dialogue_typing', 'choice') if task == 'dialogue' else SCREENS
+    if decision['screen'] not in screens or decision['next_key'] not in ('enter', 'wait', 'stop'):
+        raise DecisionFailure('schema_error', 'The screen or proposed action is unsupported.')
+    confidence = decision['confidence']
+    if type(confidence) not in (int, float) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
+        raise DecisionFailure('schema_error', 'Confidence must be a finite number from zero to one.')
+    return decision
+
+
+def vision_request(image, character, task):
+    schema = {**DECISION_SCHEMA, 'properties': {**DECISION_SCHEMA['properties']}}
+    if task == 'dialogue':
+        schema['properties']['screen'] = {'enum': list(SCREENS) + ['dialogue', 'dialogue_typing', 'choice']}
+    return dict(status='vision_requested', provider='vision', reason='explicit_selection',
+                image=str(image), image_sha256=digest(image), character=character, schema=schema,
+                instructions='Classify the capture and propose one action. Return the requested JSON. '
+                             'Do not send input or decide authorization. The caller applies its active harness policy. '
+                             'Validate the result with decide --result and the same task before use.')
+
+
 def decide(config, args):
     image = args.image.expanduser().resolve()
     png_size(image)
     task = getattr(args, 'task', 'login')
     if task not in ('login', 'dialogue'):
         raise ValueError('Unsupported decision task.')
-    if args.result:
-        result = validate_decision(json.loads(args.result.read_text()), image, task)
-        output = dict(status='decision', provider='vision', decision=result, image=str(image))
+    if args.vision and not args.result:
+        output = vision_request(image, args.character, task)
     else:
+        provider = 'vision' if args.result else 'jev'
         try:
-            if args.vision:
-                raise ValueError('Vision was selected.')
-            result = jev_decide(config, image, args.character, task)
-            answers = result['response']['answers']
-            decision = dict(image_sha256=result['image_sha256'], screen=answers['screen']['choice'],
-                            next_key=answers['next_key']['choice'],
-                            confidence=min(answers['screen']['confidence'], answers['next_key']['confidence']))
-            validate_decision(decision, image, task)
+            seconds = None
+            if args.result:
+                decision = json.loads(args.result.read_text())
+            else:
+                result = jev_decide(config, image, args.character, task)
+                answers = result['response']['answers']
+                confidences = [answers[field]['confidence'] for field in ('screen', 'next_key')]
+                if any(type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1
+                       for value in confidences):
+                    raise DecisionFailure('schema_error', 'Jev confidence must be a finite number from zero to one.')
+                decision = dict(image_sha256=result['image_sha256'], screen=answers['screen']['choice'],
+                                next_key=answers['next_key']['choice'], confidence=min(confidences))
+                seconds = result['seconds']
+            validate_proposal(decision, image, task)
             if decision['confidence'] < DECISION_CONFIDENCE_THRESHOLD:
-                raise ValueError('Jev confidence requires vision review.')
-            output = dict(status='decision', provider='jev', decision=decision,
-                          image=str(image), seconds=result['seconds'])
-        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-            output = dict(status='needs_vision', provider='vision', reason=type(error).__name__, image=str(image),
-                          image_sha256=digest(image), character=args.character, schema=DECISION_SCHEMA,
-                          instructions='Open this capture with a vision-capable agent or subagent. '
-                                       'Return only the requested JSON. Identify the exact requested character. '
-                                       'Use Enter only for Select Character, that character, or its Yes login confirmation. '
-                                       'Use Wait only for loading. Use Stop for gameplay, agreements, errors, or uncertainty. '
-                                       'Do not send input. Validate the result with decide --result before use.')
-            if task == 'dialogue':
-                output['schema'] = {**DECISION_SCHEMA, 'properties': {
-                    **DECISION_SCHEMA['properties'], 'screen': {'enum': list(SCREENS) + ['dialogue', 'dialogue_typing', 'choice']}}}
-                output['instructions'] = (
-                    'Inspect this capture. Use Enter only for plain dialogue with a visible advance marker. '
-                    'Use Wait only for loading or plain dialogue that is still revealing text. '
-                    'Stop for choices, gameplay, agreements, errors, or uncertainty. '
-                    'Do not send input. Validate the JSON with decide --task dialogue --result before use.')
+                output = dict(status='low_confidence', provider=provider, decision=decision, image=str(image),
+                              diagnostic=f"Confidence {decision['confidence']} is below {DECISION_CONFIDENCE_THRESHOLD}.",
+                              next_step='Capture a fresh frame or select native vision explicitly.')
+            else:
+                policy = caller_policy(decision, getattr(args, 'agreement_policy', 'caller'))
+                if policy['status'] == 'permitted' and decision['screen'] != 'agreement':
+                    validate_decision(decision, image, task)
+                output = dict(status=policy['status'] if policy['status'] != 'permitted' else 'decision',
+                              provider=provider, decision=decision, caller_policy=policy, image=str(image), seconds=seconds)
+        except DecisionFailure as error:
+            output = dict(status=error.status, provider=provider, diagnostic=str(error), image=str(image))
+        except (TimeoutError, urllib.error.URLError) as error:
+            output = dict(status='api_error', provider=provider, diagnostic=type(error).__name__ + ': Jev request failed.', image=str(image))
+        except ValueError as error:
+            output = dict(status='schema_error', provider=provider, diagnostic=str(error), image=str(image))
+        except (KeyError, TypeError) as error:
+            output = dict(status='schema_error', provider=provider,
+                          diagnostic=type(error).__name__ + ': Required decision fields are absent or have invalid types.', image=str(image))
+        except (OSError, subprocess.SubprocessError) as error:
+            output = dict(status='local_error', provider=provider,
+                          diagnostic=type(error).__name__ + ': Local image operation failed.', image=str(image))
+    output['image_sha256'] = digest(image)
     output['task'] = task
     private_write(image.with_suffix('.decision.json'), (json.dumps(output, indent=2) + '\n').encode())
     print(json.dumps(output, indent=2))
+    return output
 
 
 def dialogue_fingerprint(image):
@@ -521,17 +589,37 @@ def drive_dialogue(config, args):
 def drive_dialogue_steps(config, args, folder, result, deadline):
     previous = None
     unchanged = 0
+    low_confidence_retries = 0
     while time.monotonic() < deadline:
         image = capture(config, folder / f'frame-{len(result["captures"]):03}.png')
-        decision_args = argparse.Namespace(image=image, character=args.character, task='dialogue', result=None, vision=False)
+        decision_args = argparse.Namespace(image=image, character=args.character, task='dialogue', result=None, vision=False,
+                                           agreement_policy=getattr(args, 'agreement_policy', 'caller'))
         decide(config, decision_args)
         output = json.loads(image.with_suffix('.decision.json').read_text())
         entry = dict(image=str(image), image_sha256=digest(image), decision=str(image.with_suffix('.decision.json')))
         result['captures'].append(entry)
+        decision = validate_proposal(output['decision'], image, 'dialogue') if output['status'] == 'decision' else None
+        if output['status'] == 'low_confidence' or (decision and decision['confidence'] < DECISION_CONFIDENCE_THRESHOLD):
+            if low_confidence_retries >= MAX_LOW_CONFIDENCE_RETRIES:
+                result['reason'] = 'low_confidence'
+                result['diagnostic'] = output.get('diagnostic', 'The controller rejected a decision below the confidence threshold.')
+                break
+            low_confidence_retries += 1
+            entry['recovery'] = 'fresh_capture_without_input'
+            time.sleep(DIALOGUE_WAIT_SECONDS)
+            continue
         if output['status'] != 'decision':
-            result['reason'] = 'needs_vision'
+            result['reason'] = output['status']
+            result['diagnostic'] = output.get('diagnostic', output.get('caller_policy', {}).get('diagnostic'))
             break
-        decision = validate_decision(output['decision'], image, 'dialogue')
+        low_confidence_retries = 0
+        policy = caller_policy(decision, getattr(args, 'agreement_policy', 'caller'))
+        if policy['status'] != 'permitted':
+            result['reason'] = policy['status']
+            result['diagnostic'] = policy['diagnostic']
+            break
+        if decision['screen'] != 'agreement':
+            validate_decision(decision, image, 'dialogue')
         if decision['next_key'] == 'stop':
             result['reason'] = decision['screen']
             break
@@ -589,10 +677,12 @@ def main():
     decide_parser.add_argument('--character', required=True)
     decide_parser.add_argument('--task', choices=('login', 'dialogue'), default='login')
     decide_parser.add_argument('--vision', action='store_true')
+    decide_parser.add_argument('--agreement-policy', choices=('caller', 'permitted', 'confirmation_required'), default='caller')
     decide_parser.add_argument('--result', type=Path)
     dialogue_parser = sub.add_parser('drive-dialogue')
     dialogue_parser.add_argument('folder', type=Path)
     dialogue_parser.add_argument('--character', required=True)
+    dialogue_parser.add_argument('--agreement-policy', choices=('caller', 'permitted', 'confirmation_required'), default='caller')
     dialogue_parser.add_argument('--max-actions', type=int, default=MAX_DIALOGUE_ACTIONS)
     dialogue_parser.add_argument('--max-seconds', type=int, default=MAX_DIALOGUE_SECONDS)
     sub.add_parser('restore')
@@ -625,7 +715,7 @@ def main():
                 credential(Path(config['jev_key_file']))
                 print('Jev credential permissions passed. API access is checked only by decide.')
             except (OSError, ValueError):
-                print('Jev credential is unavailable. Decide will request vision fallback.')
+                print('Jev credential is unavailable. Decide will report credential_error.')
         else:
             print('Jev credential is absent. Capture and input do not require Jev.')
     elif args.command == 'capture':

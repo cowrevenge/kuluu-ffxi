@@ -3059,7 +3059,11 @@ mod menu_key_tests {
 
         // ur/65: the grey Add-ons row (this snapshot reports nothing for it)
         // refuses its select — no window opens.
-        stack.current_mut().unwrap().cursor = 0;
+        let addons = kuluu_render::hud::menu::MISSION_SELECTOR_LABELS_PINNED
+            .iter()
+            .position(|l| *l == "Add-ons")
+            .unwrap();
+        stack.current_mut().unwrap().cursor = addons;
         let markers = world.resource_mut::<MapMarkers>();
         harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
         assert_eq!(stack.current().unwrap().kind, MenuKind::MissionList);

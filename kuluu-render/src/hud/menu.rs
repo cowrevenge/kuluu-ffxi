@@ -5929,40 +5929,39 @@ pub fn region_info_rows(mode: u8, zone: Option<u16>) -> Vec<DynamicMenuRow> {
 /// vendor/server/src/map/enums/mission_log.h).
 pub const MISSION_NATION_NAMES_PINNED: [&str; 3] = ["Sandoria", "Bastok", "Windurst"];
 
-/// The seven selector rows the Missions battery draws, captions pinned from
-/// retail's own window (ur/66): `Aht Urhgan` — not a re-reading of the smaller
-/// capture — and rows in the order retail's list shows them. kuluu lists them all
-/// and greys the chains its s2c 0x056 state reports nothing for (owner ruling
-/// ur/62: "it should list them all, and grey the ones that are not active").
+/// The seven selector rows the Missions battery draws in retail's own list order
+/// (ur/65): `Nations` leads — not an alphabetical resort, which is what broke it once.
+/// The caption reads `Aht Urhgan`; kuluu lists them all and greys the chains its
+/// s2c 0x056 state reports nothing for (owner ruling ur/62: "it should list them
+/// all, and grey the ones that are not active"; ur/65: "and it still does not match").
 pub const MISSION_SELECTOR_LABELS_PINNED: [&str; 7] = [
-    "Add-ons",
-    "Adoulin",
+    "Nations",
+    "Zilart",
+    "Promathia",
     "Aht Urhgan",
     "Altana",
-    "Nations",
-    "Promathia",
-    "Zilart",
+    "Adoulin",
+    "Add-ons",
 ];
 
 /// The selector rows chain-by-chain, same order as the labels: a row's index in
 /// its list is that window's Left/Right member slot. Nations walks its three
-/// native logs (ur/64 shows `← Bastok →`); the addons row walks the three add-on
-/// chains; Zilart/Promathia/Altana/Adoulin stand alone — retail's log ports carry
-/// no WoTG chain selector apart from Aht Urhgan, and TVR stays snapshot-only
-/// (LSB marks its own `log_id` guess in vendor/server/scripts/globals/
-/// missions.lua).
+/// native logs (ur/64 shows `← Bastok →`); Aht Urhgan alternates with Wings of the
+/// Goddess; the Add-ons row walks the three add-on chains; Zilart/Promathia/Altana/
+/// Adoulin stand alone (LSB marks TVR's own `log_id` as a guess in vendor/server/
+/// scripts/globals/missions.lua).
 pub const MISSION_SELECTOR_CHAINS_PINNED: [&[u8]; 7] = [
-    &[MISSION_LOG_ACP, MISSION_LOG_AMK, MISSION_LOG_ASA],
-    &[MISSION_LOG_ROV],
-    &[MISSION_LOG_TOAU, MISSION_LOG_WOTG],
-    &[MISSION_LOG_SOA],
     &[
         MISSION_LOG_SANDORIA,
         MISSION_LOG_BASTOK,
         MISSION_LOG_WINDURST,
     ],
-    &[MISSION_LOG_COP],
     &[MISSION_LOG_ZILART],
+    &[MISSION_LOG_COP],
+    &[MISSION_LOG_TOAU, MISSION_LOG_WOTG],
+    &[MISSION_LOG_SOA],
+    &[MISSION_LOG_ROV],
+    &[MISSION_LOG_ACP, MISSION_LOG_AMK, MISSION_LOG_ASA],
 ];
 
 /// Chain indices (`xi.mission.log_id`, vendor/server/scripts/globals/missions.lua;
@@ -15659,10 +15658,9 @@ mod tests {
         );
     }
 
-    /// The selector law (ur/62): all seven chains listed with the captions and
-    /// order pinned off retail's own window (ur/66); a row greys when the folded
-    /// s2c 0x056 state reports nothing for its chains, and every active row opens
-    /// a log window.
+    /// The selector law (ur/62): all seven chains listed in retail's own order and
+    /// spelling (ur/65); a row greys when the folded s2c 0x056 state reports nothing
+    /// for its chains, and every active row opens a log window.
     #[test]
     fn mission_selector_lists_every_chain_and_greys_the_inactive_ones() {
         let rows = mission_selector_rows();
@@ -15670,13 +15668,13 @@ mod tests {
         assert_eq!(
             labels(&rows),
             [
-                "Add-ons",
-                "Adoulin",
+                "Nations",
+                "Zilart",
+                "Promathia",
                 "Aht Urhgan",
                 "Altana",
-                "Nations",
-                "Promathia",
-                "Zilart"
+                "Adoulin",
+                "Add-ons"
             ]
         );
 

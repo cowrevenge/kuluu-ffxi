@@ -8542,13 +8542,18 @@ pub fn update_main_menu(
     let (total, viewport_start) =
         resolve_viewport(view.kind, view.cursor, &dynamic, settings.dlss_supported);
     let window = visible_window(view.kind, total);
-    // Mirror-side totals for the selector frame.
-    let parent_total = parent_view
-        .map(|p| rows_entry_count(p.kind, parent_rows, settings.dlss_supported))
-        .unwrap_or(0);
-    let parent_window = parent_view
-        .map(|p| visible_window(p.kind, parent_total))
-        .unwrap_or(0);
+    // Mirror-side totals for the selector frame: the opener keeps its viewport while a
+    // child holds focus — Root pages and scrolling lists follow the same `viewport_over`
+    // law the focused pane does (ur/85: opening Quests repainted Commands from raw slot 0
+    // uncapped, every entry at once where its page of them belonged).
+    let (parent_total, parent_start) = parent_view.map_or((0, 0), |p| {
+        viewport_over(
+            p.kind,
+            p.cursor,
+            rows_entry_count(p.kind, parent_rows, settings.dlss_supported),
+        )
+    });
+    let parent_window = parent_view.map_or(0, |p| visible_window(p.kind, parent_total));
     let clock_debug_hold = vana_clock
         .as_ref()
         .is_some_and(|clock| clock.debug_hold_active());
@@ -8560,7 +8565,8 @@ pub fn update_main_menu(
                 hide(&mut row_node);
                 continue;
             };
-            if row.slot >= parent_window || row.slot >= parent_total {
+            let list_idx = parent_start + row.slot;
+            if row.slot >= parent_window || list_idx >= parent_total {
                 hide(&mut row_node);
                 continue;
             }
@@ -8568,10 +8574,10 @@ pub fn update_main_menu(
                 row_node.display = Display::Flex;
             }
             let label: &str = if is_dynamic(parent.kind) {
-                rows_entry_label(parent.kind, row.slot, parent_rows, &dynamic)
+                rows_entry_label(parent.kind, list_idx, parent_rows, &dynamic)
             } else {
                 entries_for(parent.kind, settings.dlss_supported)
-                    .get(row.slot)
+                    .get(list_idx)
                     .copied()
                     .unwrap_or("<unknown>")
             };
@@ -8582,13 +8588,13 @@ pub fn update_main_menu(
             if **text != want {
                 **text = want;
             }
-            let gated = menu_row_disabled(parent.kind, row.slot, &scene.snapshot);
+            let gated = menu_row_disabled(parent.kind, list_idx, &scene.snapshot);
             let tint = if is_dynamic(parent.kind) {
-                parent_rows.get(row.slot).and_then(|r| r.tint)
+                parent_rows.get(list_idx).and_then(|r| r.tint)
             } else {
                 None
             };
-            let want_color = menu_row_color(gated, tint, parent.cursor == row.slot);
+            let want_color = menu_row_color(gated, tint, parent.cursor == list_idx);
             if color.0 != want_color {
                 color.0 = want_color;
             }
@@ -16684,6 +16690,75 @@ mod tests {
             first,
             "the selector redraws exactly as it sat before the log opened"
         );
+    }
+
+    /// ur/85: opening Quests over Commands must not repaint that opener from raw
+    /// slot 0 — the mirror keeps exactly the focused pane's `viewport_over` law:
+    /// only the cursor's page of entries, no `>` mark (ur/77), and the selected
+    /// line stays gold so the window reads as holding the place until ESC.
+    #[test]
+    fn opening_quests_leaves_the_mirrored_commands_page_intact() {
+        let commands = entries_for(MenuKind::Root, false);
+        let quests_at = commands
+            .iter()
+            .position(|label| *label == "Quests")
+            .expect("Commands carries a Quests line");
+        let (page_start, page_end) = root_page_bounds(quests_at);
+
+        let mut stack = MenuStack::root();
+        stack.levels[0].cursor = quests_at;
+        stack.push(MenuKind::QuestList);
+        let mut app = stack_app(stack, &[]);
+        app.update();
+
+        assert_eq!(title_text(&mut app), menu_title(MenuKind::QuestList));
+        assert!(
+            drawn_mirror(&mut app).is_some(),
+            "Commands stays framed beside the quest list"
+        );
+        let mut mirror: Vec<(usize, String, bevy::color::Color)> = app
+            .world_mut()
+            .query::<(&CompanionRow, &Node, &Text, &TextColor)>()
+            .iter(app.world())
+            .filter(|(_, node, _, _)| node.display != Display::None)
+            .map(|(row, _, text, color)| (row.slot, text.0.clone(), color.0))
+            .collect();
+        mirror.sort_by_key(|(slot, _, _)| *slot);
+
+        let got: Vec<&str> = mirror.iter().map(|(_, label, _)| label.as_str()).collect();
+        let want: Vec<String> = commands[page_start..page_end]
+            .iter()
+            .map(|label| format!("  {label}"))
+            .collect();
+        assert_eq!(
+            got, want,
+            "the mirror keeps one page of Commands — never every entry at once"
+        );
+        assert!(
+            mirror.len() < commands.len(),
+            "one page cannot equal the whole list: {} vs {}",
+            mirror.len(),
+            commands.len()
+        );
+        assert!(
+            !got.iter().any(|label| label.contains('>')),
+            "no marker on an unfocused window: {got:?}"
+        );
+        let gold = quests_at - page_start;
+        assert_eq!(
+            mirror[gold].2,
+            menu_row_color(false, None, true),
+            "the Quests line keeps its cursor gold under the open list"
+        );
+        for (slot, label, color) in &mirror {
+            if *slot != gold {
+                assert_ne!(
+                    *color,
+                    menu_row_color(false, None, true),
+                    "only the cursor row wears gold: {label}"
+                );
+            }
+        }
     }
 
     #[test]

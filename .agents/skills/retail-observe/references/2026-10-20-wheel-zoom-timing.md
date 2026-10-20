@@ -68,6 +68,13 @@ Earlier Wine helper tests submitted one wheel step in each direction without a v
 Those tests do not prove delivery to the camera zoom channel.
 They cannot validate or refute the conditional totals above.
 
+A later test sent one standard positive wheel message directly to the unique foreground original-client window.
+The window acknowledged the message within the bounded timeout.
+Fresh captures showed no visible camera change, and the test stopped after that one message.
+Acknowledgement does not establish delivery to an eligible camera zoom channel.
+This test used the HXI/Wine stack, not the build inspected above.
+Its proof is `artifacts/verify/release-080-current-main/retail-reference/wheel-message-proof.json`.
+
 ## Provenance
 
 Build: `retail-2026-09`, patch `30260904_1`.

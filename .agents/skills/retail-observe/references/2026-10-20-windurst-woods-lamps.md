@@ -58,6 +58,11 @@ The before and after captures are `woods-ready.png` and `woods-drag120-after.png
 One wheel-up step and one wheel-down step produced no visible focal change.
 The helper submitted both inputs, but delivery to the original camera zoom channel remains unverified.
 These results do not establish the original wheel zoom scale.
+A later bounded normal-message test sent one positive wheel notch to the unique foreground game window.
+The window acknowledged the message, but inspected before and after captures showed no visible camera change.
+The test stopped after that one message.
+The proof is `wheel-message-proof.json` in the evidence directory.
+Message acknowledgement does not establish an eligible camera zoom response or physical-device parity.
 No matched native mouse input was available through the permitted native socket.
 
 ## Limits

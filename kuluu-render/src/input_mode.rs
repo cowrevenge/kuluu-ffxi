@@ -518,8 +518,15 @@ pub enum MenuKind {
     /// main_menu.md §31), so the hub hands that filter down as `completed`:
     /// false lists the incomplete half of the s2c 0x056 quest ports, true the
     /// complete half.
+    /// Owner ruling (ur/91 round): one region shows at a time — the window opens
+    /// on the first region with entries and steps regions with Left/Right over
+    /// its caption arrows exactly like the mission logs do ('it should open with
+    /// a < title >(Like Windurst) ... same as the misisons'); `region` carries
+    /// the QuestLog index whose rows draw, named by
+    /// `ffxi_vocab::quest_lattice::QUEST_AREA_NAMES`.
     QuestList {
         completed: bool,
+        region: u8,
     },
 
     /// The `quest01` detail window — quest00's select tail name-opens it over
@@ -1351,7 +1358,10 @@ mod tests {
         stack.current_mut().unwrap().last_item_lock = None;
         stack.push(MenuKind::RetailConfig);
         assert_eq!(stack.current().unwrap().last_item_lock, None);
-        stack.push(MenuKind::QuestList { completed: false });
+        stack.push(MenuKind::QuestList {
+            completed: false,
+            region: 0,
+        });
         assert_eq!(stack.current().unwrap().last_item_lock, None);
     }
 

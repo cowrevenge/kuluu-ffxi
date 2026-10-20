@@ -1296,7 +1296,10 @@ mod tests {
     fn every_quest_window_helper_box_says_quests() {
         assert_eq!(help_bar_title(MenuKind::QuestMenu), "Quests");
         assert_eq!(
-            help_bar_title(MenuKind::QuestList { completed: false }),
+            help_bar_title(MenuKind::QuestList {
+                completed: false,
+                region: 0
+            }),
             "Quests"
         );
         for log in [0u8, 255] {

@@ -882,9 +882,16 @@ pub(super) fn confirm_menu_at_cursor(
             }
 
             // ur/87: a quest-hub drill row opens its half of the `quest00` list,
-            // §31's filter word riding as the payload.
+            // §31's filter word riding as the payload. Ur/91 round: the list
+            // shows one region at a time and opens on the first with entries —
+            // 'it should open with a < title >(Like Windurst)'.
             if let A::OpenQuestList { completed } = action {
-                stack.push(MenuKind::QuestList { completed });
+                let region = kuluu_render::hud::menu::quest_region_initial(
+                    &scene_state.snapshot,
+                    &dynamic.quest_texts,
+                    completed,
+                );
+                stack.push(MenuKind::QuestList { completed, region });
                 return None;
             }
 
@@ -2505,6 +2512,39 @@ pub(super) fn handle_menu_key(
         return None;
     }
 
+    // ur/91 round: a quest list is Left/Right by region — the arrows step one
+    // region of [`quest_region_cycle`] at a time (wrap like Up/Down), exactly as
+    // the mission logs cycle their members below.
+    if let MenuKind::QuestList {
+        completed,
+        region: current,
+    } = kind
+    {
+        let forward = if bindings.matches_logical(Action::NavLeft, key) {
+            Some(false)
+        } else if bindings.matches_logical(Action::NavRight, key) {
+            Some(true)
+        } else {
+            None
+        };
+        if let Some(forward) = forward {
+            if let (Some(level), Some(region)) = (
+                stack.current_mut(),
+                kuluu_render::hud::menu::quest_region_cycle(
+                    &scene_state.snapshot,
+                    &dynamic.quest_texts,
+                    completed,
+                    current,
+                    forward,
+                ),
+            ) {
+                level.kind = MenuKind::QuestList { completed, region };
+                level.cursor = 0;
+            }
+            return None;
+        }
+    }
+
     // ur/64: a mission log is Left/Right by nation — the arrows cycle the
     // selector row's chain members (wrap like Up/Down); the list itself scrolls
     // through its rows with the cursor alone.
@@ -3227,7 +3267,10 @@ mod menu_key_tests {
         let mut harness = Harness::new();
         let mut world = marker_world();
         let mut stack = MenuStack::root();
-        stack.push(MenuKind::QuestList { completed: false });
+        stack.push(MenuKind::QuestList {
+            completed: false,
+            region: 0,
+        });
         stack.take_absorb_open_minus();
         let mut snap = kuluu_snapshot::SceneSnapshot::default();
         // San d'Oria offer bit 0 only — the list's single row is quest (log 0, id 0).
@@ -3240,6 +3283,7 @@ mod menu_key_tests {
             &harness.scene_state.snapshot,
             &kuluu_render::hud::menu::QuestTextCatalog::default(),
             false,
+            0,
         );
 
         stack.current_mut().unwrap().cursor = 0;
@@ -3274,7 +3318,7 @@ mod menu_key_tests {
             let markers = world.resource_mut::<MapMarkers>();
             harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
             match stack.current().unwrap().kind {
-                MenuKind::QuestList { completed } => assert_eq!(completed, want_done),
+                MenuKind::QuestList { completed, .. } => assert_eq!(completed, want_done),
                 other => {
                     panic!("hub row {row} pushed {other:?}, expected that half of the quest list")
                 }
@@ -3313,6 +3357,117 @@ mod menu_key_tests {
         );
         press(Key::ArrowUp, KeyCode::ArrowUp, &mut stack);
         assert_eq!(cursor(&stack), 1, "Up skips back past the same blank");
+    }
+
+    /// Ur/91 round: 'it should open with a < title >(Like Windurst)' — the hub's
+    /// drill opens its list seated on the FIRST region holding named entries,
+    /// never a numberless or empty one.
+    #[test]
+    fn quest_hub_drill_opens_on_the_first_lit_region() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::QuestMenu);
+        harness.dynamic.rows = kuluu_render::hud::menu::quest_menu_rows();
+        // Only Windurst (log 2) reports a quest, and it is one the catalogs
+        // name.
+        let markers = world.resource_mut::<MapMarkers>();
+        harness
+            .scene_state
+            .snapshot
+            .missions
+            .logs
+            .push(kuluu_snapshot::MissionLogEntry {
+                port: ffxi_proto::mission::QUEST_OFFER_PORTS[2],
+                data: [1 << 0, 0, 0, 0, 0, 0, 0, 0],
+            });
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        assert_eq!(
+            stack.current().unwrap().kind,
+            MenuKind::QuestList {
+                completed: false,
+                region: 2
+            },
+            "the list opens on Windurst — the only region with a named quest"
+        );
+    }
+
+    /// Ur/91 round: Left/Right steps the quest list one region of its ring,
+    /// skipping empty regions and wrapping, exactly like the mission arrows.
+    #[test]
+    fn quest_list_arrows_step_regions_and_skip_the_empty_ones() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::QuestList {
+            completed: false,
+            region: 0,
+        });
+        // Sandoria (0) and Outlands (5) report named quests; the logs between
+        // them hold nothing.
+        harness
+            .scene_state
+            .snapshot
+            .missions
+            .logs
+            .push(kuluu_snapshot::MissionLogEntry {
+                port: ffxi_proto::mission::QUEST_OFFER_PORTS[0],
+                data: [1, 0, 0, 0, 0, 0, 0, 0],
+            });
+        harness
+            .scene_state
+            .snapshot
+            .missions
+            .logs
+            .push(kuluu_snapshot::MissionLogEntry {
+                port: ffxi_proto::mission::QUEST_OFFER_PORTS[5],
+                data: [1 << 1, 0, 0, 0, 0, 0, 0, 0],
+            });
+        let kind = |stack: &MenuStack| stack.current().unwrap().kind;
+
+        // One press asserted per step (an even run of Rights over a two-stop
+        // ring just lands back where it started): the logs between carry no
+        // named quest, so Right jumps Sandoria straight to Outlands and wraps.
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowRight, KeyCode::ArrowRight, &mut stack, markers);
+        assert_eq!(
+            kind(&stack),
+            MenuKind::QuestList {
+                completed: false,
+                region: 5
+            },
+            "Right skips the empty logs and steps to Outlands"
+        );
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowRight, KeyCode::ArrowRight, &mut stack, markers);
+        assert_eq!(
+            kind(&stack),
+            MenuKind::QuestList {
+                completed: false,
+                region: 0
+            },
+            "Right wraps the two-stop ring back to Sandoria"
+        );
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowLeft, KeyCode::ArrowLeft, &mut stack, markers);
+        assert_eq!(
+            kind(&stack),
+            MenuKind::QuestList {
+                completed: false,
+                region: 5
+            },
+            "Left wraps backwards to Outlands"
+        );
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowLeft, KeyCode::ArrowLeft, &mut stack, markers);
+        assert_eq!(
+            kind(&stack),
+            MenuKind::QuestList {
+                completed: false,
+                region: 0
+            },
+            "Left steps back over the same ring"
+        );
     }
 
     fn menu_root_trade_index() -> usize {

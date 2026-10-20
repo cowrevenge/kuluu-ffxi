@@ -1639,10 +1639,15 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
             return mission_chain_name(log).unwrap_or("Mission Log")
         }
         MenuKind::BazaarStalls => "Bazaar",
-        // Owner ruling (ur/90 round): the quest windows' rectangles carry no word
-        // on their top border — in ur/87 both frames run plain above their rows.
-        // The family's name lives only in the help bar (`help_bar_title`).
-        MenuKind::QuestMenu | MenuKind::QuestList { .. } => "",
+        // Owner ruling (ur/90 round): the hub's rectangle carries no word on its
+        // top border — ur/87 shows that frame plain above its rows; the family's
+        // name lives only in the help bar (`help_bar_title`). The lists' band is
+        // their region, like a mission log wears its chain (ur/91 round).
+        MenuKind::QuestMenu => "",
+        MenuKind::QuestList { region, .. } => ffxi_vocab::quest_lattice::QUEST_AREA_NAMES
+            .get(region as usize)
+            .copied()
+            .unwrap_or(""),
         MenuKind::QuestDetail { .. } => "Quest Log",
         // The bag picker hung off the trade window's Add-Item button row; its
         // own caption is [I] like the rest of the family (§25).
@@ -6855,24 +6860,14 @@ pub fn quest_list_rows(
     snap: &kuluu_snapshot::SceneSnapshot,
     texts: &QuestTextCatalog,
     completed: bool,
+    region: u8,
 ) -> Vec<DynamicMenuRow> {
-    let mut statuses: std::collections::BTreeMap<(u8, u16), bool> = Default::default();
-    for entry in &snap.missions.logs {
-        if let Some((log, complete)) = ffxi_proto::mission::quest_port(entry.port) {
-            for id in ffxi_proto::mission::quest_ids(&entry.data) {
-                *statuses.entry((log, id)).or_default() |= complete;
-            }
-        }
-    }
-    let mut rows: Vec<DynamicMenuRow> = statuses
-        .iter()
-        .filter(|(_, held)| **held == completed)
-        .map(|(&(log, id), _)| DynamicMenuRow {
+    let mut rows: Vec<DynamicMenuRow> = named_quest_pairs(snap, texts, completed)
+        .into_iter()
+        .filter(|(log, _)| *log == region)
+        .map(|(log, id)| DynamicMenuRow {
             tint: None,
-            label: match quest_label(texts, log, id) {
-                Some(name) => name,
-                None => format!("Quest #{id}"),
-            },
+            label: quest_label(texts, log, id).unwrap_or_default(),
             action: DynamicMenuAction::QuestOpenDetail { log, id },
         })
         .collect();
@@ -6884,6 +6879,91 @@ pub fn quest_list_rows(
         });
     }
     rows
+}
+
+/// The `(log, id)` pairs a quest list actually lists: every wire bit whose own
+/// region catalog labels the word — the same keyed lookup retail's windows draw
+/// their names from (each `quest_log.h` log ships one d_msg table whose blocks
+/// self-label at +0x1C; see `ffxi_dat::quest_dat`). Owner ruling (ur/91 round):
+/// "you do NOT use a quest number... you use a quest title" — a set bit with no
+/// labelled block draws no row, so kuluu's earlier `Quest #{id}` fallback died
+/// with it.
+pub fn named_quest_pairs(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    texts: &QuestTextCatalog,
+    completed: bool,
+) -> Vec<(u8, u16)> {
+    let mut statuses: std::collections::BTreeMap<(u8, u16), bool> = Default::default();
+    for entry in &snap.missions.logs {
+        if let Some((log, complete)) = ffxi_proto::mission::quest_port(entry.port) {
+            for id in ffxi_proto::mission::quest_ids(&entry.data) {
+                *statuses.entry((log, id)).or_default() |= complete;
+            }
+        }
+    }
+    statuses
+        .iter()
+        .filter(|(_, held)| **held == completed)
+        .map(|(&(log, id), _)| (log, id))
+        .filter(|(log, id)| quest_label(texts, *log, *id).is_some())
+        .collect()
+}
+
+/// The regions (QuestLog index in enum order) with at least one listed quest on
+/// this side of the filter — Left/Right's ring and the window's opening region
+/// (ur/91 round: "it should open with a < title >").
+pub fn quest_region_ring(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    texts: &QuestTextCatalog,
+    completed: bool,
+) -> Vec<u8> {
+    let mut ring: Vec<u8> = named_quest_pairs(snap, texts, completed)
+        .into_iter()
+        .map(|(log, _)| log)
+        .collect();
+    ring.dedup();
+    ring
+}
+
+/// The region a list window opens on: the first in [`quest_region_ring`], or 0
+/// when nothing is reported at all (the placeholder row's seat).
+pub fn quest_region_initial(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    texts: &QuestTextCatalog,
+    completed: bool,
+) -> u8 {
+    quest_region_ring(snap, texts, completed)
+        .first()
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Left/Right on a quest list steps one region of [`quest_region_ring`],
+/// wrapping — the mission logs' cycling law (ur/64) carried over by owner
+/// ruling (ur/91 round). A ring that does not hold `region` (the window opened
+/// before data arrived, or its last quest just completed) re-seats on the first.
+pub fn quest_region_cycle(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    texts: &QuestTextCatalog,
+    completed: bool,
+    region: u8,
+    forward: bool,
+) -> Option<u8> {
+    let ring = quest_region_ring(snap, texts, completed);
+    if ring.is_empty() {
+        return None;
+    }
+    let Some(at) = ring.iter().position(|&r| r == region) else {
+        return Some(ring[0]);
+    };
+    // One step, wrapping; a single-region ring keeps its seat, as the mission
+    // cycle law does when its ring has one lit member.
+    let at = if forward {
+        (at + 1) % ring.len()
+    } else {
+        (at + ring.len() - 1) % ring.len()
+    };
+    Some(ring[at])
 }
 
 /// The dim Vana'Bout readout's row position within [`quest_menu_rows`] — the
@@ -7574,7 +7654,9 @@ fn dynamic_rows_for(
         MenuKind::QuestMenu => quest_menu_rows(),
         // The quest00 lists follow the folded s2c 0x056 quest ports, halved by
         // §31's filter word (vault main_menu.md §31; ur/87).
-        MenuKind::QuestList { completed } => quest_list_rows(snap, &dynamic.quest_texts, completed),
+        MenuKind::QuestList { completed, region } => {
+            quest_list_rows(snap, &dynamic.quest_texts, completed, region)
+        }
         MenuKind::QuestDetail { log, id } => quest_detail_rows(snap, &dynamic.quest_texts, log, id),
         // The pupequip variant's fourteen automaton slot rows (vault
         // main_menu.md §39).
@@ -8682,10 +8764,14 @@ pub fn update_main_menu(
     }
 
     // ur/76: a mission log window wears its ◄ ► on the caption band; no other
-    // window shows them.
-    let arrows_wanted = view
-        .as_ref()
-        .is_some_and(|view| matches!(view.kind, MenuKind::MissionDetail { .. }));
+    // window showed them until ur/91's ruling gave the same pair to the quest
+    // lists, which step regions Left/Right under it.
+    let arrows_wanted = view.as_ref().is_some_and(|view| {
+        matches!(
+            view.kind,
+            MenuKind::MissionDetail { .. } | MenuKind::QuestList { .. }
+        )
+    });
     for (_, arrow, mut node, _) in decor_q.iter_mut() {
         if arrow.is_none() {
             continue;
@@ -11664,7 +11750,13 @@ mod tests {
         }
         for (kind, name) in [
             (MenuKind::QuestMenu, "quest00"),
-            (MenuKind::QuestList { completed: false }, "quest00"),
+            (
+                MenuKind::QuestList {
+                    completed: false,
+                    region: 0,
+                },
+                "quest00",
+            ),
             (MenuKind::QuestDetail { log: 1, id: 7 }, "quest01"),
             (
                 MenuKind::MissionDetail {
@@ -11872,7 +11964,10 @@ mod tests {
     #[test]
     fn two_open_record_windows_draw_at_their_own_frames_newest_on_top() {
         let mut stack = MenuStack::root();
-        stack.push(MenuKind::QuestList { completed: false });
+        stack.push(MenuKind::QuestList {
+            completed: false,
+            region: 0,
+        });
         stack.current_mut().unwrap().cursor = 1;
         stack.push(MenuKind::QuestDetail { log: 1, id: 7 });
         let mut app = stack_app(
@@ -11883,7 +11978,10 @@ mod tests {
             ],
         );
         app.world_mut().resource_mut::<DynamicMenu>().stacked_rows = vec![(
-            MenuKind::QuestList { completed: false },
+            MenuKind::QuestList {
+                completed: false,
+                region: 0,
+            },
             vec![display_row("Quest A"), display_row("Quest B")],
         )];
         app.update();
@@ -11904,7 +12002,10 @@ mod tests {
         );
         assert_eq!(
             list.title,
-            menu_title(MenuKind::QuestList { completed: false })
+            menu_title(MenuKind::QuestList {
+                completed: false,
+                region: 0
+            })
         );
         // ur/77: under focus the window keeps no `>` mark; its cursor row stays gold.
         assert_eq!(list.rows, vec!["  Quest A", "  Quest B"]);
@@ -11997,7 +12098,10 @@ mod tests {
     #[test]
     fn a_window_on_an_older_windows_whole_rect_hides_it() {
         let mut stack = MenuStack::root();
-        stack.push(MenuKind::QuestList { completed: false });
+        stack.push(MenuKind::QuestList {
+            completed: false,
+            region: 0,
+        });
         stack.push(MenuKind::QuestDetail { log: 1, id: 7 });
         let mut app = stack_app(
             stack.clone(),
@@ -12134,7 +12238,10 @@ mod tests {
         // The quest pair: Commands framed right, the list on its left rect — the
         // exact layout ur/82 asks for while DAT records are still loading.
         let mut quests = MenuStack::root();
-        quests.push(MenuKind::QuestList { completed: false });
+        quests.push(MenuKind::QuestList {
+            completed: false,
+            region: 0,
+        });
         quests.push(MenuKind::QuestDetail { log: 0, id: 1 });
         assert_eq!(
             menu_stack_layout(&quests, &frames).windows,
@@ -16903,13 +17010,19 @@ mod tests {
 
         let mut stack = MenuStack::root();
         stack.levels[0].cursor = quests_at;
-        stack.push(MenuKind::QuestList { completed: false });
+        stack.push(MenuKind::QuestList {
+            completed: false,
+            region: 0,
+        });
         let mut app = stack_app(stack, &[]);
         app.update();
 
         assert_eq!(
             title_text(&mut app),
-            menu_title(MenuKind::QuestList { completed: false })
+            menu_title(MenuKind::QuestList {
+                completed: false,
+                region: 0
+            })
         );
         assert!(
             drawn_mirror(&mut app).is_some(),
@@ -16964,7 +17077,7 @@ mod tests {
     fn quest_list_rows_expand_the_quest_ports() {
         let mut snap = kuluu_snapshot::SceneSnapshot::default();
         let texts = QuestTextCatalog::default();
-        let empty = quest_list_rows(&snap, &texts, false);
+        let empty = quest_list_rows(&snap, &texts, false, 0);
         assert_eq!(empty.len(), 1, "logged-out state keeps one hint row");
         assert!(empty[0].label.contains("no quests"));
 
@@ -16986,13 +17099,29 @@ mod tests {
 
         // ur/87's hub splits the lists: Current holds only the incomplete bits,
         // Completed the merged-complete ones (id 18, held by both ports), each
-        // drawn under its own name — no suffix rides a half-list.
-        let rows = quest_list_rows(&snap, &texts, false);
+        // drawn under its own name — no suffix rides a half-list. Ur/91 round:
+        // the list shows one region at a time, and an unlabelled bit draws no
+        // row — 'you do NOT use a quest number... you use a quest title'.
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: ffxi_proto::mission::QUEST_OFFER_PORTS[0],
+            data: [1 << 17, 0, 0, 0, 0, 0, 0, 0], // Sandoria has no id 17
+        });
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: ffxi_proto::mission::QUEST_OFFER_PORTS[2],
+            data: [1 << 0, 0, 0, 0, 0, 0, 0, 0], // Windurst id 0
+        });
+        let rows = quest_list_rows(&snap, &texts, false, 0);
         assert_eq!(rows.len(), 2, "the current half holds only incomplete bits");
         // scripts/globals/quests.lua San d'Oria block.
         assert_eq!(rows[0].label, "A Sentrys Peril");
         assert_eq!(rows[1].label, "Rosel the Armorer");
-        let done = quest_list_rows(&snap, &texts, true);
+        let windurst = quest_list_rows(&snap, &texts, false, 2);
+        assert_eq!(windurst.len(), 1, "a region's list holds only its own rows");
+        assert!(!rows
+            .iter()
+            .chain(windurst.iter())
+            .any(|r| r.label.contains('#')),); // no `Quest #NN` fallback survives (ur/91)
+        let done = quest_list_rows(&snap, &texts, true, 0);
         assert_eq!(done.len(), 1, "the overlap bit belongs to Completed");
         assert_eq!(done[0].label, "Gates to Paradise");
         assert_eq!(
@@ -17100,12 +17229,30 @@ mod tests {
     #[test]
     fn quest_windows_are_dynamic_titled_and_never_root_drilled() {
         assert!(is_dynamic(MenuKind::QuestMenu));
-        assert!(is_dynamic(MenuKind::QuestList { completed: false }));
+        assert!(is_dynamic(MenuKind::QuestList {
+            completed: false,
+            region: 0
+        }));
         assert!(is_dynamic(MenuKind::QuestDetail { log: 0, id: 4 }));
-        // Owner ruling (ur/90 round): no word rides these rectangles' top borders
-        // (both ur/87 frames run plain); only the help bar names the family.
+        // Owner ruling (ur/90 round): the hub wears no word on its top border;
+        // only the help bar names the family. Ur/91 round: each LIST wears its
+        // region ('it should open with a < title >(Like Windurst)'), named from
+        // the quest_log.h area table like the mission logs' chain captions.
         assert_eq!(menu_title(MenuKind::QuestMenu), "");
-        assert_eq!(menu_title(MenuKind::QuestList { completed: false }), "");
+        assert_eq!(
+            menu_title(MenuKind::QuestList {
+                completed: false,
+                region: 2
+            }),
+            "Windurst"
+        );
+        assert_eq!(
+            menu_title(MenuKind::QuestList {
+                completed: true,
+                region: 10
+            }),
+            "Coalition"
+        );
         assert_eq!(
             menu_title(MenuKind::QuestDetail { log: 2, id: 9 }),
             "Quest Log"
@@ -17459,7 +17606,10 @@ mod tests {
             (MenuKind::Root, OpenCursor::Remembered),
             (MenuKind::Status, OpenCursor::Remembered),
             (
-                MenuKind::QuestList { completed: false },
+                MenuKind::QuestList {
+                    completed: false,
+                    region: 0,
+                },
                 OpenCursor::FirstItem,
             ),
             (MenuKind::QuestMenu, OpenCursor::FirstItem),
@@ -17822,7 +17972,10 @@ mod tests {
         const QUEST_Y: i16 = 48;
         const EMOTE_Y: i16 = 120;
         let mut stack = MenuStack::root();
-        stack.push(MenuKind::QuestList { completed: false });
+        stack.push(MenuKind::QuestList {
+            completed: false,
+            region: 0,
+        });
         let (mut app, log) = dock_app(
             stack,
             &[
@@ -18519,11 +18672,17 @@ mod tests {
             port: ffxi_proto::mission::QUEST_OFFER_PORTS[2],
             data: [1 << 5, 0, 0, 0, 0, 0, 0, 0],
         });
-        let rows = quest_list_rows(&snap, &texts, false);
-        assert_eq!(rows.len(), 2);
+        // Ur/91 round: one region per window — Sandoria and Windurst are ring
+        // stops 0 and 1, each list drawing only its own rows.
+        assert_eq!(quest_region_ring(&snap, &texts, false), vec![0, 2]);
+        assert_eq!(quest_region_initial(&snap, &texts, false), 0);
+        let sandoria = quest_list_rows(&snap, &texts, false, 0);
+        assert_eq!(sandoria.len(), 1);
         // The DAT spelling with the apostrophe; vocab would say "A Sentrys Peril".
-        assert_eq!(rows[0].label, "A Sentry's Peril");
-        assert_eq!(rows[1].label, "In a Pickle");
+        assert_eq!(sandoria[0].label, "A Sentry's Peril");
+        let windurst = quest_list_rows(&snap, &texts, false, 2);
+        assert_eq!(windurst.len(), 1);
+        assert_eq!(windurst[0].label, "In a Pickle");
         let detail = quest_detail_rows(&snap, &texts, 2, 5);
         assert_eq!(detail[0].label, "In a Pickle");
         // The briefing lines from the table's second string slot, retail's

@@ -34,6 +34,7 @@ pub mod main_dll;
 pub mod map_image;
 pub mod menu_windows;
 pub mod merits;
+pub mod mission_dat;
 pub mod mmb;
 pub mod mzb;
 pub mod npc_names;

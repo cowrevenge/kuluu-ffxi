@@ -759,6 +759,10 @@ pub struct DynamicMenu {
     /// ROOT_ENTRIES copy for indices within its range; the copy is pinned to
     /// the catalog by install-gated tests in both crates (bead kuluu-1z9qs).
     pub selector_captions: Vec<String>,
+    /// The mission-chain name/briefing catalogs, read from the install on the
+    /// first Mission window [`refresh_dynamic_menu_rows`] sees; see
+    /// [`MissionTextCatalog`].
+    pub mission_texts: MissionTextCatalog,
     /// Chat lines the client emits locally ride ids into GetText **table 9**
     /// (emitter .text FFXiMain.dll retail-2026-09 `.text 0x129DE0`, vault main_menu.md
     /// §59 addendum 35); this is that catalog, loaded once from DAT on the first
@@ -5868,6 +5872,50 @@ fn lsb_group_to_school(group: u8) -> Option<u8> {
     }
 }
 
+/// Mission-chain name/briefing catalogs read from the install. The catalog is
+/// law: its entries carry their own ids (+0x1C word == position, verified at
+/// open), so a name lookup keys off `(chain, wire id)` straight into the DAT —
+/// nothing hand-built sits between the window and the file (owner ruling this
+/// round: read vtables, get names *and* descriptions, index from the table).
+/// The scraped `ffxi_vocab` table only stands in where an install has no
+/// catalog, exactly like the spell-school fallback above. Lives on
+/// [`DynamicMenu`] so every harness that owns the menu owns its catalogs.
+#[derive(Debug, Clone, Default)]
+pub struct MissionTextCatalog {
+    loaded: bool,
+    tables: std::collections::BTreeMap<u8, ffxi_dat::dmsg::DmsgTable>,
+}
+
+impl MissionTextCatalog {
+    fn ensure_loaded(&mut self, root: Option<&ffxi_dat::DatRoot>) {
+        if self.loaded {
+            return;
+        }
+        let Some(root) = root else { return };
+        for chain in [0u8, 1, 2, 3, 4, 6, 7] {
+            if let Ok(table) = ffxi_dat::mission_dat::open_chain_catalog(root, chain) {
+                self.tables.insert(chain, table);
+            }
+        }
+        self.loaded = true;
+    }
+
+    /// The catalog name for one `(chain, wire id)` pair.
+    pub fn name(&self, log: u8, id: u16) -> Option<&str> {
+        self.tables
+            .get(&log)
+            .and_then(|t| ffxi_dat::mission_dat::name(t, usize::from(id)))
+    }
+
+    /// The catalog briefing for one `(chain, wire id)` pair (`Area:` /
+    /// `Objective:` lines on assault ops, `Mission Orders:` on story missions).
+    pub fn description(&self, log: u8, id: u16) -> Option<&str> {
+        self.tables
+            .get(&log)
+            .and_then(|t| ffxi_dat::mission_dat::description(t, usize::from(id)))
+    }
+}
+
 /// The `magic` window's unfiltered list — kuluu's flat view of it, reached with
 /// the Retail+ toggle (retail always drills a category first, vault
 /// main_menu.md §21): every spell the snapshot reports as known.
@@ -6015,6 +6063,9 @@ pub const MISSION_LOG_ZILART: u8 = 3;
 pub const MISSION_LOG_TOAU: u8 = 4;
 pub const MISSION_LOG_WOTG: u8 = 5;
 pub const MISSION_LOG_COP: u8 = 6;
+/// Assault ops (`MissionLog::Assault`); its name catalog is ROM/176/72.DAT and
+/// the op ids are `xi.assault.mission` (vendor/server/scripts/enum/assault.lua).
+pub const MISSION_LOG_ASSAULT: u8 = 7;
 pub const MISSION_LOG_CAMPAIGN: u8 = 8;
 pub const MISSION_LOG_ACP: u8 = 9;
 pub const MISSION_LOG_AMK: u8 = 10;
@@ -6113,11 +6164,18 @@ pub fn mission_quest_port_current(snap: &kuluu_snapshot::SceneSnapshot, log: u8)
     let word = match log {
         MISSION_LOG_TOAU => 5,
         MISSION_LOG_WOTG => 6,
+        // The same folded frame mirrors the current assault op into word 4
+        // (`packet.Data[4] = m_assaultLog.current`,
+        // vendor/server/src/map/packets/s2c/0x056_mission_other.cpp).
+        MISSION_LOG_ASSAULT => 4,
         _ => return None,
     };
-    // QuestLog order (vendor/server/src/map/enums/quest_log.h): Aht Urhgan is the
-    // sixth offer port, the frame whose words 5/6 LSB mirrors ToAU/WoTG into.
-    let aht_urhgan_offer = ffxi_proto::mission::QUEST_OFFER_PORTS.get(5)?;
+    // QuestLog order (vendor/server/src/map/enums/quest_log.h): Sandoria..Outlands
+    // take slots 0-5, Aht Urhgan is index 6 — its offer frame (`QUEST_OFFER_PORTS[6]`
+    // = port 0x0080) is the one LSB's folded ctor writes words 4-7 of. Reading
+    // index 5 (the old off-by-one here) landed on Outlands' own quest bits, which
+    // no real Aht-Urhgan state ever filled.
+    let aht_urhgan_offer = ffxi_proto::mission::QUEST_OFFER_PORTS.get(6)?;
     snap.missions
         .logs
         .iter()
@@ -6137,6 +6195,31 @@ pub fn mission_quest_port_current(snap: &kuluu_snapshot::SceneSnapshot, log: u8)
 pub fn mission_complete_bits(snap: &kuluu_snapshot::SceneSnapshot, log: u8) -> Vec<u16> {
     const PORT_NATIONS: u16 = 0x00D0;
     const PORT_TOAU_WOTG: u16 = 0x00D8;
+    // Assault completions ride the Aht-Urhgan quest-complete frame as a bitset
+    // LSB folds in with `packet.Data[4 + missionID / 32] |= 1 << (missionID %
+    // 32)` (`OTHER::OTHER(CCharEntity*, QuestComplete)`, same vendor file), so
+    // ops 1..=63 land in words 4/5; op 0 is never used.
+    if log == MISSION_LOG_ASSAULT {
+        const PORT_AHT_URGHAN_COMPLETE: u16 = 0x00C0;
+        let Some(entry) = snap
+            .missions
+            .logs
+            .iter()
+            .find(|e| e.port == PORT_AHT_URGHAN_COMPLETE)
+        else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for (shift_word, bits) in entry.data.iter().enumerate().skip(4).take(2) {
+            for b in 0..32 {
+                let id = ((shift_word - 4) * 32 + b) as u16;
+                if id != 0 && (bits >> b) & 1 == 1 {
+                    ids.push(id);
+                }
+            }
+        }
+        return ids;
+    }
     let (port, word_base) = match log {
         l if l <= MISSION_LOG_ZILART => (PORT_NATIONS, usize::from(log) * 2),
         MISSION_LOG_TOAU => (PORT_TOAU_WOTG, 0),
@@ -6443,26 +6526,28 @@ pub fn is_bazaar_stall_entity(e: &kuluu_snapshot::Entity, self_char_id: Option<u
 /// The arrows cycle this window's members (ur/64); Nations merely opens on home first.
 pub fn mission_detail_rows(
     snap: &kuluu_snapshot::SceneSnapshot,
+    texts: &MissionTextCatalog,
     log: u8,
     _member: u8,
 ) -> Vec<DynamicMenuRow> {
-    let current = if log == MISSION_LOG_TOAU || log == MISSION_LOG_WOTG {
-        mission_quest_port_current(snap, log)
-    } else {
-        snap.missions
-            .info
-            .as_ref()
-            .and_then(|info| mission_main_port_current(info, log))
-    };
+    let current =
+        if log == MISSION_LOG_TOAU || log == MISSION_LOG_WOTG || log == MISSION_LOG_ASSAULT {
+            mission_quest_port_current(snap, log)
+        } else {
+            snap.missions
+                .info
+                .as_ref()
+                .and_then(|info| mission_main_port_current(info, log))
+        };
     let completed = mission_complete_bits(snap, log);
     let mut rows: Vec<String> = vec!["Current:".to_string()];
     match current.filter(|&id| !completed.contains(&(id as u16))) {
-        Some(id) => push_mission_name(&mut rows, log, id as u16),
+        Some(id) => push_mission_name(&mut rows, texts, log, id as u16),
         None => rows.push(mission_current_reason(snap, log).to_string()),
     }
     let mut named: Vec<String> = Vec::new();
     for id in completed {
-        push_mission_name(&mut named, log, id);
+        push_mission_name(&mut named, texts, log, id);
     }
     rows.push("Completed:".to_string());
     if named.is_empty() {
@@ -6486,9 +6571,15 @@ pub fn mission_detail_rows(
         .collect()
 }
 
-/// One named mission line; ids the vendor lattice carries no name for (unassigned
-/// completion words, commented category ids) draw nothing rather than a raw number.
-fn push_mission_name(rows: &mut Vec<String>, log: u8, id: u16) {
+/// One named mission line. The install's own catalog names first — it is the
+/// source retail itself draws from; only where no catalog was read does the
+/// scraped `ffxi_vocab` lattice stand in, and ids neither knows (unassigned
+/// completion words) draw nothing rather than a raw number.
+fn push_mission_name(rows: &mut Vec<String>, texts: &MissionTextCatalog, log: u8, id: u16) {
+    if let Some(name) = texts.name(log, id) {
+        rows.push(name.to_string());
+        return;
+    }
     if let Some(name) = ffxi_vocab::mission_names::mission_name(log, id) {
         rows.push((*name).to_string());
     }
@@ -6854,6 +6945,22 @@ pub fn refresh_dynamic_menu_rows(
         );
     }
 
+    // The mission windows draw names from the install's own chain catalogs, loaded
+    // the first time one opens (owner ruling this round — the DAT is the name/description source,
+    // indexed by its own id words).
+    let mission_open = stack.is_some_and(|stack| {
+        stack.levels.iter().any(|level| {
+            matches!(
+                level.kind,
+                MenuKind::MissionList | MenuKind::MissionDetail { .. }
+            )
+        })
+    });
+    // The catalogs live on the menu resource itself, refreshed in place.
+    if mission_open && !dynamic.mission_texts.loaded {
+        dynamic.mission_texts.ensure_loaded(dat_for_captions);
+    }
+
     // The equip gate needs item records whatever window is open, so the DATs resolve once here
     // rather than per arm.
     equip_records.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
@@ -7130,7 +7237,10 @@ fn dynamic_rows_for(
         MenuKind::RegionInfo { mode } => region_info_rows(mode, snap.zone_id),
         // The missionm selector lists every chain and greys inactive ones (ur/62, ur/70).
         MenuKind::MissionList => mission_selector_rows(snap),
-        MenuKind::MissionDetail { log, member } => mission_detail_rows(snap, log, member),
+        // The chain catalogs ride on `DynamicMenu` beside the window state.
+        MenuKind::MissionDetail { log, member } => {
+            mission_detail_rows(snap, &dynamic.mission_texts, log, member)
+        }
         // The bazaar browser lists the zone's open player stalls (§33 wire law).
         MenuKind::BazaarStalls => bazaar_stall_rows(snap),
         // The quest00 list follows the folded s2c 0x056 quest ports (vault
@@ -15904,7 +16014,8 @@ mod tests {
             port: 0x00D0,
             data: [0, 0, 0b111111, 0, 0, 0, 0, 0],
         });
-        let mut detail = mission_detail_rows(&snap, MISSION_LOG_BASTOK, 0);
+        let mut detail =
+            mission_detail_rows(&snap, &MissionTextCatalog::default(), MISSION_LOG_BASTOK, 0);
         order_dynamic_rows(
             MenuKind::MissionDetail {
                 log: MISSION_LOG_BASTOK,
@@ -15953,7 +16064,8 @@ mod tests {
             port: 0x00D0,
             data: [0, 0, 0b111111, 0, 0, 0, 0, 0],
         });
-        let rows = mission_detail_rows(&snap, MISSION_LOG_BASTOK, 0);
+        let rows =
+            mission_detail_rows(&snap, &MissionTextCatalog::default(), MISSION_LOG_BASTOK, 0);
         assert_eq!(
             labels(&rows),
             [
@@ -15976,7 +16088,12 @@ mod tests {
             info.nation = 0;
             info.nation_mission = 4;
         }
-        let rows = mission_detail_rows(&snap2, MISSION_LOG_SANDORIA, 0);
+        let rows = mission_detail_rows(
+            &snap2,
+            &MissionTextCatalog::default(),
+            MISSION_LOG_SANDORIA,
+            0,
+        );
         assert_eq!(
             labels(&rows)[..2],
             ["Current:", "The Davoi Report"],
@@ -15984,7 +16101,7 @@ mod tests {
         );
 
         // A chain the wire reports nothing for still draws both sections (ur/73).
-        let rows = mission_detail_rows(&snap, MISSION_LOG_ROV, 0);
+        let rows = mission_detail_rows(&snap, &MissionTextCatalog::default(), MISSION_LOG_ROV, 0);
         assert_eq!(
             labels(&rows),
             [
@@ -16038,13 +16155,14 @@ mod tests {
         assert_eq!(mission_main_port_current(&fresh, MISSION_LOG_ROV), None);
 
         let mut snap = kuluu_snapshot::SceneSnapshot::default();
-        // QUEST_OFFER_PORTS[5] is Aht Urhgan's; word 5 mirrors ToAU current.
+        // QUEST_OFFER_PORTS[6] is Aht Urhgan's (QuestLog order, quest_log.h);
+        // word 5 of that frame mirrors the ToAU current.
         snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
-            port: ffxi_proto::mission::QUEST_OFFER_PORTS[5],
+            port: ffxi_proto::mission::QUEST_OFFER_PORTS[6],
             data: [0, 0, 0, 0, 0, 4, 0, 0],
         });
         assert_eq!(mission_quest_port_current(&snap, MISSION_LOG_TOAU), Some(4));
-        let rows = mission_detail_rows(&snap, MISSION_LOG_TOAU, 0);
+        let rows = mission_detail_rows(&snap, &MissionTextCatalog::default(), MISSION_LOG_TOAU, 0);
         // Toau id 4 is `CONFESSIONS_OF_ROYALTY` in the vendor lattice.
         assert_eq!(
             labels(&rows),
@@ -16102,7 +16220,8 @@ mod tests {
             // Bastok word 2 set through id 17 (two full pages of names).
             data: [0, 0, u32::MAX, u32::MAX & !(1 << 2), 0, 0, 0, 0],
         });
-        let rows = mission_detail_rows(&snap, MISSION_LOG_BASTOK, 0);
+        let rows =
+            mission_detail_rows(&snap, &MissionTextCatalog::default(), MISSION_LOG_BASTOK, 0);
         assert!(rows.len() > MISSION_LOG_VISIBLE_ROWS);
         let (total, start) = viewport_over(
             MenuKind::MissionDetail {
@@ -17586,5 +17705,94 @@ mod tests {
             Display::None,
             "no other detail window shows the rank bar"
         );
+    }
+
+    /// The assault wire law (`OTHER` ctor, vendor/server/src/map/packets/s2c/
+    /// 0x056_mission_other.cpp): offer-frame word 4 carries the current op id,
+    /// and completions land as `Data[4 + id / 32] |= 1 << (id % 32)` on port
+    /// 0x00C0. Op 0 stays out even if a stray bit shows.
+    #[test]
+    fn assault_windows_follow_the_folded_wire_words() {
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: 0x0080,
+            data: [0, 0, 0, 0, 21, 0, 0, 0],
+        });
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: 0x00C0,
+            // word 4 bit 2 = op 2; word 5 bit 10 = op 42 (words hold 32 bits).
+            data: [0, 0, 0, 0, 1 << 2, 1 << 10, 0, 0],
+        });
+        assert_eq!(
+            mission_quest_port_current(&snap, MISSION_LOG_ASSAULT),
+            Some(21)
+        );
+        assert_eq!(
+            mission_complete_bits(&snap, MISSION_LOG_ASSAULT),
+            vec![2u16, 42]
+        );
+
+        // Without a catalog the ops carry no name (the scraped lattice has no
+        // assault rows): both sections draw their headers, unnamed entries draw
+        // nothing rather than raw numbers.
+        let rows = mission_detail_rows(
+            &snap,
+            &MissionTextCatalog::default(),
+            MISSION_LOG_ASSAULT,
+            0,
+        );
+        assert_eq!(
+            labels(&rows),
+            ["Current:", "Completed:", "No completed missions."]
+        );
+    }
+
+    /// Gated on a retail install: with the catalog loaded, the window's names
+    /// are the DAT's own text — including its articles, which LSB's scraped
+    /// lattice strips (Bastok id 1 is `A Geological Survey` in ROM/176/68.DAT,
+    /// `Geological Survey` in `ffxi_vocab`). The install proves which source
+    /// wins.
+    #[test]
+    fn installed_catalog_text_wins_over_the_scraped_names() {
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        // Bastok's completion pair is words 2/3 on the Nations port (ur-era law).
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: 0x00D0,
+            data: [0, 0, 0b11, 0, 0, 0, 0, 0],
+        });
+        let fallback =
+            mission_detail_rows(&snap, &MissionTextCatalog::default(), MISSION_LOG_BASTOK, 0);
+        assert_eq!(
+            labels(&fallback)[..4],
+            [
+                "Current:",
+                "No current mission.",
+                "Completed:",
+                "The Zeruhn Report"
+            ]
+        );
+        assert_eq!(fallback[4].label, "Geological Survey");
+
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let mut texts = MissionTextCatalog::default();
+        texts.ensure_loaded(Some(&root));
+        // The Bastok catalog reads through, article and all — as does the
+        // assault op catalog (`xi.assault.mission` id 21 = Excavation Duty,
+        // briefing from its second string slot).
+        assert_eq!(
+            texts.name(MISSION_LOG_BASTOK, 1),
+            Some("A Geological Survey")
+        );
+        assert_eq!(texts.name(MISSION_LOG_ASSAULT, 21), Some("Excavation Duty"));
+        assert!(
+            texts
+                .description(MISSION_LOG_ASSAULT, 21)
+                .is_some_and(|d| d.starts_with("Area: Lebros Cavern")),
+            "the op briefing comes from the catalog's second string slot"
+        );
+        let rows = mission_detail_rows(&snap, &texts, MISSION_LOG_BASTOK, 0);
+        assert_eq!(rows[4].label, "A Geological Survey");
     }
 }

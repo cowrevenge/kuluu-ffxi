@@ -713,6 +713,16 @@ fn push_param(out: &mut String, bytes: &[u8], i: &mut usize, name: &str) {
 #[derive(Debug, Clone)]
 pub struct DmsgTable {
     strings: Vec<String>,
+    /// Every well-formed string slot of every block, in order; the fixed-block
+    /// mission-family catalogs keep `[name, briefing]` per entry where [`Self::text`]
+    /// would only surface the name.
+    entries: Vec<Vec<String>>,
+    /// Set only by the mission-family constructor: the u32 each block stores at
+    /// +0x1C, which labels the entry with its own index. Measured identical to
+    /// the block position for every non-empty block of ROM/176/67-73.DAT and
+    /// their FR twins in ROM/178, so lookups key off the wire id without any
+    /// hand-built mapping.
+    id_words: Option<Vec<Option<u32>>>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -725,6 +735,8 @@ pub enum DmsgError {
     ImplausibleCount { num_strings: u32 },
     #[error("corrupt d_msg catalog: truncated header")]
     TruncatedHeader,
+    #[error("not the fixed-block layout (tableSize {0} != 0)")]
+    NotFixedBlock(u32),
 }
 
 const DMSG_BANNER: &[u8] = b"d_msg";
@@ -741,35 +753,11 @@ fn read_u32(buf: &[u8], at: usize) -> Option<u32> {
 }
 
 impl DmsgTable {
+    /// Read a catalog the way every existing consumer wants it: one string per
+    /// entry (`text`), from either layout. Fixed-block mission-family tables
+    /// want [`Self::parse_mission_family`] instead.
     pub fn parse(buf: &[u8]) -> Result<Self, DmsgError> {
-        if buf.len() < 0x40 {
-            return Err(DmsgError::TooShort(buf.len()));
-        }
-        let got: [u8; 5] = buf[..5].try_into().expect("length checked above");
-        if got != *DMSG_BANNER {
-            return Err(DmsgError::BadBanner { got });
-        }
-        let mut header = [0u32; 6];
-        for (i, w) in header.iter_mut().enumerate() {
-            *w = read_u32(buf, DMSG_HEADER_WORDS_AT + i * 4).ok_or(DmsgError::TruncatedHeader)?;
-        }
-        // File offsets are u32 words in the header; widen once so all later
-        // arithmetic is usize and every read stays bounds-checked.
-        let (file_size, table_offset, table_size, block_size, _reserved, num_strings) = {
-            let [a, b, c, d, e, f] = header;
-            (a, b as usize, c, d as usize, e, f)
-        };
-        if num_strings == 0 || num_strings > 1_000_000 {
-            return Err(DmsgError::ImplausibleCount { num_strings });
-        }
-        let mut b = buf.to_vec();
-        let xor_end = b.len().min(file_size as usize);
-        if table_offset < xor_end {
-            for byte in &mut b[table_offset..xor_end] {
-                *byte ^= DMSG_XOR_MASK;
-            }
-        }
-        let num_strings = num_strings as usize;
+        let (b, table_offset, table_size, block_size, num_strings) = decode_common(buf)?;
         // Offset-table layout: {u32 off, u32 unk} pairs at table_offset, blocks
         // placed after the whole pair table.
         let pair_base = table_offset.checked_add(num_strings * 8);
@@ -785,10 +773,54 @@ impl DmsgTable {
                         .checked_mul(i)
                         .and_then(|d| table_offset.checked_add(d))
                 };
-                start.map_or_else(String::new, |s| first_string(&b, s))
+                start
+                    .and_then(|s| fixed_or_paired_slot0(&b, s))
+                    .unwrap_or_default()
             })
             .collect();
-        Ok(Self { strings })
+        let entries = strings.iter().map(|s| vec![s.clone()]).collect();
+        Ok(Self {
+            strings,
+            entries,
+            id_words: None,
+        })
+    }
+
+    /// Read the fixed-block mission-family layout (name + briefing per block):
+    /// `tableSize == 0` is required, and every entry carries its own id word at
+    /// +0x1C which [`Self::entry_id_word`] exposes so callers can key lookups off
+    /// it instead of assuming the block position.
+    pub fn parse_mission_family(buf: &[u8]) -> Result<Self, DmsgError> {
+        let (b, table_offset, table_size, block_size, num_strings) = decode_common(buf)?;
+        if table_size != 0 {
+            return Err(DmsgError::NotFixedBlock(table_size));
+        }
+        let entries: Vec<Vec<String>> = (0..num_strings)
+            .map(|i| {
+                block_size
+                    .checked_mul(i)
+                    .and_then(|d| table_offset.checked_add(d))
+                    .map(|s| mission_block_strings(&b, s))
+                    .unwrap_or_default()
+            })
+            .collect();
+        let strings = entries
+            .iter()
+            .map(|entry| entry.first().cloned().unwrap_or_default())
+            .collect();
+        let id_words: Vec<Option<u32>> = (0..num_strings)
+            .map(|i| {
+                block_size
+                    .checked_mul(i)
+                    .and_then(|d| table_offset.checked_add(d))
+                    .and_then(|s| read_u32(&b, s + FIXED_BLOCK_ID_WORD_AT))
+            })
+            .collect();
+        Ok(Self {
+            strings,
+            entries,
+            id_words: Some(id_words),
+        })
     }
 
     /// Entry count (the catalog's `numStrings`).
@@ -805,6 +837,62 @@ impl DmsgTable {
     pub fn text(&self, index: usize) -> Option<&str> {
         self.strings.get(index).map(String::as_str)
     }
+
+    /// Every string slot of one entry block in order — `[name, briefing]` when
+    /// read by [`Self::parse_mission_family`], otherwise a single-element view of
+    /// [`Self::text`]. `None` beyond the table; an empty slice means the block
+    /// carries no well-formed strings (an unassigned op keeps a structurally
+    /// present but blank block).
+    pub fn entry_strings(&self, index: usize) -> Option<&[String]> {
+        self.entries.get(index).map(Vec::as_slice)
+    }
+
+    /// The id word the fixed-block mission-family parser recorded at each entry's
+    /// +0x1C — its own index on every measured table, so name lookups key off it
+    /// rather than a hand-built mapping; `None` for catalogs read by [`Self::parse`].
+    pub fn entry_id_word(&self, index: usize) -> Option<u32> {
+        self.id_words.as_ref()?.get(index).copied().flatten()
+    }
+}
+
+/// Where a fixed-block mission-family entry stores its own-index label.
+const FIXED_BLOCK_ID_WORD_AT: usize = 0x1C;
+
+/// Shared header decode for both constructors: validate the banner and six
+/// words, XOR-0xFF the region past `tableOffset`, hand back the decrypted buffer
+/// and layout numbers as `usize` counts.
+fn decode_common(buf: &[u8]) -> Result<(Vec<u8>, usize, u32, usize, usize), DmsgError> {
+    if buf.len() < 0x40 {
+        return Err(DmsgError::TooShort(buf.len()));
+    }
+    let got: [u8; 5] = buf[..5].try_into().expect("length checked above");
+    if got != *DMSG_BANNER {
+        return Err(DmsgError::BadBanner { got });
+    }
+    let mut header = [0u32; 6];
+    for (i, w) in header.iter_mut().enumerate() {
+        *w = read_u32(buf, DMSG_HEADER_WORDS_AT + i * 4).ok_or(DmsgError::TruncatedHeader)?;
+    }
+    let (file_size, table_offset, table_size, block_size, num_strings) = match header {
+        [a, b, c, d, _e, f] => (a, b as usize, c, d as usize, f),
+    };
+    if num_strings == 0 || num_strings > 1_000_000 {
+        return Err(DmsgError::ImplausibleCount { num_strings });
+    }
+    let mut b = buf.to_vec();
+    let xor_end = b.len().min(file_size as usize);
+    if table_offset < xor_end {
+        for byte in &mut b[table_offset..xor_end] {
+            *byte ^= DMSG_XOR_MASK;
+        }
+    }
+    Ok((
+        b,
+        table_offset,
+        table_size,
+        block_size,
+        num_strings as usize,
+    ))
 }
 
 /// In a catalog that pairs its strings by id, entry `2n` names id `n`.
@@ -817,38 +905,54 @@ pub fn paired_description_entry(id: u16) -> usize {
     paired_name_entry(id) + 1
 }
 
-/// Entry block law (vault semantic_resolver.py): u32 count (0 = empty entry),
-/// u32 offset from block start to {u32 marker==1, 0x18 metadata bytes,
-/// NUL-terminated latin1 text}.
-fn first_string(b: &[u8], start: usize) -> String {
-    let Some(count) = read_u32(b, start) else {
-        return String::new();
-    };
-    if count == 0 {
-        return String::new();
+/// Fixed-block mission-family law for one entry (re-measured on ROM/176/67-73.DAT
+/// and the FR twins in ROM/178 while wiring this reader): a 0x1C-sized header —
+/// {u32 count, u32 header size (=0x1C), u32 [unused], name-descriptor offset}
+/// at +0xC, briefing-descriptor offset at +0x14, then the block's own id word at
+/// +0x1C — and string blobs {u32 marker==1, 0x18 metadata bytes, NUL-terminated
+/// latin1 text} at those two offsets. An unassigned op keeps the header with an
+/// id word but no well-formed blobs.
+fn mission_block_strings(b: &[u8], start: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for at in [0xCusize, 0x14] {
+        if let Some(off) = start.checked_add(at).and_then(|d| read_u32(b, d)) {
+            if let Some(s) = blob_at(b, start, off as usize) {
+                out.push(s);
+            }
+        }
     }
-    let Some(off) = read_u32(b, start + 4) else {
-        return String::new();
-    };
-    let Some(p) = usize::try_from(off).ok().and_then(|o| start.checked_add(o)) else {
-        return String::new();
-    };
+    out
+}
+
+/// Read one string blob: `off` from block start to the marker word, then past
+/// 0x18 metadata bytes to the NUL-terminated latin1 text.
+fn blob_at(b: &[u8], start: usize, off: usize) -> Option<String> {
+    let p = start.checked_add(off)?;
     if read_u32(b, p) != Some(DMSG_STRING_MARKER) {
-        return String::new();
+        return None;
     }
-    let q = match p.checked_add(4 + DMSG_ENTRY_METADATA_BYTES) {
-        Some(q) if q < b.len() => q,
-        _ => return String::new(),
-    };
+    let q = p.checked_add(4 + DMSG_ENTRY_METADATA_BYTES)?;
+    if q >= b.len() {
+        return None;
+    }
     let text_end = b[q..]
         .iter()
         .position(|&byte| byte == 0)
         .unwrap_or(b.len() - q);
-    // The catalogs are latin1 (EN runs are ASCII; JP twins keep their bytes).
-    b[q..q + text_end]
-        .iter()
-        .map(|&byte| byte as char)
-        .collect()
+    Some(
+        b[q..q + text_end]
+            .iter()
+            .map(|&byte| byte as char)
+            .collect(),
+    )
+}
+
+fn fixed_or_paired_slot0(b: &[u8], start: usize) -> Option<String> {
+    if read_u32(b, start)? == 0 {
+        return None;
+    }
+    let off = read_u32(b, start.checked_add(4)?)? as usize;
+    blob_at(b, start, off)
 }
 
 #[cfg(test)]
@@ -1560,5 +1664,98 @@ mod tests {
             DmsgTable::parse(&file).err(),
             Some(DmsgError::BadBanner { got: *b"xxxxx" })
         );
+    }
+
+    /// One mission-family block exactly as measured on ROM/176/72.DAT: seven
+    /// header words, name blob at +0x20, briefing blob straight after it.
+    fn dmsg_mission_block(id: u32, name: &str, briefing: Option<&str>) -> Vec<u8> {
+        let body_at = if briefing.is_some() {
+            0x20 + 4 + DMSG_ENTRY_METADATA_BYTES + name.len() + 1
+        } else {
+            0
+        };
+        let used = match briefing {
+            Some(b) => body_at + 4 + DMSG_ENTRY_METADATA_BYTES + b.len() + 1,
+            None => 0x20 + 4 + DMSG_ENTRY_METADATA_BYTES + name.len() + 1,
+        };
+        let mut blk = vec![0u8; used.max(0x280)];
+        for (at, w) in [3u32, 0x1C, 1, 0x20, 0, body_at as u32, 0, id]
+            .into_iter()
+            .enumerate()
+        {
+            blk[at * 4..at * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        for (off, s) in [(0x20usize, name), (body_at, briefing.unwrap_or(""))] {
+            if off == 0 && body_at == 0 && !s.is_empty() {
+                continue;
+            }
+            blk[off..off + 4].copy_from_slice(&DMSG_STRING_MARKER.to_le_bytes());
+            let text = off + 4 + DMSG_ENTRY_METADATA_BYTES;
+            blk[text..text + s.len()].copy_from_slice(s.as_bytes());
+        }
+        blk
+    }
+
+    fn dmsg_mission_file(blocks: &[Vec<u8>]) -> Vec<u8> {
+        let block_size = 0x280usize;
+        let table_offset = 0x40usize;
+        let mut file = dmsg_header(
+            (table_offset + blocks.len() * block_size) as u32,
+            0x40,
+            0,
+            block_size as u32,
+            blocks.len() as u32,
+        );
+        file.resize(table_offset + blocks.len() * block_size, 0);
+        for (i, blk) in blocks.iter().enumerate() {
+            put(&mut file, table_offset + i * block_size, blk);
+        }
+        for byte in &mut file[table_offset..] {
+            *byte ^= DMSG_XOR_MASK;
+        }
+        file
+    }
+
+    #[test]
+    fn dmsg_mission_family_reads_name_briefing_and_id_word() {
+        // An unassigned op: header with its id word and the name-descriptor
+        // offset left pointing at zeros — exactly the block 0 of ROM/176/72.DAT.
+        let blank = {
+            let mut b = vec![0u8; 0x280];
+            for (at, w) in [3u32, 0x1C, 1, 0x20, 0, 0, 0, 0].into_iter().enumerate() {
+                b[at * 4..at * 4 + 4].copy_from_slice(&w.to_le_bytes());
+            }
+            b
+        };
+        let file = dmsg_mission_file(&[
+            blank,
+            dmsg_mission_block(
+                1,
+                "Leujaoam Cleansing",
+                Some("Area: Leujaoam Sanctum\nObjective"),
+            ),
+        ]);
+        let dat = DmsgTable::parse_mission_family(&file).expect("mission catalog parses");
+        assert_eq!(dat.entry_strings(0), Some(&[][..]));
+        assert_eq!(dat.entry_id_word(0), Some(0));
+        let one = dat.entry_strings(1).expect("entry 1 present");
+        assert_eq!(one[0], "Leujaoam Cleansing");
+        assert!(one[1].starts_with("Area: Leujaoam Sanctum\nObjective"));
+        // The block labels itself, so lookups key off the word and never a
+        // hand-built position map.
+        assert_eq!(dat.entry_id_word(1), Some(1));
+        assert_eq!(dat.text(1), Some("Leujaoam Cleansing"));
+    }
+
+    #[test]
+    fn dmsg_mission_family_rejects_the_offset_table_layout() {
+        let mut file = dmsg_header(0x400, 0x40, 8, 0, 1);
+        for byte in &mut file[0x40..] {
+            *byte ^= DMSG_XOR_MASK;
+        }
+        assert!(matches!(
+            DmsgTable::parse_mission_family(&file),
+            Err(DmsgError::NotFixedBlock(8))
+        ));
     }
 }

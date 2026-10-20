@@ -319,9 +319,18 @@ pub fn option_help(id: SortOptionId) -> (&'static str, &'static str) {
 
 /// The bar keeps the list's title while the per-item submenu is up (retail:
 /// `Items | Use an item.`), even though the submenu pane itself says "Item".
+/// Every mission-family window does the same thing to its own word (ur/81:
+/// "The top left helper bar should just say Missions") — the chain's name
+/// belongs on the log/text windows' captions, not in the title box, where
+/// `Wings of the Goddess` truncated to "Wings of the" (ur/80).
 fn help_bar_title(kind: MenuKind) -> &'static str {
     if crate::hud::item_screen::is_item_submenu(kind) {
         menu::menu_title(MenuKind::Items)
+    } else if matches!(
+        kind,
+        MenuKind::MissionList | MenuKind::MissionDetail { .. } | MenuKind::MissionText { .. }
+    ) {
+        menu::menu_title(MenuKind::MissionList)
     } else {
         menu::menu_title(kind)
     }
@@ -1246,6 +1255,29 @@ mod tests {
             assert_eq!(
                 entry_help(MenuKind::UnityLeaders, cursor, &dynamic),
                 "leader help"
+            );
+        }
+    }
+
+    /// ur/81 ("The top left helper bar should just say Missions"): every window in
+    /// the mission family keeps `Missions` in the title box — the chain name is a
+    /// window caption, and inside the 112px box it truncated to "Wings of the"
+    /// over the WoTG log (ur/80).
+    #[test]
+    fn every_mission_window_helper_box_says_missions() {
+        assert_eq!(help_bar_title(MenuKind::MissionList), "Missions");
+        for log in [
+            menu::MISSION_LOG_WOTG,
+            menu::MISSION_LOG_SANDORIA,
+            255, // unmeasured chain: still the family's own word
+        ] {
+            assert_eq!(
+                help_bar_title(MenuKind::MissionDetail { log, member: 0 }),
+                "Missions"
+            );
+            assert_eq!(
+                help_bar_title(MenuKind::MissionText { log, id: 1 }),
+                "Missions"
             );
         }
     }

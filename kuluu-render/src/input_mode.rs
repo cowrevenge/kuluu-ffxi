@@ -494,6 +494,17 @@ pub enum MenuKind {
         member: u8,
     },
 
+    /// One mission's text window — kuluu's answer to ur/80 ("clicking any mission
+    /// leads to blank instead of mission description"): selecting a named row in
+    /// the `miss00` log pushes this `(log, id)` payload and shows the install
+    /// catalog's briefing for that mission. The retail sibling window is the
+    /// unregistered 'miss' (`menu    missiton`, DAT geometry without a §1 registry
+    /// record — vault main_menu.md §30), so kuluu reuses the `miss00` frame.
+    MissionText {
+        log: u8,
+        id: u16,
+    },
+
     /// Page-2 row 2 fires the "/quest" text command, whose id-table handler resets
     /// the quest-window filter word and name-opens `menu    quest00` (FFXiMain.dll
     /// retail-2026-09 RVA 0x14E889 → runner, entry 0x4D → 0x1007D240; vault

@@ -1400,7 +1400,11 @@ fn sub_target_action_for(
         // Mission list/detail rows drill or stay legible; no sub-target step. The
         // Bazaar stall picker picks up its browse on the plain confirm seam only,
         // like the mission drills (vault main_menu.md §33).
-        A::MissionOpenLog { .. } | A::MissionLogRow { .. } | A::BazaarStall { .. } => None,
+        A::MissionOpenLog { .. }
+        | A::MissionLogRow { .. }
+        | A::MissionOpenText { .. }
+        | A::MissionTextRow { .. }
+        | A::BazaarStall { .. } => None,
         // Same law for the quest00/quest01 pair (vault main_menu.md §31), and
         // for the home-view job picks — they commit one c2s 0x100 MYROOM_JOB on
         // the wire, never to a target (handler FFXiMain.dll retail-2026-09
@@ -2031,8 +2035,12 @@ fn dispatch_dynamic_menu_action(
         A::RegionInfoMode { .. } => return,
         // Mission drills and legible log rows are answered at the confirm seam
         // above / stay inert per vault main_menu.md section 30; quest00's drill and
-        // quest01's legible rows follow the same law (vault section 31).
-        A::MissionOpenLog { .. } | A::MissionLogRow { .. } => return,
+        // quest01's legible rows follow the same law (vault section 31). The mission
+        // text drill (ur/80) is client-local like its log parent.
+        A::MissionOpenLog { .. }
+        | A::MissionLogRow { .. }
+        | A::MissionOpenText { .. }
+        | A::MissionTextRow { .. } => return,
         // The stall picker answers on the plain confirm seam (vault
         // main_menu.md §33), never as a sub-target action.
         A::BazaarStall { .. } => return,

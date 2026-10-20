@@ -864,6 +864,15 @@ pub(super) fn confirm_menu_at_cursor(
                 return None;
             }
 
+            // A named `miss00` line name-opens its text window over the log —
+            // ur/80: "clicking any mission leads to blank instead of mission
+            // description"; retail's quest00→quest01 select tail law (§31) is
+            // the grounded mirror for this drill.
+            if let A::MissionOpenText { log, id } = action {
+                stack.push(MenuKind::MissionText { log, id });
+                return None;
+            }
+
             // The quest00 select tail name-opens quest01 over the list with the
             // row value (FFXiMain.dll retail-2026-09 RVA 0x2300EE; vault
             // main_menu.md §31) — kuluu pushes that quest's detail the same way.

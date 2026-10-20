@@ -487,10 +487,24 @@ pub enum DynamicMenuAction {
         member: u8,
     },
 
-    /// A legible-only mission-log line (`miss00`'s paging semantics are
-    /// [I-pending], vault main_menu.md section 30).
+    /// A header or reason line of the `miss00` log — inert (the window's own
+    /// paging semantics are [I-pending], vault main_menu.md section 30).
     MissionLogRow {
         port: u16,
+    },
+
+    /// One named mission row; select name-opens that mission's text window
+    /// (ur/80: "clicking any mission leads to blank instead of mission
+    /// description" — the catalog's second string slot carries the orders).
+    MissionOpenText {
+        log: u8,
+        id: u16,
+    },
+
+    /// A legible-only line of one mission's text window.
+    MissionTextRow {
+        log: u8,
+        id: u16,
     },
 
     /// One stall-picked row of the Bazaar window (the `bazaar` browser is
@@ -1243,6 +1257,7 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::RegionInfo { .. }
             | MenuKind::MissionList
             | MenuKind::MissionDetail { .. }
+            | MenuKind::MissionText { .. }
             | MenuKind::BazaarStalls
             | MenuKind::QuestList
             | MenuKind::QuestDetail { .. }
@@ -1534,6 +1549,7 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::RegionInfo { .. } => &[],
         MenuKind::MissionList => &[],
         MenuKind::MissionDetail { .. } => &[],
+        MenuKind::MissionText { .. } => &[],
         // Stall rows come from the zone entity stream (vault main_menu.md §33).
         MenuKind::BazaarStalls => &[],
         MenuKind::QuestList => &[],
@@ -1607,8 +1623,9 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::CraftList => "Craft List",
         MenuKind::RegionInfo { .. } => "Region Info",
         MenuKind::MissionList => "Missions",
-        // The log window wears its chain's name under the arrows (ur/64 shows `Bastok`).
-        MenuKind::MissionDetail { log, .. } => {
+        // The log window wears its chain's name under the arrows (ur/64 shows `Bastok`);
+        // the mission text window mirrors its parent log's caption.
+        MenuKind::MissionDetail { log, .. } | MenuKind::MissionText { log, .. } => {
             return mission_chain_name(log).unwrap_or("Mission Log")
         }
         MenuKind::BazaarStalls => "Bazaar",
@@ -5128,8 +5145,11 @@ pub fn record_window_name(kind: MenuKind) -> Option<&'static str> {
         // `/quest` chains through exactly these two windows (vault main_menu.md §31).
         MenuKind::QuestList => "quest00",
         MenuKind::QuestDetail { .. } => "quest01",
-        // `miss00` is the only mission-log record — it serves every chain (vault main_menu.md §30).
-        MenuKind::MissionDetail { .. } => "miss00",
+        // `miss00` is the only mission-log record — it serves every chain (vault
+        // main_menu.md §30); retail's unregistered sibling for mission text ('miss'/
+        // missiton) owns no registry entry, so kuluu stacks the text window on the
+        // same `miss00` frame as its log.
+        MenuKind::MissionDetail { .. } | MenuKind::MissionText { .. } => "miss00",
         // Retail opens its trade pair left-half; kuluu merges both windows into one
         // surface anchored on its own side's record (vault main_menu.md §25).
         MenuKind::Trade => "trade",
@@ -5892,7 +5912,14 @@ impl MissionTextCatalog {
             return;
         }
         let Some(root) = root else { return };
-        for chain in [0u8, 1, 2, 3, 4, 6, 7] {
+        // Every chain the install's own map claims (`chain_catalog_file` is the
+        // single source; ur/80 added WoTG and the add-on micro-chains, which a
+        // hardcoded list here promptly forgot). Absent/unmeasured chains simply
+        // do not load.
+        for chain in 0u8..=24 {
+            if ffxi_dat::mission_dat::chain_catalog_file(chain).is_none() {
+                continue;
+            }
             if let Ok(table) = ffxi_dat::mission_dat::open_chain_catalog(root, chain) {
                 self.tables.insert(chain, table);
             }
@@ -6036,10 +6063,12 @@ pub const MISSION_SELECTOR_LABELS_PINNED: [&str; 7] = [
 
 /// The selector rows chain-by-chain, same order as the labels: a row's index in
 /// its list is that window's Left/Right member slot. Nations walks its three
-/// native logs (ur/64 shows `← Bastok →`); Aht Urhgan alternates with Wings of the
-/// Goddess; the Add-ons row walks the three add-on chains; Zilart/Promathia/Altana/
-/// Adoulin stand alone (LSB marks TVR's own `log_id` as a guess in vendor/server/
-/// scripts/globals/missions.lua).
+/// native logs (ur/64 shows `← Bastok →`). ur/80 re-pinned the era rows to their
+/// own captions — "clicking Adoulin is not correctly linked to seekers or
+/// Adoulin": Wings of the Goddess stands under Altana (its story IS the Star
+/// Mother's), Aht Urhgan lost its invented WoTG partner, and both Adoulin-era
+/// chains (Seekers then Rhapsodies) ride the Adoulin row. Zilart/Promathia stand
+/// alone; Add-ons walks the three micro-chains.
 pub const MISSION_SELECTOR_CHAINS_PINNED: [&[u8]; 7] = [
     &[
         MISSION_LOG_SANDORIA,
@@ -6048,9 +6077,9 @@ pub const MISSION_SELECTOR_CHAINS_PINNED: [&[u8]; 7] = [
     ],
     &[MISSION_LOG_ZILART],
     &[MISSION_LOG_COP],
-    &[MISSION_LOG_TOAU, MISSION_LOG_WOTG],
-    &[MISSION_LOG_SOA],
-    &[MISSION_LOG_ROV],
+    &[MISSION_LOG_TOAU],
+    &[MISSION_LOG_WOTG],
+    &[MISSION_LOG_SOA, MISSION_LOG_ROV],
     &[MISSION_LOG_ACP, MISSION_LOG_AMK, MISSION_LOG_ASA],
 ];
 
@@ -6522,8 +6551,10 @@ pub fn is_bazaar_stall_entity(e: &kuluu_snapshot::Entity, self_char_id: Option<u
 /// `Current:` and `Completed:` are permanent headers, each filled with names or
 /// with retail's own reason line when empty. Current comes from the main port
 /// (`NationMission`, `Expansion_*`; SoA/Rov de-offset), completion from ports
-/// 0x00D0/0x00D8; names come from the scraped `xi.mission.id` lattice.
-/// The arrows cycle this window's members (ur/64); Nations merely opens on home first.
+/// 0x00D0/0x00D8; names come install-catalog-first ([`MissionTextCatalog`]),
+/// scraped `xi.mission.id` lattice as fallback. Named lines carry their
+/// `(log, id)` so a select opens that mission's text window (ur/80). The arrows
+/// cycle this window's members (ur/64); Nations merely opens on home first.
 pub fn mission_detail_rows(
     snap: &kuluu_snapshot::SceneSnapshot,
     texts: &MissionTextCatalog,
@@ -6540,21 +6571,30 @@ pub fn mission_detail_rows(
                 .and_then(|info| mission_main_port_current(info, log))
         };
     let completed = mission_complete_bits(snap, log);
-    let mut rows: Vec<String> = vec!["Current:".to_string()];
+    // Draw order as (label, wire id): named lines carry their id so a select
+    // name-opens this mission's text window (ur/80); headers and reasons stay
+    // inert.
+    let mut lines: Vec<(String, Option<u16>)> = vec![("Current:".to_string(), None)];
     match current.filter(|&id| !completed.contains(&(id as u16))) {
-        Some(id) => push_mission_name(&mut rows, texts, log, id as u16),
-        None => rows.push(mission_current_reason(snap, log).to_string()),
+        Some(id) => {
+            if let Some(label) = mission_label(texts, log, id as u16) {
+                lines.push((label, Some(id as u16)));
+            }
+        }
+        None => lines.push((mission_current_reason(snap, log).to_string(), None)),
     }
-    let mut named: Vec<String> = Vec::new();
+    let mut named: Vec<(String, Option<u16>)> = Vec::new();
     for id in completed {
-        push_mission_name(&mut named, texts, log, id);
+        if let Some(label) = mission_label(texts, log, id) {
+            named.push((label, Some(id)));
+        }
     }
-    rows.push("Completed:".to_string());
+    lines.push(("Completed:".to_string(), None));
     if named.is_empty() {
         // The capture's exact wording for an empty Completed section (ur/73).
-        rows.push("No completed missions.".to_string());
+        lines.push(("No completed missions.".to_string(), None));
     } else {
-        rows.append(&mut named);
+        lines.append(&mut named);
     }
     // The wire port that named this window's data, kept on the inert rows.
     let port = match log {
@@ -6562,11 +6602,15 @@ pub fn mission_detail_rows(
         MISSION_LOG_TOAU | MISSION_LOG_WOTG => 0x00D8,
         _ => ffxi_proto::mission::PORT_MISSION_MAIN,
     };
-    rows.into_iter()
-        .map(|label| DynamicMenuRow {
+    lines
+        .into_iter()
+        .map(|(label, id)| DynamicMenuRow {
             tint: None,
             label,
-            action: DynamicMenuAction::MissionLogRow { port },
+            action: match id {
+                Some(id) => DynamicMenuAction::MissionOpenText { log, id },
+                None => DynamicMenuAction::MissionLogRow { port },
+            },
         })
         .collect()
 }
@@ -6575,14 +6619,47 @@ pub fn mission_detail_rows(
 /// source retail itself draws from; only where no catalog was read does the
 /// scraped `ffxi_vocab` lattice stand in, and ids neither knows (unassigned
 /// completion words) draw nothing rather than a raw number.
-fn push_mission_name(rows: &mut Vec<String>, texts: &MissionTextCatalog, log: u8, id: u16) {
-    if let Some(name) = texts.name(log, id) {
-        rows.push(name.to_string());
-        return;
+fn mission_label(texts: &MissionTextCatalog, log: u8, id: u16) -> Option<String> {
+    texts
+        .name(log, id)
+        .map(str::to_string)
+        .or_else(|| ffxi_vocab::mission_names::mission_name(log, id).map(String::from))
+}
+
+/// The mission text window for one named log line (ur/80: "clicking any mission
+/// leads to blank instead of mission description"): the name first, then the
+/// install catalog's briefing — `Mission Orders:` lines on story missions,
+/// `Area:`/`Objective:` on assault ops (the fixed-block table's second string
+/// slot; `ffxi-dat::mission_dat`) — with retail's own newlines kept as rows.
+/// A chain whose briefing the install never yielded still gets its name and a
+/// neutral empty-section line, never a blank window [I-pending wording].
+pub fn mission_text_rows(texts: &MissionTextCatalog, log: u8, id: u16) -> Vec<DynamicMenuRow> {
+    let mut labels: Vec<String> = Vec::new();
+    if let Some(name) = mission_label(texts, log, id) {
+        labels.push(name);
     }
-    if let Some(name) = ffxi_vocab::mission_names::mission_name(log, id) {
-        rows.push((*name).to_string());
+    match texts.description(log, id) {
+        Some(briefing) => labels.extend(
+            briefing
+                .split('\n')
+                .map(str::trim_end)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string),
+        ),
+        None if !labels.is_empty() => labels.push("(nothing recorded)".to_string()),
+        None => {}
     }
+    if labels.is_empty() {
+        labels.push("(nothing recorded)".to_string());
+    }
+    labels
+        .into_iter()
+        .map(|label| DynamicMenuRow {
+            tint: None,
+            label,
+            action: DynamicMenuAction::MissionTextRow { log, id },
+        })
+        .collect()
 }
 
 /// The line retail puts under `Current:` when the log holds no current mission
@@ -6952,7 +7029,9 @@ pub fn refresh_dynamic_menu_rows(
         stack.levels.iter().any(|level| {
             matches!(
                 level.kind,
-                MenuKind::MissionList | MenuKind::MissionDetail { .. }
+                MenuKind::MissionList
+                    | MenuKind::MissionDetail { .. }
+                    | MenuKind::MissionText { .. }
             )
         })
     });
@@ -7241,6 +7320,7 @@ fn dynamic_rows_for(
         MenuKind::MissionDetail { log, member } => {
             mission_detail_rows(snap, &dynamic.mission_texts, log, member)
         }
+        MenuKind::MissionText { log, id } => mission_text_rows(&dynamic.mission_texts, log, id),
         // The bazaar browser lists the zone's open player stalls (§33 wire law).
         MenuKind::BazaarStalls => bazaar_stall_rows(snap),
         // The quest00 list follows the folded s2c 0x056 quest ports (vault
@@ -7454,7 +7534,8 @@ fn order_dynamic_rows(
         | MenuKind::Arrange(_)
         | MenuKind::StatusDetail { .. }
         | MenuKind::MissionList
-        | MenuKind::MissionDetail { .. } => {}
+        | MenuKind::MissionDetail { .. }
+        | MenuKind::MissionText { .. } => {}
         _ => rows.sort_by(|a, b| a.label.cmp(&b.label)),
     }
 }
@@ -16186,11 +16267,12 @@ mod tests {
             Some((MISSION_LOG_BASTOK, 1))
         );
         // ur/76 follow-up: one ring of every lit menu — the arrows link across
-        // selector rows, so wrap behind Sandoria lands on Adoulin, and Promathia's
-        // single-member row steps into Aht Urhgan rather than staying put.
+        // selector rows. ur/80 re-pinned the era rows (Adoulin = Seekers then
+        // Rhapsodies), so wrap behind Sandoria lands on Rhapsodies, its row's
+        // second member.
         assert_eq!(
             mission_cycle_member(&snap, MISSION_LOG_SANDORIA, 0, false),
-            Some((MISSION_LOG_ROV, 0)),
+            Some((MISSION_LOG_ROV, 1)),
             "wrap behind the ring's first menu crosses rows"
         );
         assert_eq!(
@@ -16198,12 +16280,14 @@ mod tests {
             Some((MISSION_LOG_TOAU, 0))
         );
         assert_eq!(
-            mission_cycle_member(&snap, MISSION_LOG_ROV, 0, true),
+            mission_cycle_member(&snap, MISSION_LOG_ROV, 1, true),
             Some((MISSION_LOG_SANDORIA, 0)),
             "Rhapsodies steps back onto the ring's head"
         );
+        // Wings of the Goddess stands alone under Altana now (ur/80); behind it
+        // sits Aht Urhgan, its own row.
         assert_eq!(
-            mission_cycle_member(&snap, MISSION_LOG_WOTG, 1, false),
+            mission_cycle_member(&snap, MISSION_LOG_WOTG, 0, false),
             Some((MISSION_LOG_TOAU, 0))
         );
         assert_eq!(
@@ -16268,7 +16352,7 @@ mod tests {
         );
         assert_eq!(
             mission_cycle_member(&snap, MISSION_LOG_AMK, 1, false),
-            Some((MISSION_LOG_ROV, 0)),
+            Some((MISSION_LOG_ROV, 1)),
             "behind the reported addon comes Adoulin, not its grey siblings"
         );
         assert_eq!(
@@ -17794,5 +17878,104 @@ mod tests {
         );
         let rows = mission_detail_rows(&snap, &texts, MISSION_LOG_BASTOK, 0);
         assert_eq!(rows[4].label, "A Geological Survey");
+    }
+
+    /// ur/80 ("clicking Adoulin is not correctly linked to seekers or Adoulin"):
+    /// each era row opens its own caption's chain — Wings of the Goddess rides
+    /// Altana alone, Aht Urhgan lost its invented partner, and both Adoulin-era
+    /// chains ride the Adoulin row with Seekers first.
+    #[test]
+    fn era_selector_rows_open_their_own_captions_chains() {
+        let snap = kuluu_snapshot::SceneSnapshot::default();
+        assert_eq!(mission_selector_chains(3), [MISSION_LOG_TOAU]);
+        assert_eq!(mission_selector_chains(4), [MISSION_LOG_WOTG]);
+        assert_eq!(
+            mission_selector_chains(5),
+            [MISSION_LOG_SOA, MISSION_LOG_ROV]
+        );
+        let adoulin = mission_selector_open_row(&snap, 5).expect("Adoulin row opens");
+        assert_eq!(adoulin.log, MISSION_LOG_SOA);
+        assert_eq!(adoulin.member, 0);
+        assert_eq!(
+            mission_chain_name(MISSION_LOG_WOTG),
+            Some("Wings of the Goddess")
+        );
+    }
+
+    /// ur/80: named `miss00` lines carry their `(log, id)` so a select name-opens
+    /// the text window; headers and reason lines stay inert.
+    #[test]
+    fn named_mission_lines_carry_their_text_drill() {
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        // Bastok's completion pair is words 2/3 on the Nations port: ids 0 and 1.
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: 0x00D0,
+            data: [0, 0, 0b11, 0, 0, 0, 0, 0],
+        });
+        let rows =
+            mission_detail_rows(&snap, &MissionTextCatalog::default(), MISSION_LOG_BASTOK, 0);
+        assert_eq!(rows[3].label, "The Zeruhn Report");
+        assert_eq!(rows[4].label, "Geological Survey"); // no install: scraped lattice
+        for (row, id) in [(&rows[3], 0u16), (&rows[4], 1)] {
+            assert_eq!(
+                row.action,
+                DynamicMenuAction::MissionOpenText {
+                    log: MISSION_LOG_BASTOK,
+                    id
+                }
+            );
+        }
+        // Headers stay legible-only (the port they were read from rides along).
+        assert!(matches!(
+            rows[0].action,
+            DynamicMenuAction::MissionLogRow { .. }
+        ));
+        assert!(matches!(
+            rows[2].action,
+            DynamicMenuAction::MissionLogRow { .. }
+        ));
+    }
+
+    /// The text window never blanks: without a briefing catalog the mission is
+    /// still named (scraped lattice) above an explicit empty line; the Adoulin-era
+    /// chains (no claimed catalog — their tables key off wire-encoded id words,
+    /// `ffxi-dat::mission_dat` census) read through this path.
+    #[test]
+    fn text_window_names_the_mission_even_without_a_catalog() {
+        let rows = mission_text_rows(&MissionTextCatalog::default(), MISSION_LOG_SOA, 6);
+        assert_eq!(
+            labels(&rows),
+            ["Pioneer Registration", "(nothing recorded)"]
+        );
+    }
+
+    /// Gated on a retail install: the text window fills from the catalog's
+    /// second string slot — `Mission Orders:` as its own first row, then
+    /// retail's wrapped lines (`ffxi-dat::mission_dat`), for both an old-chain
+    /// mission and Wings of the Goddess (ROM/196/7.DAT, claimed by the 2026-10-20
+    /// census after ur/80).
+    #[test]
+    fn installed_briefings_fill_the_mission_text_window() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let mut texts = MissionTextCatalog::default();
+        texts.ensure_loaded(Some(&root));
+        let bastok = mission_text_rows(&texts, MISSION_LOG_BASTOK, 0);
+        assert_eq!(bastok[0].label, "The Zeruhn Report");
+        assert_eq!(bastok[1].label, "Mission Orders:");
+        assert!(bastok[2].label.starts_with(" Collect Overseer Makarim")); // retail's wrap kept
+        let wotg = mission_text_rows(&texts, MISSION_LOG_WOTG, 1);
+        assert_eq!(wotg[0].label, "Back to the Beginning");
+        assert_eq!(wotg[1].label, "Mission Orders:");
+        for row in &bastok {
+            assert_eq!(
+                row.action,
+                DynamicMenuAction::MissionTextRow {
+                    log: MISSION_LOG_BASTOK,
+                    id: 0
+                }
+            );
+        }
     }
 }

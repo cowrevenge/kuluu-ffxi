@@ -96,6 +96,10 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
         kuluu_render::MenuKind::RegionInfo { .. } => "Region Info".into(),
         kuluu_render::MenuKind::MissionList => "Missions".into(),
         kuluu_render::MenuKind::MissionDetail { log, .. } => format!("MissionLog({log})").into(),
+        // The ur/80 text drill echoes its payload like the quest01 detail does.
+        kuluu_render::MenuKind::MissionText { log, id } => {
+            format!("MissionText({log}#{id})").into()
+        }
         // Bazaar row's stall picker (vault main_menu.md §33).
         kuluu_render::MenuKind::BazaarStalls => "Bazaar".into(),
         kuluu_render::MenuKind::MacrosPalette => "MacroPalette".into(),

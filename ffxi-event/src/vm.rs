@@ -3308,7 +3308,7 @@ mod tests {
 
         assert_eq!(
             e.step(),
-            StepResult::Waiting,
+            StepResult::AwaitServerAck(PendingTag::SendTag { end_para: 0 }),
             "the owner parks on its 0x43 poll"
         );
         assert!(
@@ -3370,7 +3370,7 @@ mod tests {
 
         assert_eq!(
             e.step(),
-            StepResult::Waiting,
+            StepResult::AwaitServerAck(PendingTag::SendTag { end_para: 0 }),
             "the owner parks on its 0x43 poll"
         );
         e.apply_pending_num(&[11, 22, 33, 44, 55, 66, 77, 88]);

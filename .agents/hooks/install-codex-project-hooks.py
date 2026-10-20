@@ -35,7 +35,7 @@ def configured(data):
                 kept.append({**group, "hooks": handlers})
         kept.append({"hooks": [{
             "type": "command",
-            "command": 'python3 "$(git rev-parse --show-toplevel)/.agents/hooks/ste100-reminder.py"',
+            "command": 'root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0; for hook in "$root/.agents/hooks/ste100-reminder.py" "$(dirname "$common")/.agents/hooks/ste100-reminder.py"; do if [ -f "$hook" ]; then python3 "$hook"; exit $?; fi; done',
             "timeout": 10,
         }]})
         hooks[event] = kept

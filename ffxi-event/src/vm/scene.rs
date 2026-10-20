@@ -346,7 +346,12 @@ impl EventVm {
                         surfaced = Some(result);
                     }
                 }
-                StepResult::AwaitMessageAck | StepResult::AwaitServerAck(_) => {
+                StepResult::AwaitServerAck(tag) => {
+                    if surfaced.is_none() {
+                        surfaced = Some(StepResult::AwaitServerAck(tag));
+                    }
+                }
+                StepResult::AwaitMessageAck => {
                     tracing::debug!(
                         target: "ffxi_event::vm",
                         actor,
@@ -443,6 +448,21 @@ impl EventVm {
         vm.action_holds = self.action_holds.clone();
         vm.move_holds = self.move_holds.clone();
         let result = vm.step();
+        tracing::trace!(
+            target: "event_trace",
+            actor,
+            request_index = index,
+            ?result,
+            park = ?vm.park(),
+            exec_pointer = vm.exec_pointer,
+            pending_tag = ?vm.pending_tag(),
+            progress = vm.progress_stamp(),
+            action_holds = ?vm.action_holds.iter().map(|hold| (hold.actor, hold.key, hold.remaining_units)).collect::<Vec<_>>(),
+            pending_action_holds = ?vm.pending_action_holds,
+            pending_action_starts = ?vm.pending_action_starts,
+            cue_count = vm.cues.len(),
+            "child event step"
+        );
         for cue in vm.take_cues() {
             self.cues.push(cue.resolve_event_actor(ActorLookup(actor)));
         }

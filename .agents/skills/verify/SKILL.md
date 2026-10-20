@@ -19,6 +19,35 @@ Session behavior requires a real session against the server; cosmetic widgets
 can use the production fixture described below. Tests and source inspection
 alone do not establish the visible result.
 
+## Select the GUI control method
+
+In Codex, prefer `cua_repl` computer use for visible keyboard, mouse, scroll, and drag tests.
+First select the running client and inspect a fresh screenshot.
+Use the client socket for state, diagnostics, and captures when those operations are available.
+Computer use availability does not establish access to the selected client.
+If selection or control fails, save the diagnostic before selecting a supported alternative.
+Follow the active tool rules when selecting an alternative input method.
+
+In other coding agents, use the portable input and capture procedures in [drive-gui.md](references/drive-gui.md).
+Jev or the current agent's vision can supply visual decisions when available.
+Do not require Codex tools or Jev credentials in another coding agent.
+
+Allow only one input driver per client.
+Use Jev, a bounded controller, or native vision to check each result before the next input.
+A full-model image review is not required for every routine action.
+Stop after two consecutive inputs produce no visible change.
+Do not use repeated Enter input without checks of the visible result.
+Synthetic input does not establish physical trackpad behavior.
+
+## Session authorization
+
+A verification request covers routine navigation, dialogue, local fixtures, captures, and reversible tests within its scope.
+Reuse existing approval for the same action, client, and external service.
+Do not ask again because control passes to another agent or a routine test step changes.
+Complete authorized preparation and checks before requesting any missing approval.
+If an active tool policy blocks an action, identify that policy and continue unaffected work.
+This skill adds no separate confirmation gate.
+
 ## Required behavior evidence
 
 Before collection, derive the required cases from the reported problem and the final change.
@@ -45,10 +74,8 @@ For UI work, choose the drive and expected visible result before editing.
 Completion requires the changed build, an affected-view capture, and opening
 that capture with `view_image` (Codex) or `Read` (Claude) to inspect the pixels.
 Prefer evidence captured directly from the game or derived from its production
-rendering pipeline, with that provenance stated. A fixture can establish a
-cosmetic result when it renders the real production widget and covers the
-reported defect; it does not establish the live game's navigation or session
-behavior. Secondary evidence is a fallback when direct evidence cannot be
+rendering pipeline, with that provenance stated. A fixture can establish a cosmetic result with the production widget and the reported defect.
+Navigation and session behavior require live checks. Secondary evidence is a fallback when direct evidence cannot be
 gathered: record the specific reason and limit the claim to what it demonstrates.
 An independently drawn mockup cannot verify the game's pixels. Keep
 navigation/session checks on the live stack. Exercise the
@@ -56,9 +83,9 @@ shared widget's affected consumers and the cases that motivated the fix, such
 as quantity text over bright/dark art, empty slots, and single-item stacks.
 
 Do not close the bead or declare a visual fix complete from green unit tests.
-Slow builds and time spent are not blockers. If building, launching, driving,
-or capturing actually fails, retain the diagnostic, record a blocked verdict,
-leave verification work open, and state the exact blocker in the final report.
+Slow builds and time spent are not blockers. If a build, launch, drive, or capture fails, retain its diagnostic.
+Continue unaffected work.
+Keep the incomplete verification open and report its exact blocker.
 
 If a stop hook rejects a blocked handoff, read its evidence marker and diagnostic
 first. A disclosure failure needs a corrected final report: say verification
@@ -68,9 +95,8 @@ and hook print a usable handoff. Reuse current evidence; recording it again
 cannot make an old diagnostic fresh. A source, build or artifact mismatch needs
 new evidence for the current change, not a wording fix.
 
-For an older worktree without the recorder, run the script by absolute path
-from a trusted checkout while keeping the affected worktree as the command's
-working directory. The marker belongs to that working directory. Repair a
+If an older worktree lacks the recorder, use its absolute path from a trusted checkout.
+Keep the affected worktree as the working directory. The marker belongs to that working directory. Repair a
 missing hook adapter from matching trusted project content and check its
 registration; do not execute hook or skill changes from an untrusted PR.
 
@@ -107,9 +133,8 @@ account authentication is separate from LSB sessions; an LSB login cannot
 verify `ffxi-pol::profile`. Use an existing, applicable local service when
 available. A mock handshake or a refusal from an invented localhost endpoint
 does not exercise credential hashing or prove a deployed service is broken.
-If the affected service is unavailable or outside the task's authorization,
-retain the applicable access/configuration diagnostic, keep verification open,
-and state which production path was not reached. Do not send real credentials
+If the affected service is unavailable or outside scope, retain the access diagnostic.
+Keep verification open and identify the production path not reached. Do not send real credentials
 or account-service traffic to a public endpoint merely to satisfy the gate.
 
 | Change touches | Observable at | Drive with |
@@ -150,24 +175,23 @@ Make the driver's brief self-contained; do not rely on inherited context:
   not "zone the character");
 - where to save artifacts (`artifacts/verify/…`) and what to return: artifact
   paths plus the observed event/log lines — never a bare "done";
-- an escalation rule: if state is ambiguous, or two consecutive actions change
-  nothing, stop and report what it saw — a confused driver that keeps sending
-  commands destroys the scene you set up.
+- failure conditions: unexpected state or two consecutive actions without the expected change.
+  Stop that drive and return its diagnostic.
 
-Interpretation stays here: read the returned artifacts yourself before citing
-them as evidence. If the driving itself needs judgment (bisecting which layer
-is broken, probing off the happy path), do it inline — delegation is for the
-mechanical middle, not the thinking.
+Use Jev for routine visual classification when available.
+A bounded controller can execute validated decisions without returning each image to a full model.
+Review key evidence images and exceptions yourself before making the final claim.
+Use the driver's capture hashes and observations to avoid duplicate review of every routine frame.
+Investigate ambiguous behavior in the main agent.
 
 ## Character strategy
 
 **Never ask the user for credentials.** This is a local dev stack with
 throwaway accounts; verification is expected to launch sessions on its own.
 Default to one of the documented local accounts below (or provision a fresh
-one) — do not stop to request a login. The only credentials that are secret
-are the user's *real* env-var account, which you use only when a check needs
-their actual character; even then it comes from the environment, never a
-prompt.
+one) — do not stop to request a login. Use the user's real account only when the check requires their character.
+Read those credentials from the environment.
+Never request them in a prompt.
 
 - **Local GM drive account** (default for GUI drives that need `!zone`/
   `!addtime`/`!setweather`): account `verilight`, password `TestPass!1234`,
@@ -179,28 +203,22 @@ prompt.
   (`FFXI_USER`/`FFXI_PASS`/`FFXI_CHAR`); never commit or log them. Use only
   when the check specifically needs the user's own character/progress.
 - **Fresh provisioned chars** (`provision` + `create-char`, no DB teleport
-  needed) — full E2E vehicle including zone changes and Mog House entry. The
-  old "fresh chars get all c2s silently ignored" blocker was two client bugs,
-  both fixed: the c2s datagram header must be the last subpacket's sync
-  (`session.rs::datagram_header_id` — drift = server skips every subpacket
-  silently), and the new-char intro cutscene rides the 0x00A LOGIN packet
-  (`decode::ZoneInEvent`) and must be answered with 0x05B or the char sticks
-  InEvent (0x05E/0x0E7 rejected). If those symptoms ever return, check the
+  needed) — full E2E vehicle including zone changes and Mog House entry. Two corrected bugs caused ignored packets from fresh characters.
+  The c2s datagram header must match the last subpacket sequence (`session.rs::datagram_header_id`).
+  The introduction arrives in 0x00A LOGIN (`decode::ZoneInEvent`) and requires a 0x05B response.
+  Without that response, the character remains InEvent and rejects 0x05E/0x0E7. If those symptoms ever return, check the
   sync/header invariant first (`map_networking.cpp:419-428`).
 - **Ephemeral fixture chars** (`kuluu/tests/common/mod.rs::EphemeralChar`)
   — created against the live lobby + DB, gmlevel set pre-first-login; what the
-  integration tests use. Gotcha: when the accounts AUTO_INCREMENT outruns the
-  fixture's sentinel accid scheme, the lobby rejects the char select
-  ("mismatched character name" in connect logs) and the test dies at the 0x02
-  ack step. Also rebuild `target/debug/kuluu-mcp` — the agent_session test
+  integration tests use. If accounts AUTO_INCREMENT exceeds the fixture sentinel accid scheme, the lobby rejects character selection.
+  The log shows "mismatched character name" and the test fails at the 0x02 acknowledgement. Also rebuild `target/debug/kuluu-mcp` — the agent_session test
   spawns it without rebuilding.
 
 ## Reporting
 
-The verdict is table stakes; observations are the signal. Quote the evidence
-inline — event-stream lines, tracing log lines, map-server log lines,
-screenshot paths — and keep the raw capture files (`events.jsonl`,
-`client.log`) until the report is delivered. Anything driven around but not
+Report the verdict and its observations.
+Include event lines, trace lines, server logs, and screenshot paths.
+Keep raw captures (`events.jsonl`, `client.log`) until report delivery. Anything driven around but not
 observed (e.g. a GUI leg that needs human eyes) gets named explicitly rather
 than silently skipped. Probes off the happy path (wrong zone, dead server,
 double-send) are worth a line each even when they hold.
@@ -219,10 +237,8 @@ Without a body flag, this appends to the existing body. With `--body-file`, refe
 
 ## Recording evidence (feeds the stop-hook gate)
 
-The stop-hook verify gate (`.agents/hooks/stop.d/25-verify.sh`) blocks session
-end when gated source (`*.rs`/`*.wgsl` outside tests/vendor) changed but no
-fresh evidence exists, including edits already committed and edits in other
-worktrees. Record evidence before the final report:
+The stop hook `.agents/hooks/stop.d/25-verify.sh` requires fresh evidence for changed production Rust and shader source.
+It includes committed edits and edits in other worktrees. Record evidence before the final report:
 
 ```
 .agents/skills/verify/scripts/record-evidence.sh \
@@ -248,9 +264,8 @@ visual changes. Verify and record after the final source edit.
 
 ## Maintenance
 
-When a verification session teaches something durable — a new env failure
-mode, a better drive recipe, a lifted blocker — fold it into the matching
-reference file in the same commit as the fix or finding. This skill rots
+Add durable verification findings to the applicable reference file with the fix.
+Examples include environment failures and improved drive procedures. This skill rots
 fastest at the env-gotcha layer.
 
 ## Subagent delegation
@@ -264,4 +279,8 @@ Verification runs (headless captures, GUI drives, retail comparisons) should run
 
 ## Autonomy
 
-Run verification start-to-finish without pausing to ask "what next?": gather evidence, record the verdict, then tear down (kill launched processes, log out of GUI/retail sessions) as the default end state. Scope limits still apply — actions beyond the documented verification scope, or destructive actions outside the session's own artifacts, still need explicit approval.
+Complete authorized verification without asking "what next?".
+Collect evidence, record the result, and clean up owned temporary resources.
+Preserve the final client state requested by the user.
+Use normal logout when closing an owned game session.
+Do not extend authorization to unrelated destructive or external actions.

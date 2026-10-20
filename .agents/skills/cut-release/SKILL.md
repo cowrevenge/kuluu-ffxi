@@ -13,25 +13,25 @@ description: >
 
 # Cutting a Kuluu release
 
-A release here is **one commit**: bump `[workspace.package] version` in the root
-`Cargo.toml`, push it to `main`, and CI does the rest. There is no manual tag
-step in the happy path — `auto-release-on-main.yml` reads the workspace version
-with `cargo metadata`, sees no matching `v<version>` tag, creates and pushes
-one, then calls `release.yml` as a reusable workflow.
-
-The whole job is therefore: **make the bump correct, then verify what CI
-actually published.** Green checkmarks are not verification — the failure that
-cost the most time on v0.4.0 was a fully green pipeline that published the
-release under the tag `main`.
+Bump `[workspace.package] version` in the root `Cargo.toml` and update the lockfile.
+After the approved push to `main`, CI creates the version tag and publishes the release.
+`auto-release-on-main.yml` reads the version with `cargo metadata`.
+If the tag is absent, the workflow creates it and calls `release.yml`.
+Verify the published tag and assets.
+A green pipeline alone does not establish a correct release.
+The v0.4.0 pipeline passed but published under the tag `main`.
 
 ## The happy path
 
 ### 1. Decide the version, and check the tree first
 
-Run `git status` before anything. If the tree is dirty, the changes are either
-part of this release or they are not — decide *with the user*, don't quietly
-sweep them in. In a tree that mixes another session's edits, stage only your own
+Run `git status` first.
+Use the release scope and session instructions to identify included changes.
+Ask only when ownership or release scope remains unclear. In a tree that mixes another session's edits, stage only your own
 hunks (`git add -p`); never `git add -A`.
+
+Use `release/vX.Y.Z` for release branches.
+When the user requests all main changes, include both main histories and tracked local edits.
 
 Pick the version from what's actually in the range:
 
@@ -63,8 +63,9 @@ scripts/checks.sh fmt clippy      # what the pre-push hook runs anyway
 git commit -m "chore: release vX.Y.Z"
 ```
 
-Pushing is outward-facing — confirm with the user before `git push`, per the
-repository's standing rule. Check `git log origin/main..HEAD` first: if a
+Pushing requires the repository's user approval.
+Reuse approval already given for the same candidate and operation.
+Do not ask again for an unchanged approved push. Check `git log origin/main..HEAD` first: if a
 parallel session's commits are riding along, say so explicitly rather than
 letting them ship silently.
 
@@ -75,26 +76,30 @@ gh run list --limit 5
 gh run watch <run-id>
 ```
 
-The graph is `setup` (resolve tag) → `ci` gate (fmt/clippy/test) → six parallel
-build legs (linux / linux-arm / macos / windows / windows-arm / wasm) →
-`publish`. The arm legs build natively on GitHub's hosted `ubuntu-24.04-arm`
-and `windows-11-arm` runners (free for public repos) — no cross toolchain.
+The workflow resolves the tag, runs CI, builds six targets, and publishes the release.
+Targets: linux, linux-arm, macos, windows, windows-arm, and wasm.
+The ARM builds use hosted `ubuntu-24.04-arm` and `windows-11-arm` runners.
 
 **Rehearse workflow changes before publication.** Inspect the workflow at the
 exact candidate commit for a supported `publish=false` input.
 After applicable approval, dispatch that candidate branch with the selected tag and `publish=false`.
 Verify the workflow commit, CI, bundle, and hashes.
 If build-only controls are absent, report that blocker before dispatch.
-Keep branch push, build-only dispatch, and publication approval separate.
+Pushes to `release/v*` automatically run `release.yml` with publication disabled.
+Reuse that run instead of dispatching a duplicate build-only workflow.
+Keep branch push, build-only dispatch, and publication authorization distinct.
+A user can authorize several named operations together.
+Reuse that authorization within its stated candidate and scope.
+Continue local builds, tests, fixes, and evidence collection without another approval.
 
-**Both Windows legs set `RUSTFLAGS: -C target-feature=+crt-static`.** Rust's
-MSVC targets link the C runtime dynamically by default, so without it the exe
-imports `VCRUNTIME140.dll` — which Windows does not ship (it comes from the
-VC++ redistributable, arch-specific: the x64 redist does not satisfy an ARM64
-exe). Ubiquitous on x86_64, routinely absent on fresh Windows-on-ARM, where
-v0.5.1 failed at launch (kuluu-ddgn). Verify a Windows release by scanning the
-shipped exe for CRT DLL name strings (vcruntime/msvcp/ucrt) — zero hits is the
-pass; rehearsal-run artifacts let you check this *before* publishing.
+Both Windows builds set `RUSTFLAGS: -C target-feature=+crt-static`.
+Without this setting, MSVC executables import `VCRUNTIME140.dll` from the architecture-specific VC++ redistributable.
+Windows does not include that redistributable.
+The x64 package does not satisfy an ARM64 executable.
+This caused the v0.5.1 launch failure on Windows-on-ARM (kuluu-ddgn).
+Scan the shipped executable for CRT DLL names: vcruntime, msvcp, and ucrt.
+Zero matches is the required result.
+Use rehearsal artifacts to check this before publication.
 
 **The windows-arm leg must bypass `rust-toolchain.toml`.** rustup has no
 `rustc-codegen-cranelift-preview` dist for `aarch64-pc-windows-msvc`, and the
@@ -153,9 +158,10 @@ For each substantive scheduled assessment, show a draft release card for each ca
 Include player-facing changes, compatibility notes, known limitations, exact commit, checks, and inspected candidate media.
 Show media when it helps explain a visible change. Explain a capture blocker when media is required but unavailable.
 Save the card content with the structured release evidence.
-Provide an approval action that names the exact candidate and operation.
-Use separate actions for a build-only rehearsal and publication.
-Offer publication approval after the required evidence and artifacts are reviewable.
+If approval is missing, request it for the exact candidate and operation.
+Do not present an approval action for an operation already authorized.
+Complete preparation before requesting publication approval.
+Use separate approval actions when the user has not authorized both rehearsal and publication.
 Preserve existing quiet exits when there is no meaningful change or pending action.
 
 ## When it goes wrong
@@ -204,10 +210,9 @@ git push origin refs/heads/main    # fully-qualified ref disambiguates
 ### A build leg fails but CI passed
 
 The legs build with `--locked` and `--features native-window` under the pinned
-nightly. The usual causes are the lockfile (step 2) and the per-platform env
-overrides in `release.yml` — the macOS `RUSTFLAGS: ""` that drops the
-dev-machine lld path, and the `CXXFLAGS: ""` that neutralises the macOS
-`-isysroot` for the Recast C++ bridge on Linux/Windows. Those comments in the
+nightly. Check the lockfile and platform overrides in `release.yml`.
+The macOS `RUSTFLAGS: ""` removes the development lld path.
+The `CXXFLAGS: ""` removes the macOS `-isysroot` from the Recast bridge build on Linux and Windows. Those comments in the
 workflow explain the *why*; read them before "simplifying" any of them away.
 
 ## Things worth knowing
@@ -228,8 +233,7 @@ workflow explain the *why*; read them before "simplifying" any of them away.
 ## Writing the changelog
 
 `generate_release_notes: true` gives GitHub's raw commit list, which is accurate
-and unreadable. If the user wants a human changelog, group
-`git log --no-merges --pretty='%h %s' vPREV..vNEW` by *player-visible theme* —
-what changed in the game — not by crate or by commit order. Lead with the theme
+and unreadable. Group `git log --no-merges --pretty='%h %s' vPREV..vNEW` by player-visible theme.
+Describe what changed in the game. Lead with the theme
 of the release, then sections like combat, rendering, HUD, audio, input. A
 reader should learn what's different when they log in, not which files moved.

@@ -39,12 +39,24 @@ rg -n -i 'TOPIC' references/
 Read only the matching records and the selected host procedure.
 Use [retail-grounding](../retail-grounding/SKILL.md) to resolve source conflicts or behavior questions.
 
-## Observe one action at a time
+## Select the control method
+
+In Codex, prefer `cua_repl` computer use when it can select and control the running client.
+Inspect a fresh screenshot before sending input.
+Keep the selected host procedure for setup, diagnostics, and supported capture operations.
+If computer use cannot select or control the client, save its diagnostic.
+Then use a supported host input method only when the active tool rules permit it.
+
+In other coding agents, use the selected host procedure for capture and input.
+Use Jev or the current agent's vision for decisions as described below.
+Neither Codex tools nor Jev credentials are mandatory across coding agents.
+
+## Drive within the requested task
 
 1. Run the selected procedure's `doctor` command.
 2. Capture the game window.
-3. Inspect the current capture before selecting an input.
-4. Send one input, then capture and inspect the result.
+3. Use Jev or native vision to classify the current capture.
+4. Send the selected input, then capture and classify the result.
 5. Stop when the requested evidence is sufficient.
 
 Prefer logical keyboard names from `scripts/lib/keys.tsv`.
@@ -53,19 +65,53 @@ Recalculate coordinates after a window move or resize.
 Allow only one driver to control the client.
 Stop if two consecutive inputs produce no visible change.
 
-## Optional decisions
+## Delegate routine decisions
+
+Prefer a bounded Jev controller for routine login and dialogue when Jev is configured.
+Give the controller an observable goal, permitted actions, time limit, and failure conditions.
+Let it classify fresh captures and execute validated actions without full-model review of each image.
+Stop for unexpected screens or two consecutive actions without the expected change.
+For low confidence, permit at most two fresh-capture retries without input.
+Keep the overall time limit.
+Use the main agent for failed actions, unusual states, and key evidence images.
+Do not duplicate every image inspection across agents.
 
 On macOS, `decide` uses Jev when configured.
-If it returns `needs_vision`, open the named capture with native vision or a vision-capable subagent.
-Give a subagent the request and capture, without input control.
-Validate its JSON with `decide --result` before use.
-If vision is unavailable, stop with a clear diagnostic.
-Decisions never execute automatically; check a current capture before input.
+The result separates perception failures from caller policy decisions.
+For `low_confidence`, capture a fresh frame or explicitly select native vision.
+For `api_error` or `credential_error`, correct the reported access problem.
+For `schema_error` or `capture_changed`, correct the response or capture binding before input.
+Do not automatically send routine frames to a full model after a Jev failure.
+Use native vision when explicitly selected or when a true exception needs inspection.
+Validate its JSON with `decide --result` and the same task before use.
+A bounded controller can execute decisions after schema, confidence, capture-hash, and caller-policy validation.
+Pass the active caller policy with `--agreement-policy`.
+The portable default, `caller`, requests a policy decision without changing the Jev classification.
+Use `permitted` only when the active harness and session authorize the proposed agreement action.
+If Codex requires confirmation for that action, select `confirmation_required`.
+That result reports `policy_required`, not a vision failure.
+Jev proposes actions; the caller applies authorization and the active harness policy.
+For a user's own local-server launcher, macOS setup can store the explicit `--startup-enter` preference.
+This performs one known startup Enter without model classification.
+Read the [macOS host reference](references/host-macos.md) before configuring it.
+If the active Codex policy requires confirmation, launch with `--agreement-policy confirmation_required` to suppress that input.
+The stored user-run preference does not override an active harness policy.
+
+Keep one input driver per client.
+Inspect key evidence images before making a visual claim.
 
 ## Approval and evidence
 
-Reuse explicit session approval for the same unchanged prompt when the harness permits it.
-Do not infer approval for unrelated agreements, system permissions, purchases, or item consumption.
+Reuse authorization already given in the session.
+A request to drive or verify a client covers routine navigation, dialogue, and reversible local test actions.
+Continue those actions without repeated confirmation.
+Reuse approval for the same screenshot destination and purpose.
+Ask only when required authorization is missing or the requested operation changes scope.
+This skill adds no confirmation step for an agreement screen.
+Use the session authorization and the active coding agent's interaction policy.
+If that policy requires confirmation or direct user action, identify the policy as the source of the requirement.
+Do not present that requirement as a rule from this skill.
+Do not infer authorization for unrelated agreements, system permissions, purchases, or item consumption.
 Keep account credentials out of reports and saved profiles.
 Honor the user's requested final client state; do not log out automatically.
 

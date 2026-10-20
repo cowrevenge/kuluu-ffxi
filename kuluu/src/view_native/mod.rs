@@ -2,6 +2,7 @@ mod app_icon;
 pub mod auto_target;
 pub mod bridge;
 pub mod camera_collision;
+mod camera_trace;
 pub mod collision_bvh;
 pub mod command_surface;
 pub mod cutscene_motion_done;
@@ -887,6 +888,13 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         PostUpdate,
         nameplate_occlude::occlude_nameplates_system
             .after(camera_collision::resolve_camera)
+            .run_if(in_state(AppPhase::InGame)),
+    );
+
+    app.add_systems(
+        Last,
+        camera_trace::report
+            .run_if(camera_trace::enabled)
             .run_if(in_state(AppPhase::InGame)),
     );
 

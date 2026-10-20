@@ -58,7 +58,7 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
           PUBLISH: ${{ inputs.publish == true || (github.event_name == 'push' && github.ref_type == 'tag') }}
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_TYPE" == branch ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_TYPE" == branch && "$GITHUB_REF_NAME" == release/v* ]]; then
             INPUT_TAG="${GITHUB_REF_NAME#release/}"
             PUBLISH=false
           fi

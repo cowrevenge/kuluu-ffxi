@@ -6208,28 +6208,33 @@ pub fn mission_chain_name(log: u8) -> Option<&'static str> {
     }
 }
 
-/// Left/Right on a log window cycles the selector row's members (ur/64: "Left /
-/// Right by nation .. w/ scroll, has size limit"), wrapping like Up/Down do and
-/// never landing on a member the selector would draw grey (ur/76).
+/// Left/Right (or ◄ ►) on a log window steps ONE ring of every browsable menu:
+/// each selector row's members in selector order, greyed chains skipped (ur/76
+/// + follow-up ruling: "you added arrows but didnt link all the non grey menu
+/// together"). The selector merely chooses the ring position you start at; the
+/// pair links across rows - Rhapsodies steps to Nations and back - wrapping like
+/// Up/Down do.
 pub fn mission_cycle_member(
     snap: &kuluu_snapshot::SceneSnapshot,
     log: u8,
     member: u8,
     forward: bool,
 ) -> Option<(u8, u8)> {
-    let chains = mission_selector_chains_by_log(log)?;
-    let at = chains.iter().position(|&c| c == log)? as i32;
-    if chains.len() < 2 {
-        return Some((log, member));
-    }
-    let dir = if forward { 1 } else { -1 };
-    for step in 1..=chains.len() as i32 {
-        let at = (at + dir * step).rem_euclid(chains.len() as i32) as usize;
-        if mission_member_lit(snap, chains[at]) {
-            return Some((chains[at], at as u8));
+    let mut ring: Vec<(u8, u8)> = Vec::new();
+    for label in 0..MISSION_SELECTOR_LABELS_PINNED.len() {
+        for (at, &chain) in mission_selector_chains(label).iter().enumerate() {
+            if mission_member_lit(snap, chain) {
+                ring.push((chain, at as u8));
+            }
         }
     }
-    Some((log, member))
+    let self_at = ring.iter().position(|(l, _)| *l == log)?;
+    if ring.len() < 2 {
+        return Some((log, member));
+    }
+    let back = ring.len() - 1;
+    let at = if forward { self_at + 1 } else { self_at + back } % ring.len();
+    Some(ring[at])
 }
 
 /// Whether a chain member stands lit in its selector row (ur/70's installed-
@@ -16058,15 +16063,22 @@ mod tests {
             mission_cycle_member(&snap, MISSION_LOG_SANDORIA, 0, true),
             Some((MISSION_LOG_BASTOK, 1))
         );
+        // ur/76 follow-up: one ring of every lit menu — the arrows link across
+        // selector rows, so wrap behind Sandoria lands on Adoulin, and Promathia's
+        // single-member row steps into Aht Urhgan rather than staying put.
         assert_eq!(
             mission_cycle_member(&snap, MISSION_LOG_SANDORIA, 0, false),
-            Some((MISSION_LOG_WINDURST, 2)),
-            "wrap behind the first member"
+            Some((MISSION_LOG_ROV, 0)),
+            "wrap behind the ring's first menu crosses rows"
         );
         assert_eq!(
             mission_cycle_member(&snap, MISSION_LOG_COP, 0, true),
-            Some((MISSION_LOG_COP, 0)),
-            "a single-member row stays put"
+            Some((MISSION_LOG_TOAU, 0))
+        );
+        assert_eq!(
+            mission_cycle_member(&snap, MISSION_LOG_ROV, 0, true),
+            Some((MISSION_LOG_SANDORIA, 0)),
+            "Rhapsodies steps back onto the ring's head"
         );
         assert_eq!(
             mission_cycle_member(&snap, MISSION_LOG_WOTG, 1, false),
@@ -16124,15 +16136,22 @@ mod tests {
             soa: 0,
             rov: 0,
         });
+        // The unreported addon logs sit off the ring entirely; the reported one
+        // links back into the lit menus on either side.
         assert_eq!(
             mission_cycle_member(&snap, MISSION_LOG_ACP, 0, true),
-            Some((MISSION_LOG_AMK, 1)),
-            "step past the unreported member to the reported one"
+            None,
+            "a greyed log is not a menu on the ring"
         );
         assert_eq!(
             mission_cycle_member(&snap, MISSION_LOG_AMK, 1, false),
-            Some((MISSION_LOG_AMK, 1)),
-            "both neighbours grey: stay put"
+            Some((MISSION_LOG_ROV, 0)),
+            "behind the reported addon comes Adoulin, not its grey siblings"
+        );
+        assert_eq!(
+            mission_cycle_member(&snap, MISSION_LOG_AMK, 1, true),
+            Some((MISSION_LOG_SANDORIA, 0)),
+            "ahead of the ring's last menu wraps to Nations"
         );
     }
 

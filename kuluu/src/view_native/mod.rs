@@ -826,6 +826,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             text_input::shop_mode_sync_system,
             text_input::shop_mouse_activate_system,
             input::handle_input_system,
+            // The right button's synthesized Esc must sit in the queue ahead of the surface it cancels.
+            text_input::right_button_cancel_system,
             text_input::text_input_system,
             text_input::auto_enter_cs_system,
             text_input::mouse_nav_dispatch_system,

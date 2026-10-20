@@ -55,6 +55,22 @@ pub enum InputMode {
     Arrange,
 }
 
+/// The right mouse button's law (owner ruling, no capture: "RMB is supposed to
+/// be ESC/Cancel"): over a window surface its press acts as the bound `NavCancel`
+/// key, so every surface keeps its own Esc handler and none gains a mouse path.
+/// Two places already own RMB: World, where it feeds drag-aim and item rotation
+/// (`mouse_camera_system` spends both only in that mode), which is why there
+/// nothing answers except an open trade - the trade window does not change
+/// `InputMode` at all; and Chat/Arrange, where a stray cancel would eat typed
+/// text or drop furniture mid-placement [I].
+pub fn right_button_is_cancel(mode: &InputMode, trade_open: bool) -> bool {
+    match mode {
+        InputMode::World => trade_open,
+        InputMode::Chat(_) | InputMode::Arrange => false,
+        _ => true,
+    }
+}
+
 /// The action pending behind a sub-target cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubTargetAction {
@@ -1455,5 +1471,34 @@ mod tests {
         assert_eq!(history.len(), CHAT_HISTORY_MAX);
         assert_eq!(history.get(0).map(str::to_string), lines.last().cloned());
         assert_eq!(history.get(CHAT_HISTORY_MAX), None);
+    }
+
+    #[test]
+    fn right_button_cancels_every_window_surface() {
+        for mode in [
+            InputMode::Dialog(DialogCursor::default()),
+            InputMode::DeliveryBox,
+            InputMode::Check,
+            InputMode::Bazaar,
+            InputMode::Auction,
+            InputMode::Shop,
+        ] {
+            assert!(right_button_is_cancel(&mode, false), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn right_button_yields_to_the_modes_that_already_own_it() {
+        // At rest World spends the RMB drag on camera and rotation.
+        assert!(!right_button_is_cancel(&InputMode::World, false));
+        // The trade window rides World mode without changing it, so over a
+        // trade there is no other owner and the button closes it like Esc.
+        assert!(right_button_is_cancel(&InputMode::World, true));
+        // Typed text and mid-placement furniture are not cancelled by a stray press.
+        assert!(!right_button_is_cancel(
+            &InputMode::Chat(ChatBuffer::empty()),
+            false
+        ));
+        assert!(!right_button_is_cancel(&InputMode::Arrange, false));
     }
 }

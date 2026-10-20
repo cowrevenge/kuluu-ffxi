@@ -198,6 +198,30 @@ pub struct KeyEventStreams<'w, 's> {
     pub pad: MessageReader<'w, 's, super::gamepad_input::PadKeyEvent>,
 }
 
+/// Owner ruling (no capture): "RMB is supposed to be ESC/Cancel". A right-button press writes one tap of the bound
+/// `NavCancel` key onto the synthetic channel whenever [`kuluu_render::input_mode::right_button_is_cancel`] holds, so every surface's own
+/// Esc law fires and no window gains a mouse-specific close path. Like keyboard Esc, the press fires immediately; where RMB is already an input feed this system reads nothing.
+pub fn right_button_cancel_system(
+    mut buttons: MessageReader<bevy::input::mouse::MouseButtonInput>,
+    mode: Res<InputMode>,
+    trade_state: Res<kuluu_render::hud::trade::TradeState>,
+    bindings: Res<Bindings>,
+    mut synth: MessageWriter<super::gamepad_input::PadKeyEvent>,
+    windows: Query<Entity, With<PrimaryWindow>>,
+) {
+    if !kuluu_render::input_mode::right_button_is_cancel(&mode, trade_state.open) {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    for ev in buttons.read() {
+        if ev.button == MouseButton::Right && matches!(ev.state, ButtonState::Pressed) {
+            super::gamepad_input::emit_pad_key(&mut synth, window, &bindings, Action::NavCancel);
+        }
+    }
+}
+
 /// The navmesh overlay's visibility latch and cached mesh as one parameter:
 /// bevy_ecs's `impl_system_function` tops out at 16 parameters and
 /// `text_input_system` sits at that cap on unix (its `AgentPaused` parameter
@@ -4223,5 +4247,92 @@ mod macro_run_drain_tests {
                 text: "help me".to_string()
             }
         );
+    }
+}
+
+/// RMB = Esc wiring (owner ruling, no capture): the right-button system emits one tap of the bound
+/// cancel key onto `text_input_system`'s synthetic channel over window surfaces - the same seam the pad's buttons fire through,
+/// whose handlers already close these windows - and stays silent where World, Chat, or Arrange owns RMB.
+#[cfg(test)]
+mod right_button_cancel_tests {
+    use super::*;
+    use crate::view_native::gamepad_input;
+
+    fn tap_app(mode: InputMode, trade_open: bool) -> App {
+        let mut app = App::new();
+        app.add_message::<bevy::input::mouse::MouseButtonInput>()
+            .add_message::<gamepad_input::PadKeyEvent>()
+            .insert_resource(Bindings::default())
+            .init_resource::<kuluu_render::hud::trade::TradeState>()
+            .insert_resource(mode);
+        app.world_mut()
+            .resource_mut::<kuluu_render::hud::trade::TradeState>()
+            .open = trade_open;
+        app.world_mut().spawn(PrimaryWindow);
+        app.add_systems(Update, right_button_cancel_system);
+        app
+    }
+
+    fn taps(app: &mut App) -> Vec<gamepad_input::PadKeyEvent> {
+        app.world_mut()
+            .resource_mut::<Messages<gamepad_input::PadKeyEvent>>()
+            .drain()
+            .collect()
+    }
+
+    fn press_right(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<Messages<bevy::input::mouse::MouseButtonInput>>()
+            .write(bevy::input::mouse::MouseButtonInput {
+                button: bevy::input::mouse::MouseButton::Right,
+                state: ButtonState::Pressed,
+                window: Entity::PLACEHOLDER,
+            });
+    }
+
+    #[test]
+    fn a_right_press_over_a_window_taps_the_bound_cancel_key() {
+        let mut app = tap_app(InputMode::Check, false);
+        press_right(&mut app);
+        app.update();
+
+        let expected = Bindings::default()
+            .get(Action::NavCancel)
+            .expect("cancel is bound");
+        let taps = taps(&mut app);
+        assert_eq!(taps.len(), 2, "one tap: press and release together");
+        assert_eq!(taps[0].0.key_code, expected.key);
+        assert_eq!(taps[0].0.state, ButtonState::Pressed);
+        assert_eq!(taps[1].0.state, ButtonState::Released);
+    }
+
+    #[test]
+    fn world_cancels_only_an_open_trade() {
+        let mut idle = tap_app(InputMode::World, false);
+        press_right(&mut idle);
+        idle.update();
+        assert!(taps(&mut idle).is_empty(), "at rest the drag feeds camera");
+
+        let mut trading = tap_app(InputMode::World, true);
+        press_right(&mut trading);
+        trading.update();
+        assert_eq!(
+            taps(&mut trading).len(),
+            2,
+            "a trade rides World mode and the button closes it like Esc"
+        );
+    }
+
+    #[test]
+    fn chat_and_arrange_never_get_the_cancel_tap() {
+        let mut chat = tap_app(InputMode::Chat(ChatBuffer::empty()), false);
+        press_right(&mut chat);
+        chat.update();
+        assert!(taps(&mut chat).is_empty());
+
+        let mut arrange = tap_app(InputMode::Arrange, false);
+        press_right(&mut arrange);
+        arrange.update();
+        assert!(taps(&mut arrange).is_empty());
     }
 }

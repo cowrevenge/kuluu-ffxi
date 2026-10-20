@@ -70,10 +70,11 @@ impl PadPressed {
     }
 }
 
-/// A pad-synthesized key event for `text_input_system`'s raw-event handlers,
-/// carried on its own message channel so Bevy's `keyboard_input_system` never
-/// sees it (a synthetic press in the global `KeyboardInput` queue also lands
-/// in `ButtonInput<KeyCode>` the next frame, with no release to clear it).
+/// A synthesized key event for `text_input_system`'s raw-event handlers - a pad role or the
+/// right button's cancel tap - carried on its own message channel so Bevy's
+/// `keyboard_input_system` never sees it (a synthetic press in the global
+/// `KeyboardInput` queue also lands in `ButtonInput<KeyCode>` the next frame,
+/// with no release to clear it).
 #[derive(Message, Debug, Clone)]
 pub struct PadKeyEvent(pub KeyboardInput);
 
@@ -364,8 +365,9 @@ fn bound_key(bindings: &Bindings, action: Action) -> Option<KeyCode> {
 }
 
 /// A pad press is a key tap: its release goes out with it, because nothing else ever releases a
-/// synthesized key and the arrange editor follows which keys are held.
-fn emit_pad_key(
+/// synthesized key and the arrange editor follows which keys are held. The right button's cancel tap (text_input's
+/// `right_button_cancel_system`) rides here too, so one seam owns synthetic taps.
+pub(crate) fn emit_pad_key(
     writer: &mut MessageWriter<PadKeyEvent>,
     window: Entity,
     bindings: &Bindings,

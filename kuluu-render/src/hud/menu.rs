@@ -6244,13 +6244,6 @@ fn mission_member_lit(snap: &kuluu_snapshot::SceneSnapshot, log: u8) -> bool {
         || mission_chain_reported(snap, log)
 }
 
-/// Which selector row a log window belongs to, by chain.
-fn mission_selector_chains_by_log(log: u8) -> Option<&'static [u8]> {
-    (0..MISSION_SELECTOR_LABELS_PINNED.len())
-        .map(mission_selector_chains)
-        .find(|chains| chains.contains(&log))
-}
-
 pub fn mission_nation_name(nation: u32) -> String {
     match MISSION_NATION_NAMES_PINNED.get(nation as usize) {
         Some(name) => (*name).to_string(),

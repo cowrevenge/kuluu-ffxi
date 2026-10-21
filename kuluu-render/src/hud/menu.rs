@@ -8989,20 +8989,27 @@ pub fn update_main_menu(
                     .copied()
                     .unwrap_or("<unknown>")
             };
-            // ur/77: a child opening over this opener must not re-style it —
-            // no `>` mark, while the selected line keeps its cursor gold so the
-            // window reads as holding your place until ESC returns to it.
-            let want = format!("  {label}");
-            if **text != want {
-                **text = want;
-            }
+            // ur/77 + ur/101: a child opening over this opener must not re-style it,
+            // and it draws through the same `row_look` law as every other surface -
+            // an unfocused window drops the `>` mark while the selected line keeps
+            // its cursor gold, reading as holding your place until ESC returns.
             let gated = menu_row_disabled(parent.kind, list_idx, &scene.snapshot);
             let tint = if is_dynamic(parent.kind) {
                 parent_rows.get(list_idx).and_then(|r| r.tint)
             } else {
                 None
             };
-            let want_color = menu_row_color(gated, tint, parent.cursor == list_idx);
+            let (want, want_color) = row_look(
+                label,
+                gated,
+                tint,
+                parent.cursor == list_idx,
+                /* focused */ false,
+                /* bullet_col */ false,
+            );
+            if **text != want {
+                **text = want;
+            }
             if color.0 != want_color {
                 color.0 = want_color;
             }
@@ -9065,25 +9072,21 @@ pub fn update_main_menu(
         } else {
             None
         };
-        let base_color = menu_row_color(gated, tint, is_cursor);
         // ur/90: the quest hub keeps a third column free for its blue dots.
         let bullet_col = view.kind == MenuKind::QuestMenu;
-        // Owner law (ur/94-98): under a framed child the opener's rows update
-        // IN PLACE - only the `>` mark drops and the cursor line goes gold.
-        let (want, want_color, want_bg) = if covered_child {
-            (
-                format!("  {body}"),
-                menu_row_color(gated, tint, is_cursor),
-                Color::NONE,
-            )
-        } else {
-            match (is_cursor, bullet_col) {
-                (true, false) => (format!("> {body}"), base_color, Color::NONE),
-                (false, false) => (format!("  {body}"), base_color, Color::NONE),
-                (true, true) => (format!(">  {body}"), base_color, Color::NONE),
-                (false, true) => (format!("   {body}"), base_color, Color::NONE),
-            }
-        };
+        // Owner law (ur/94-98 + ur/101): this window draws through `row_look` exactly like
+        // every other surface. Under a framed child it is merely an unfocused window - the
+        // `>` mark drops and the cursor line stays gold, in place. There is no second copy
+        // of that law here to drift out of step with any other arm.
+        let (want, want_color) = row_look(
+            &body,
+            gated,
+            tint,
+            is_cursor,
+            /* focused */ !covered_child,
+            bullet_col,
+        );
+        let want_bg = Color::NONE;
         if **text != want {
             **text = want;
         }
@@ -9206,6 +9209,33 @@ fn menu_row_color(gated: bool, tint: Option<MenuRowTint>, lit_cursor: bool) -> C
         None if lit_cursor => theme::CURSOR,
         None => theme::TEXT,
     }
+}
+
+/// THE row law, one function for every window surface (ur/77 + ur/94-98):
+/// the focused window marks its cursor line with `>`; an unfocused window drops
+/// the mark and keeps that same line in cursor gold so it reads as holding your
+/// place until ESC returns to it. `bullet_col` is the quest hub's reserved dot
+/// column (ur/90) and only pads a focused list.
+///
+/// Every arm - pane, opener mirror, pooled window - draws through this one call,
+/// which is what keeps a right-side window from restyling when a left-side child
+/// opens: there is no second copy of the law to drift out of step (ur/101 round).
+fn row_look(
+    label: &str,
+    gated: bool,
+    tint: Option<MenuRowTint>,
+    is_cursor: bool,
+    focused: bool,
+    bullet_col: bool,
+) -> (String, Color) {
+    let mut prefix = String::from(if focused && is_cursor { "> " } else { "  " });
+    if focused && bullet_col {
+        prefix.push(' ');
+    }
+    (
+        format!("{prefix}{label}"),
+        menu_row_color(gated, tint, is_cursor),
+    )
 }
 
 /// Owner debug 2026-10-19: the reported "menu still visible behind Status" draws pixels no
@@ -9423,21 +9453,23 @@ pub fn update_menu_stack_windows(
         }
         let kind = open.level.kind;
         let label = rows_entry_label(kind, idx, open.rows, &dynamic);
-        // ur/77: same law as the mirror arm — windows under focus drop the `>`
-        // mark and keep the selected line in cursor gold. The focused framed
-        // child (ur/94-98) is the live top window, so it wears the mark - on its
-        // cursor line only, exactly like a selector standing on its own.
-        let want = if open.focused && open.level.cursor == idx {
-            format!("> {label}")
-        } else {
-            format!("  {label}")
-        };
+        // ur/77 + ur/101: same `row_look` law as every other surface. The focused
+        // framed child (ur/94-98) is the live top window, so it wears the mark - on
+        // its cursor line only, exactly like a selector standing on its own; an
+        // unfocused pooled window drops the mark and keeps that line in gold.
+        let gated = menu_row_disabled(kind, idx, &scene.snapshot);
+        let tint = open.rows.get(idx).and_then(|r| r.tint);
+        let (want, want_color) = row_look(
+            label,
+            gated,
+            tint,
+            open.level.cursor == idx,
+            open.focused,
+            /* bullet_col */ false,
+        );
         if **text != want {
             **text = want;
         }
-        let gated = menu_row_disabled(kind, idx, &scene.snapshot);
-        let tint = open.rows.get(idx).and_then(|r| r.tint);
-        let want_color = menu_row_color(gated, tint, open.level.cursor == idx);
         if color.0 != want_color {
             color.0 = want_color;
         }

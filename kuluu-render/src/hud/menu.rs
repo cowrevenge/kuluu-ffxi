@@ -9192,6 +9192,7 @@ pub fn update_main_menu(
         _ => MENU_RIGHT_EDGE,
     };
     for (mut frame, mut z_index, computed) in comp_frame_q.iter_mut() {
+        let shown_before = frame.display != Display::None;
         let mut want = frame.clone();
         place_in_column(&mut want, right, mirror_width);
         dock_y(
@@ -9199,7 +9200,13 @@ pub fn update_main_menu(
             parent.kind,
             crate::hud::dock::drawn_height(computed),
         );
-        want.display = Display::Flex;
+        // Same ur/104 law as the pooled surfaces: a mirror newly appearing on a stale frame
+        // waits one frame and arrives with its rows; one already painting keeps painting.
+        want.display = if fresh || shown_before {
+            Display::Flex
+        } else {
+            Display::None
+        };
         frame.set_if_neq(want);
         z_index.set_if_neq(stack_z_index(parent_index));
     }
@@ -9649,6 +9656,7 @@ pub(crate) fn update_menu_stack_windows(
 
     for (window, mut node, mut z_index, computed) in window_q.iter_mut() {
         let mut want = node.clone();
+        let shown_before = node.display != Display::None;
         let open = open_of(window.slot);
         if let Some(pin_slot) = pins.get_mut(window.slot) {
             match open {
@@ -9697,7 +9705,16 @@ pub(crate) fn update_menu_stack_windows(
                         board.surface_height,
                     );
                 }
-                want.display = Display::Flex;
+                // ur/104 (owner): a window shows NO part of itself before its rows exist - on
+                // frames where this surface is newly appearing and the stamp differs, chrome
+                // stays hidden too. Placement and pins above have already stood it at its final
+                // seat and remembered size, so when it appears it is complete, box and words in
+                // one frame; a surface that was painting keeps painting (the freeze law).
+                want.display = if fresh || shown_before {
+                    Display::Flex
+                } else {
+                    Display::None
+                };
                 z_index.set_if_neq(stack_z_index(open.stack_index));
             }
             None => want.display = Display::None,
@@ -12615,6 +12632,48 @@ mod tests {
             .filter(|(row, node)| hidden.contains(&row.window) && node.display != Display::None)
             .count();
         assert_eq!(strays, 0, "no row draws for a window that does not");
+    }
+
+    /// ur/104 (owner: empty boxes flashing): a window shows NO part of itself - chrome included -
+    /// on frames where its rows have not been built. Placement and pins still run, so when it
+    /// appears it is at its own record seat with remembered size, box and words in one frame.
+    /// The opener underneath never stops painting.
+    #[test]
+    fn an_unbuilt_window_never_shows_empty_chrome() {
+        let frames: &[(&str, (i16, i16, i16, i16), u8)] =
+            &[("miss00", (16, 48, 366, 248), FRAME_ANCHOR_NONE)];
+        let mut app = stack_app(MenuStack::root(), frames);
+        let stamp = |app: &mut App| {
+            let InputMode::Menu(stack) = app.world().resource::<InputMode>() else {
+                unreachable!()
+            };
+            let kinds: Vec<MenuKind> = stack.levels.iter().map(|l| l.kind).collect();
+            app.world_mut().resource_mut::<DynamicMenu>().built_windows = Some(kinds);
+        };
+        stamp(&mut app);
+
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.push(MenuKind::MissionDetail { log: 4, member: 0 });
+        }
+        // The race frame: the stack has the child but no rows built for it.
+        app.update();
+        assert!(
+            drawn_stack_windows(&mut app).is_empty(),
+            "an unbuilt window must not show empty chrome"
+        );
+        assert_eq!(
+            drawn_pane(&mut app).0.display,
+            Display::Flex,
+            "the opener keeps painting while the child waits"
+        );
+
+        // The frame its rows exist: it appears at its own record seat.
+        stamp(&mut app);
+        app.update();
+        let drawn = drawn_stack_windows(&mut app);
+        assert_eq!(drawn.len(), 1, "the child arrives complete, one surface");
+        assert_eq!(drawn[0].node.left, Val::Px(16.0));
+        assert_eq!(drawn[0].node.top, Val::Px(48.0));
     }
 
     fn stack_app(stack: MenuStack, frames: &[(&str, (i16, i16, i16, i16), u8)]) -> App {

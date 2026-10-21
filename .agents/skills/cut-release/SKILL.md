@@ -1,239 +1,102 @@
 ---
 name: cut-release
 description: >
-  Cut a new Kuluu release and shepherd it to a published, verified GitHub
-  release. Use whenever the user asks to make/cut/ship a release, bump the
-  version, tag a version, publish a build, "get vX.Y.Z out", or asks why a
-  release failed, published under the wrong tag, or is missing assets. Also
-  use when editing .github/workflows/release.yml or auto-release-on-main.yml,
-  or when the in-app updater stops seeing new versions. Covers the version
-  bump, the CI gate, per-platform packaging, publish verification, and the
-  recovery path for a bad release.
+  Prepare, publish, and verify a Kuluu release through GitHub Actions.
+  Use for version bumps, release notes and media, release workflow changes,
+  failed publication, missing assets, or updater release discovery failures.
 ---
 
-# Cutting a Kuluu release
+# Cut a Kuluu release
 
-Bump `[workspace.package] version` in the root `Cargo.toml` and update the lockfile.
-After the approved push to `main`, CI creates the version tag and publishes the release.
-`auto-release-on-main.yml` reads the version with `cargo metadata`.
-If the tag is absent, the workflow creates it and calls `release.yml`.
-Verify the published tag and assets.
-A green pipeline alone does not establish a correct release.
-The v0.4.0 pipeline passed but published under the tag `main`.
+Use the existing GitHub Actions pipeline. Prefer `gh` and the GitHub API for release operations.
+Use a browser only when the required operation has no suitable API or CLI.
 
-## The happy path
+## 1. Establish the release scope
 
-### 1. Decide the version, and check the tree first
-
-Run `git status` first.
-Use the release scope and session instructions to identify included changes.
-Ask only when ownership or release scope remains unclear. In a tree that mixes another session's edits, stage only your own
-hunks (`git add -p`); never `git add -A`.
-
-Use `release/vX.Y.Z` for release branches.
+Inspect the working tree, branch, published releases, remote main, and any existing candidate or tag.
+Use the previous published version as the changelog base. A prepared candidate tag can make `git describe` select the wrong base.
+Review the complete change range, including merged feature branches.
 When the user requests all main changes, include both main histories and tracked local edits.
+Resolve source ownership before including unrelated local edits.
+Use an isolated `release/vX.Y.Z` branch when a release candidate needs separate preparation.
 
-Pick the version from what's actually in the range:
+Record the candidate commit, tree, version, previous release, and included branches in the release bead.
+Keep structured evidence and temporary drafts under an ignored artifact directory.
+For scheduled assessments, stop quietly when the candidate and evidence are unchanged.
+Do not put credentials or private fixture files in a public media directory.
 
-```bash
-git log --no-merges --oneline "$(git describe --tags --abbrev=0)"..HEAD
-```
+## 2. Prepare the candidate
 
-New features and protocol/wire changes → minor bump. Fixes only → patch.
+Update `[workspace.package] version` in `Cargo.toml` and run `cargo update --workspace`.
+Confirm that the lockfile changes only the intended workspace versions.
+If the version is already correct, inspect the lockfile instead of repeating the bump.
+Release builds use `--locked`; `cargo metadata --no-deps` does not update the lockfile.
 
-### 2. Bump the version *and the lockfile*
+Use `scripts/checks.sh` for applicable checks.
+Use the verify skill for affected runtime behavior and inspect its captures.
+Keep packaging, gameplay, visual, audio, and original-client comparison results separate.
+Preserve completed evidence when a different comparison remains blocked.
+Record explicitly deferred work in open follow-up beads. State its exact limits without marking unrelated checks incomplete.
 
-```bash
-# edit Cargo.toml: [workspace.package] version = "X.Y.Z"
-cargo update --workspace
-```
+Prepare player-facing notes and inspected media before publication.
+For scheduled assessments, present candidate notes, identity, checks, media, and limits before requesting missing publication approval.
+Read [notes and media](references/notes-and-media.md) for the API workflow and announcement rules.
 
-`cargo update --workspace` is not optional. Every release leg builds with
-`--locked`, so a `Cargo.lock` still carrying the old member versions fails the
-build after CI has already spent several minutes. It touches only the workspace
-members (13 of them), not the dependency graph — confirm that in the diff.
+## 3. Rehearse the release
 
-`cargo metadata --no-deps` does *not* rewrite the lock, so don't reach for it
-here even though the workflow uses it to read the version.
+Inspect `.github/workflows/release.yml` at the exact candidate commit.
+Confirm that the intended trigger supports publication-disabled builds.
+On workflows that support it, pushing `release/v*` starts a build-only run.
+Reuse that run. Do not dispatch a duplicate rehearsal.
+If the automatic trigger is absent, use a supported manual dispatch with `publish=false`.
 
-### 3. Commit and push
+Keep branch push, build-only dispatch, merge, and publication authorization distinct.
+Reuse authorization for the same unchanged candidate and operation.
+Before requesting merge approval, explain whether the merge will publish automatically.
+Continue authorized local preparation without another approval.
 
-```bash
-scripts/checks.sh fmt clippy      # what the pre-push hook runs anyway
-git commit -m "chore: release vX.Y.Z"
-```
+Verify the run's source commit, resolved tag, and publication setting.
+Require CI, all six platform packages, bundle assembly, and checksums to pass.
+Confirm that the publication job was skipped for a build-only run.
+Check executable startup using [platform verification](references/platform-verification.md).
+Use native Windows startup checks from the workflow when available; Wine is an additional compatibility surface.
 
-Pushing requires the repository's user approval.
-Reuse approval already given for the same candidate and operation.
-Do not ask again for an unchanged approved push. Check `git log origin/main..HEAD` first: if a
-parallel session's commits are riding along, say so explicitly rather than
-letting them ship silently.
+If the merge commit differs, compare trees before reusing source evidence.
+Equal trees establish source equivalence. They do not establish identical archive or executable bytes.
 
-### 4. Watch the pipeline
+## 4. Publish through the pipeline
 
-```bash
-gh run list --limit 5
-gh run watch <run-id>
-```
+After applicable approval, merge the release PR or perform the approved main push.
+`auto-release-on-main.yml` reads the version, creates an absent tag, and calls `release.yml`.
+Follow that run instead of starting another publication.
+If publication fails, preserve the diagnostics and read [recovery](references/recovery.md).
 
-The workflow resolves the tag, runs CI, builds six targets, and publishes the release.
-Targets: linux, linux-arm, macos, windows, windows-arm, and wasm.
-The ARM builds use hosted `ubuntu-24.04-arm` and `windows-11-arm` runners.
+Record the final tag commit and workflow run.
+Do not change a valid release tag to repair a workflow failure.
+Do not interpret a successful build-only run as publication.
 
-**Rehearse workflow changes before publication.** Inspect the workflow at the
-exact candidate commit for a supported `publish=false` input.
-After applicable approval, dispatch that candidate branch with the selected tag and `publish=false`.
-Verify the workflow commit, CI, bundle, and hashes.
-If build-only controls are absent, report that blocker before dispatch.
-Pushes to `release/v*` automatically run `release.yml` with publication disabled.
-Reuse that run instead of dispatching a duplicate build-only workflow.
-Keep branch push, build-only dispatch, and publication authorization distinct.
-A user can authorize several named operations together.
-Reuse that authorization within its stated candidate and scope.
-Continue local builds, tests, fixes, and evidence collection without another approval.
+## 5. Verify the published result
 
-Both Windows builds set `RUSTFLAGS: -C target-feature=+crt-static`.
-Without this setting, MSVC executables import `VCRUNTIME140.dll` from the architecture-specific VC++ redistributable.
-Windows does not include that redistributable.
-The x64 package does not satisfy an ARM64 executable.
-This caused the v0.5.1 launch failure on Windows-on-ARM (kuluu-ddgn).
-Scan the shipped executable for CRT DLL names: vcruntime, msvcp, and ucrt.
-Zero matches is the required result.
-Use rehearsal artifacts to check this before publication.
-
-**The windows-arm leg must bypass `rust-toolchain.toml`.** rustup has no
-`rustc-codegen-cranelift-preview` dist for `aarch64-pc-windows-msvc`, and the
-pinned component list wedges *every* cargo call on that host. The leg installs
-the same pinned channel `--profile minimal` and sets `RUSTUP_TOOLCHAIN` (env
-beats the file). Cranelift is dev-only; release builds are LLVM. Any future
-component added to `rust-toolchain.toml` needs the same check against that
-host triple.
-
-**A `cancelled` standalone CI run is benign.** `ci.yml` uses
-`concurrency: group: ci-${{ github.ref }}` with `cancel-in-progress: true`, so
-the release's own CI gate preempts the push-triggered run on the same ref. The
-annotation reads "Canceling since a higher priority waiting request for
-ci-refs/heads/main exists". Don't chase it.
-
-### 5. Verify the published release — actually verify it
-
-This is the step that matters. Check four things:
+Use the release API to confirm the requested tag, stable/draft state, and intended latest-release status.
+Resolve the tag to the approved commit. Check the asset names against that tag.
+Expected packages are macOS ARM64, Linux x64/ARM64, Windows x64/ARM64, and the browser viewer, plus `SHA256SUMS`.
 
 ```bash
-gh release view vX.Y.Z -R jondwillis/kuluu-ffxi \
-  --json tagName,name,isDraft,isPrerelease,isLatest,assets
+gh release view vX.Y.Z --json tagName,isDraft,isPrerelease,targetCommitish,assets
+gh api repos/jondwillis/kuluu-ffxi/releases/latest
 ```
 
-1. **`tagName` is `vX.Y.Z`**, not `main` and not the bare version.
-2. **Assets are named for the tag** — `kuluu-vX.Y.Z-aarch64-macos.tar.gz`,
-   `-x86_64-linux.tar.gz`, `-aarch64-linux.tar.gz`, `-x86_64-windows.zip`,
-   `-aarch64-windows.zip`, `kuluu-viewer-wasm-vX.Y.Z.zip`, plus `SHA256SUMS`.
-   If the tag was wrong, the asset names carry the wrong tag too, and the
-   in-app updater matches on filename.
-3. **Checksums match.** Download and check — the updater verifies against this
-   file, so a mismatch bricks in-app updates:
-   ```bash
-   cd "$(mktemp -d)"
-   gh release download vX.Y.Z -R jondwillis/kuluu-ffxi
-   shasum -a 256 -c SHA256SUMS
-   ```
-   (`gh release download` needs `-R` when run outside the repo — it shells out
-   to git to infer the repo otherwise.)
-4. **The binary launches.** Extract the host-platform archive and run
-   `./kuluu --version`. Printing clap usage is a pass — it proves the
-   process started. This specifically catches the macOS arm64 trap: `strip`
-   invalidates the linker's ad-hoc signature, and an unsigned arm64 binary dies
-   with `killed: 9`. `release.yml` re-signs with `codesign --force --sign -`
-   after stripping; this check is what confirms it survived.
-5. **Exercise each artifact with an available compatible runtime.** Use
-   [platform verification](references/platform-verification.md) to select the
-   host procedure. Use Wine for Windows compatibility checks on macOS and Linux.
-   Discover the runner and install paths on the current host.
-   Record the artifact architecture, runtime version, command, exit status, and hashes.
-   A Wine result establishes Wine compatibility. It does not establish native Windows behavior.
-   Keep an unsupported architecture as an explicit coverage gap.
-   Do not require a named VM, private volume, or a particular container engine.
+Download the published packages and `SHA256SUMS` into an empty evidence directory.
+Run `shasum -a 256 -c SHA256SUMS` from that directory.
+Checksum entries must use bare asset filenames; the updater consumes those names.
 
-For each substantive scheduled assessment, show a draft release card for each candidate.
-Include player-facing changes, compatibility notes, known limitations, exact commit, checks, and inspected candidate media.
-Show media when it helps explain a visible change. Explain a capture blocker when media is required but unavailable.
-Save the card content with the structured release evidence.
-If approval is missing, request it for the exact candidate and operation.
-Do not present an approval action for an operation already authorized.
-Complete preparation before requesting publication approval.
-Use separate approval actions when the user has not authorized both rehearsal and publication.
-Preserve existing quiet exits when there is no meaningful change or pending action.
+Verify signatures and executable startup for each available compatible runtime.
+Retain unsupported architectures as explicit coverage gaps.
+If a published archive exactly matches an already checked workflow artifact, reuse that artifact's startup evidence.
+For browser evidence reuse, compare the extracted file hashes with the inspected bundle.
+HUD startup does not prove live relay gameplay.
 
-## When it goes wrong
-
-### The release published under the wrong tag
-
-Symptom: a release named and tagged `main` (or anything non-semver), marked
-Latest, with assets named `kuluu-main-*`. Player-visible, because the
-in-app updater reads the Latest release plus its `SHA256SUMS`.
-
-Cause, and the general lesson: **a reusable workflow inherits the *caller's*
-event context.** On the `workflow_call` path, `github.event_name` is still the
-caller's `push` and `GITHUB_REF_NAME` is still `main`. Branching on the event
-name to choose between `inputs.tag` and `GITHUB_REF_NAME` therefore silently
-picks the branch name. `release.yml`'s `setup` step now prefers `inputs.tag`
-unconditionally and hard-fails on a non-`vX.Y.Z` tag, which is why this can't
-recur — but the same trap applies to any other `workflow_call` input you add.
-
-This stayed hidden through v0.2.0 and v0.3.0 because those were manually pushed
-tags, where `GITHUB_REF_NAME` happened to be right. **The first
-version-bump-driven release is where this class of bug surfaces.**
-
-Recovery, in order — all reversible, no history rewriting:
-
-```bash
-gh release delete <bad-tag> --yes                # ask the user first: outward-facing
-git push origin :refs/tags/<bad-tag>             # delete the remote tag
-git push origin :refs/tags/vX.Y.Z                # if a partial/wrong one exists
-git tag -d vX.Y.Z                                # local
-# commit the workflow fix; pushing to main re-triggers auto-release
-```
-
-Then re-verify from step 5. Never force-push and never rewrite shared history to
-clean up a release.
-
-### `error: src refspec main matches more than one`
-
-You fetched a stray **local** tag named `main` before the remote one was deleted,
-so `main` is ambiguous between the branch and the tag.
-
-```bash
-git tag -d main
-git push origin refs/heads/main    # fully-qualified ref disambiguates
-```
-
-### A build leg fails but CI passed
-
-The legs build with `--locked` and `--features native-window` under the pinned
-nightly. Check the lockfile and platform overrides in `release.yml`.
-The macOS `RUSTFLAGS: ""` removes the development lld path.
-The `CXXFLAGS: ""` removes the macOS `-isysroot` from the Recast bridge build on Linux and Windows. Those comments in the
-workflow explain the *why*; read them before "simplifying" any of them away.
-
-## Things worth knowing
-
-- **`cargo-dist` config exists in `[workspace.metadata.dist]` but is inert.**
-  The hand-rolled `release.yml` is what ships. Don't assume dist owns the
-  pipeline until the throwaway dry-run tagged `v0.0.0-disttest` has actually
-  validated it.
-- **`SHA256SUMS` is hashed over bare basenames** (`sha256sum *` from inside the
-  artifacts dir) so each line matches the asset filename the updater downloads.
-  Adding a directory prefix breaks in-app updates without breaking the release.
-- **Windows ships no strip step** — MSVC puts debug info in a separate `.pdb`,
-  so the `.exe` is already lean.
-- **File the postmortem as a bead.** Anything that went wrong during a release
-  is durable work: `bd create --type=bug`. The v0.4.0 tag-resolution bug is
-  `kuluu-hevc`.
-
-## Writing the changelog
-
-`generate_release_notes: true` gives GitHub's raw commit list, which is accurate
-and unreadable. Group `git log --no-merges --pretty='%h %s' vPREV..vNEW` by player-visible theme.
-Describe what changed in the game. Lead with the theme
-of the release, then sections like combat, rendering, HUD, audio, input. A
-reader should learn what's different when they log in, not which files moved.
+Read the published notes again. Verify the public media links and uploaded file hashes.
+Complete the final body check described in [notes and media](references/notes-and-media.md).
+Close the release bead only after the required publication checks pass.
+Report the release URL, results, and remaining claim-specific limits. Keep deferred follow-up beads open.

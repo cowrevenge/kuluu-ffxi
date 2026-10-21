@@ -1500,6 +1500,8 @@ mod zone_teardown_tests {
         world.init_resource::<kuluu_render::ffxi_actor_render::SelfKnockback>();
         world.init_resource::<kuluu_render::scheduler_runtime::PendingKnockbacks>();
         world.init_resource::<kuluu_render::hud::shop::ShopScreenState>();
+        world.init_resource::<super::perf_hud::PerfMonitor>();
+        world.init_resource::<super::perf_hud::AssetChurn>();
         world.init_resource::<super::EventLog>();
         world.init_resource::<super::TrackedEntities>();
         world.init_resource::<super::MzbCollisionGeometry>();

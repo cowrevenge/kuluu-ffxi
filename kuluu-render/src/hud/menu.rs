@@ -9345,7 +9345,11 @@ pub fn update_menu_stack_windows(
         start: usize,
         visible: usize,
     }
-    let shown: Vec<Shown> = match &*mode {
+    // ur/102 identity law: pooled surface slot N draws stack level N for the
+    // level's whole lifetime - allocation by IDENTITY, not by draw order. Ordering
+    // was re-mapping surfaces every time a chain grew or shrank, which is how an
+    // unrelated left-side open restyled right-column windows wholesale (ur/94-101).
+    let shown: Vec<Option<Shown>> = match &*mode {
         InputMode::Menu(stack) => {
             // ur/94-98: under a covered child the pool draws that focused framed
             // child too - it is one window of the stack like any other. The
@@ -9360,48 +9364,57 @@ pub fn update_menu_stack_windows(
             let status_flow_open = stack.levels.iter().any(|level| {
                 matches!(level.kind, MenuKind::Status | MenuKind::StatusDetail { .. })
             });
-            let newest = &records[records.len().saturating_sub(MAX_STACKED_WINDOWS)..];
-            newest
-                .iter()
-                .filter_map(|&(stack_index, frame)| {
-                    let level = stack.levels.get(stack_index)?;
-                    if status_flow_open
-                        && !matches!(level.kind, MenuKind::Status | MenuKind::StatusDetail { .. })
-                    {
-                        return None;
-                    }
-                    // A pooled window reads its rows where the refresh left them:
-                    // levels under focus in `stacked_rows`, but the FOCUSED child
-                    // (ur/94-98 - it draws here too now) always in `dynamic.rows`.
-                    // Reading stacked for the focused level found nothing and drew
-                    // a lone `(empty)` hint line where the log belonged (ur/100).
-                    let focused_entry = Some(stack_index) == focus_index && layout.covered_child();
-                    let rows: &[DynamicMenuRow] = if focused_entry {
-                        &dynamic.rows
-                    } else {
-                        stacked_rows_for(level.kind, &dynamic)
-                    };
-                    let count = rows_entry_count(level.kind, rows, settings.dlss_supported);
-                    let (total, start) = viewport_over(level.kind, level.cursor, count);
-                    Some(Shown {
-                        stack_index,
-                        focused: focused_entry,
-                        frame,
-                        level,
-                        rows,
-                        total,
-                        start,
-                        visible: visible_window(level.kind, total),
-                    })
-                })
-                .collect()
+            let mut shown: Vec<Option<Shown>> = (0..MAX_STACKED_WINDOWS).map(|_| None).collect();
+            for &(stack_index, frame) in &records {
+                // The pool has one surface per stack position; the deepest chain ever
+                // drawn is ~5 levels against MAX_STACKED_WINDOWS=8 surfaces, so a level
+                // past the pool can't happen - if chains ever grow, deeper ones stay
+                // undrawn until the pool grows with them (never re-map older slots).
+                let Some(slot) = shown.get_mut(stack_index) else {
+                    continue;
+                };
+                let Some(level) = stack.levels.get(stack_index) else {
+                    continue;
+                };
+                if status_flow_open
+                    && !matches!(level.kind, MenuKind::Status | MenuKind::StatusDetail { .. })
+                {
+                    continue;
+                }
+                // A pooled window reads its rows where the refresh left them:
+                // levels under focus in `stacked_rows`, but the FOCUSED child
+                // (ur/94-98 - it draws here too now) always in `dynamic.rows`.
+                // Reading stacked for the focused level found nothing and drew
+                // a lone `(empty)` hint line where the log belonged (ur/100).
+                let focused_entry = Some(stack_index) == focus_index && layout.covered_child();
+                let rows: &[DynamicMenuRow] = if focused_entry {
+                    &dynamic.rows
+                } else {
+                    stacked_rows_for(level.kind, &dynamic)
+                };
+                let count = rows_entry_count(level.kind, rows, settings.dlss_supported);
+                let (total, start) = viewport_over(level.kind, level.cursor, count);
+                *slot = Some(Shown {
+                    stack_index,
+                    focused: focused_entry,
+                    frame,
+                    level,
+                    rows,
+                    total,
+                    start,
+                    visible: visible_window(level.kind, total),
+                });
+            }
+            shown
         }
         _ => Vec::new(),
     };
+    // A surface's occupant, by identity: `window` slot == stack index (ur/102).
+    let open_of = |window: usize| shown.get(window).and_then(|entry| entry.as_ref());
 
     for (window, mut node, mut z_index, computed) in window_q.iter_mut() {
         let mut want = node.clone();
-        match shown.get(window.slot) {
+        match open_of(window.slot) {
             Some(open) => {
                 place_at_record_frame(&mut want, &open.frame);
                 if let Some((board, placement)) = dock
@@ -9423,15 +9436,13 @@ pub fn update_menu_stack_windows(
         node.set_if_neq(want);
     }
     for (title, mut text) in title_q.iter_mut() {
-        let want = shown
-            .get(title.window)
-            .map_or("", |open| menu_title(open.level.kind));
+        let want = open_of(title.window).map_or("", |open| menu_title(open.level.kind));
         if **text != *want {
             **text = want.to_string();
         }
     }
     for (row, mut node, mut text, mut color) in row_q.iter_mut() {
-        let Some(open) = shown.get(row.window) else {
+        let Some(open) = open_of(row.window) else {
             // The window surface hides as one node but the rows are separate entities —
             // code them hidden too (C85-95 law). Skipping here is what left stale
             // labels floating over the world behind other windows (owner 2026-10-19:
@@ -9479,8 +9490,7 @@ pub fn update_menu_stack_windows(
     // wears the caption pair; hidden with an undrawn window so it never steals
     // clicks from what sits behind the surface.
     for (arrow, mut node) in arrow_q.iter_mut() {
-        let want = shown
-            .get(arrow.window)
+        let want = open_of(arrow.window)
             .is_some_and(|open| matches!(open.level.kind, MenuKind::MissionDetail { .. }))
             .then_some(Display::Flex)
             .unwrap_or(Display::None);
@@ -9493,7 +9503,7 @@ pub fn update_menu_stack_windows(
     // right-edge scrollbar; every other kind keeps no bar. The furniture is anchored
     // inside the chrome on the right edge at spawn, top to bottom of the fill.
     let scroll_page = |window: usize| -> Option<(usize, usize, usize)> {
-        shown.get(window).and_then(|open| {
+        open_of(window).and_then(|open| {
             matches!(open.level.kind, MenuKind::MissionDetail { .. })
                 .then_some((open.start, open.total, open.visible))
                 .filter(|(_, total, visible)| total > visible)
@@ -10649,21 +10659,21 @@ fn stack_pool_hit(
     if !layout.covered_child() {
         return None;
     }
-    let focus_index = stack.levels.len().checked_sub(1)?;
-    // Only the focused child answers through the pool, and only from the surface
-    // it actually draws into (`pool_windows` is slot-ordered like `Shown`).
-    if !layout
-        .pool_windows()
-        .into_iter()
-        .enumerate()
-        .any(|(slot, (index, _))| index == focus_index && slot == window)
-    {
+    // ur/102 identity law: surface slot == stack index (see the same allocation in
+    // `update_menu_stack_windows`), so a pooled row answers only on the focused
+    // child's own surface - no slot re-lookup, and depth changes can't re-map it.
+    let Some((focus_index, _seat)) = layout.focused() else {
+        return None;
+    };
+    if window != focus_index {
         return None;
     }
+    let Some(level) = stack.levels.get(focus_index) else {
+        return None;
+    };
     // The hit is always against the focused level - and its rows are in
     // `dynamic.rows`, never in `stacked_rows` (see the same law in
     // `update_menu_stack_windows`).
-    let level = &stack.levels[focus_index];
     let count = rows_entry_count(level.kind, &dynamic.rows, true);
     let (_total, start) = viewport_over(level.kind, level.cursor, count);
     Some((focus_index, start))

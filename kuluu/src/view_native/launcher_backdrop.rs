@@ -161,18 +161,19 @@ const SCREEN_HOLD_SECS: f32 = 0.25;
 const VEIL_FADE_SECS: f32 = 0.45;
 const LOADER_DOTS_PER_SEC: f32 = 2.0;
 
-/// The launcher's backdrop stream is a full load: every placement in the
-/// block lands before a loading state counts as done, instead of only what sits
-/// inside the draw distance. Bounded per frame by the background budget, so it
-/// still leaves the screens their input.
+/// The launcher's backdrop stream is a full load: distance-gated streaming would
+/// hold every far placement `pending` forever with a static attract camera, and the
+/// startup veil gate (`has_pending_zone_placements`) could never open - the sign-in
+/// screen spun "Loading background" endlessly (owner 2026-10-22: the login "just
+/// loads forever... the preload is AFTER the veil is dropped"). From the frame the
+/// zone mirrors into the scene every placement streams, still bounded per frame by
+/// the background budget so the screens keep their input.
 fn sync_backdrop_stream_mode(
     background: Res<LauncherBackgroundEnabled>,
     stage: Res<StartupStage>,
-    fade: Res<BackdropFade>,
     mut everything: ResMut<kuluu_render::dat_mmb::StreamEverything>,
 ) {
-    let full =
-        background.0 && !(matches!(stage.phase, StartupPhase::HoldingScreens) || fade.is_idle());
+    let full = background.0 && !matches!(stage.phase, StartupPhase::HoldingScreens);
     if everything.0 != full {
         everything.0 = full;
     }
@@ -340,10 +341,12 @@ fn despawn_startup_stage(
     commands.remove_resource::<StartupStage>();
 }
 
-/// The veil holds until the zone floor has landed, so what gets revealed is a
-/// scene that can answer input rather than one still being built under the
-/// cursor. `main_zone_floor_ready` is the same signal the in-game loading
-/// overlay reads.
+/// The veil drops when the zone FLOOR has landed (the same `main_zone_floor_ready`
+/// signal the in-game loading overlay reads) - that scene is then fully answerable
+/// and stays so. Model placements keep streaming behind it afterwards, at the
+/// background budget: they are preload, and per owner 2026-10-22 all preloading is
+/// AFTER the veil drop, never a condition for it (waiting on every placement spun
+/// the sign-in loader forever when far placements stayed pending).
 fn advance_startup_stage(
     mut commands: Commands,
     time: Res<Time>,
@@ -354,8 +357,6 @@ fn advance_startup_stage(
     scene: Res<SceneState>,
     last_auto_loaded: Res<kuluu_render::dat_mzb::LastAutoLoadedZone>,
     mzb_in_flight: Res<kuluu_render::dat_mzb::LoadMzbInFlight>,
-    mmb_queue: Res<kuluu_render::dat_mmb::MmbLoadQueue>,
-    mmb_parses: Res<kuluu_render::dat_mmb::MmbLoadInFlight>,
 ) {
     let dt = time.delta_secs();
     match stage.phase {
@@ -373,17 +374,15 @@ fn advance_startup_stage(
         }
         StartupPhase::LoadingBackground => {
             // The mirror writes the zone when this phase unlocks it, and that
-            // write is what makes a floor something to wait for.
+            // write is what makes a floor something to wait for. Floor only:
+            // placements stream on behind the screens after the veil drops.
             let floored = scene.snapshot.zone_id.is_some()
                 && kuluu_render::dat_mzb::main_zone_floor_ready(
                     &scene.snapshot,
                     &last_auto_loaded,
                     &mzb_in_flight,
                 );
-            // The floor alone is not a loaded background: every placement the
-            // block queues has to have spawned and parsed before anything shows.
-            let models_up = mmb_parses.tasks.is_empty() && !mmb_queue.has_pending_zone_placements();
-            if floored && models_up {
+            if floored {
                 stage.phase = StartupPhase::Revealing;
                 stage.elapsed = 0.0;
             }

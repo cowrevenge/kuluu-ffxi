@@ -616,6 +616,9 @@ pub struct BarPaint {
 pub struct BarFadeIn {
     elapsed_frames: u8,
     painted: Vec<(bevy::ecs::entity::Entity, BarPaint)>,
+    /// Fade direction (owner 2026-10-22: the takeover dismissal fades the bar down too -
+    /// one period with every menu surface, words off at its start).
+    outgoing: bool,
 }
 
 /// Every painted node under the bar, in tree order - capture and restore then read
@@ -639,7 +642,7 @@ fn collect_bar_paint(
 /// every text node stays hidden from the appearing frame until the opaque one restores it. Runs
 /// immediately after `update_menu_help_bar` so its fills are in place (invisible) underneath.
 pub fn fade_menu_help_bar_in(
-    bar_q: Query<(Entity, &Node), With<MenuHelpBar>>,
+    mut bar_q: Query<(Entity, &mut Node), With<MenuHelpBar>>,
     children_q: Query<&Children>,
     mut paint_q: Query<(
         Option<&mut BackgroundColor>,
@@ -649,11 +652,38 @@ pub fn fade_menu_help_bar_in(
     mut shown_before: Local<bool>,
     mut fade: Local<Option<BarFadeIn>>,
 ) {
-    let Ok((bar, node)) = bar_q.single() else {
+    let Ok((bar, mut node)) = bar_q.single_mut() else {
         return;
     };
+    // What the fill pass left standing this frame (it hides the bar outright while no
+    // menu shows - during a fade-out dismissal this rider forces it back visible below).
     let showing = node.display != Display::None;
-    if !*shown_before && showing {
+    if fade.is_none() && *shown_before && !showing {
+        // Takeover frame: capture the full paint and play it back down over one period.
+        let mut parts = Vec::new();
+        collect_bar_paint(bar, &children_q, &mut parts);
+        let mut painted = Vec::new();
+        for part in parts {
+            if let Ok((background, text, border)) = paint_q.get(part) {
+                let captured = BarPaint {
+                    background: background.map(|c| c.0),
+                    text: text.map(|c| c.0),
+                    border: border.map(|b| *b),
+                };
+                if captured.background.is_some()
+                    || captured.text.is_some()
+                    || captured.border.is_some()
+                {
+                    painted.push((part, captured));
+                }
+            }
+        }
+        *fade = Some(BarFadeIn {
+            elapsed_frames: 0,
+            painted,
+            outgoing: true,
+        });
+    } else if !*shown_before && showing {
         // Appearing frame: take the exact paint of every drawn part; words go transparent with it.
         let mut parts = Vec::new();
         collect_bar_paint(bar, &children_q, &mut parts);
@@ -676,24 +706,36 @@ pub fn fade_menu_help_bar_in(
         *fade = Some(BarFadeIn {
             elapsed_frames: 0,
             painted,
+            outgoing: false,
         });
     }
     *shown_before = showing;
     let Some(state) = fade.as_mut() else { return };
     state.elapsed_frames += 1;
-    let fading_out_early = !showing;
-    let done = fading_out_early || state.elapsed_frames >= crate::hud::menu_anim::MENU_FADE_FRAMES;
+    // A fade whose direction no longer matches what the fill pass wants lands at once
+    // (byte-exact restore through the done path either way).
+    let mismatched = state.outgoing == showing;
+    let done = mismatched || state.elapsed_frames >= crate::hud::menu_anim::MENU_FADE_FRAMES;
     // Opaque frame hands back the captured paint byte-exact; middle frames scale chrome alphas
     // from that same base (never from last frame's, which would compound) and hold every word at
     // zero - only box and background render while it animates.
+    let rising = crate::hud::menu_anim::fade_share(
+        state.elapsed_frames,
+        crate::hud::menu_anim::MENU_FADE_FRAMES,
+    );
+    // Outgoing frames run the same captured base down: full paint to transparent.
     let share = if done {
         1.0
+    } else if state.outgoing {
+        1.0 - rising
     } else {
-        crate::hud::menu_anim::fade_share(
-            state.elapsed_frames,
-            crate::hud::menu_anim::MENU_FADE_FRAMES,
-        )
+        rising
     };
+    if state.outgoing && !done {
+        // The fill pass hid the bar outright on dismissal frames; hold it painted while its
+        // own fade plays, and stand down (hidden again) the frame the capture is restored.
+        node.display = Display::Flex;
+    }
     for (entity, base) in state.painted.iter() {
         let Ok((background, text, border)) = paint_q.get_mut(*entity) else {
             continue;
@@ -1498,6 +1540,62 @@ mod tests {
             border,
             theme::FRAME_EDGE,
             "the frame edge comes back at its captured colour"
+        );
+
+        // The outgoing half (owner 2026-10-22 dismissal): the fill pass hides the bar outright,
+        // the rider holds it painted while its own fade plays down, words already gone, and on
+        // the period's last frame it stands down hidden with the paint restored for next time.
+        app.world_mut()
+            .query_filtered::<&mut Node, With<MenuHelpBar>>()
+            .single_mut(app.world_mut())
+            .expect("one bar")
+            .display = Display::None;
+        let mut shown_down = None;
+        let mut prev_alpha = base_bg.alpha();
+        for _ in 1..crate::hud::menu_anim::MENU_FADE_FRAMES {
+            // The production fill pass writes this hide on every dismissal frame; the rider
+            // chained after it is what keeps the bar painted meanwhile.
+            app.world_mut()
+                .query_filtered::<&mut Node, With<MenuHelpBar>>()
+                .single_mut(app.world_mut())
+                .expect("one bar")
+                .display = Display::None;
+            app.update();
+            let (bg, _) = box_paint(&mut app);
+            let display = app
+                .world_mut()
+                .query_filtered::<&Node, With<MenuHelpBar>>()
+                .single(app.world())
+                .expect("one bar")
+                .display;
+            assert_eq!(display, Display::Flex, "the fade-out holds the bar painted");
+            assert!(
+                bg.alpha() < prev_alpha && title_color(&mut app).alpha() == 0.0,
+                "chrome runs down from the captured base, words already off"
+            );
+            prev_alpha = bg.alpha();
+            shown_down = Some(bg);
+        }
+        assert!(
+            shown_down.is_some(),
+            "the fade-out held it painted for its period"
+        );
+        app.world_mut()
+            .query_filtered::<&mut Node, With<MenuHelpBar>>()
+            .single_mut(app.world_mut())
+            .expect("one bar")
+            .display = Display::None;
+        app.update(); // the closing frame hands back hidden
+        let display = app
+            .world_mut()
+            .query_filtered::<&Node, With<MenuHelpBar>>()
+            .single(app.world())
+            .expect("one bar")
+            .display;
+        assert_eq!(
+            display,
+            Display::None,
+            "the fade-out ends hidden with everything else"
         );
     }
 }

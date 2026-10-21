@@ -70,6 +70,25 @@ impl FullRect {
         })
     }
 
+    /// Like [`Self::from_style`], but a height still `Auto` (a surface that never pinned) is
+    /// captured at its last measured px instead of losing the squeeze outright - without this an
+    /// unmeasured window pops out instantly on takeover dismissal while its settled siblings animate.
+    pub fn from_style_measuring(node: &Node, measured_height: f32) -> Option<Self> {
+        let (Val::Px(left), Val::Px(top), Val::Px(width)) = (node.left, node.top, node.width)
+        else {
+            return None;
+        };
+        if width < ANIM_MIN_SIZE_PX || measured_height < ANIM_MIN_SIZE_PX {
+            return None;
+        }
+        Some(Self {
+            center_x: left + width / 2.0,
+            center_y: top + measured_height / 2.0,
+            width,
+            height: measured_height,
+        })
+    }
+
     /// The box a node last laid out - the selector column's law is right-anchored, so its style
     /// has no `Px` left to read and only the laid-out frame carries its full seat. Same conversion
     /// as [`crate::hud::dock::node_anchor`] (`drawn_height`'s both axes).

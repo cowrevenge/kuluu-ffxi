@@ -9746,7 +9746,14 @@ pub(crate) fn update_menu_stack_windows(
         if rested && matches!(fx, WindowFx::Idle) {
             let opening = open.is_some() && !shown_before && fresh;
             let collapsing = open.is_none() && shown_before;
-            if let Some(full) = FullRect::from_style(&want).filter(|_| opening || collapsing) {
+            // A collapse captures whatever box was last on screen - even an unsettled `Auto`
+            // height (dismissal must animate every standing window, not just pinned ones). An
+            // opening still requires the asserted px, or grow would lead unmeasured content.
+            let captured = FullRect::from_style(&want).or_else(|| {
+                collapsing.then_some(())?;
+                FullRect::from_style_measuring(&want, crate::hud::dock::drawn_height(computed))
+            });
+            if let Some(full) = captured.filter(|_| opening || collapsing) {
                 fx = if opening {
                     WindowFx::opening(full)
                 } else {
@@ -9947,7 +9954,10 @@ pub(crate) fn squeeze_menu_column(
     settings: Res<GraphicsSettings>,
     config_rows: Res<ConfigDatRows>,
     dynamic: Res<DynamicMenu>,
-    mut pane_q: Query<(&mut Node, &ComputedNode, &bevy::ui::UiGlobalTransform), With<MainMenuPane>>,
+    mut pane_q: Query<
+        (&mut Node, &ComputedNode, &bevy::ui::UiGlobalTransform),
+        (With<MainMenuPane>, Without<MainMenu>),
+    >,
     // The column's own words - the companion mirrors draw their own surfaces and stay untouched.
     mut row_q: Query<
         &mut Node,
@@ -9956,6 +9966,7 @@ pub(crate) fn squeeze_menu_column(
             Without<MainMenuTitle>,
             Without<CompanionRow>,
             Without<MainMenuPane>,
+            Without<MainMenu>,
         ),
     >,
     // The title node never wears `MainMenuRow` and vice versa; the filters say so statically.
@@ -9966,6 +9977,19 @@ pub(crate) fn squeeze_menu_column(
             Without<MainMenuRow>,
             Without<CompanionTitle>,
             Without<MainMenuPane>,
+            Without<MainMenu>,
+        ),
+    >,
+    // The menu root stays painted through a dismissal so the squeeze law is actually seen:
+    // `update_main_menu` hides it (and with it every child surface) the instant `InputMode`
+    // leaves Menu. During the held frames this pass owns that visibility, frame-exact.
+    mut root_q: Query<
+        &mut Node,
+        (
+            With<MainMenu>,
+            Without<MainMenuPane>,
+            Without<MainMenuRow>,
+            Without<MainMenuTitle>,
         ),
     >,
     mut fx_column: Local<crate::hud::menu_anim::WindowFx>,
@@ -9973,6 +9997,11 @@ pub(crate) fn squeeze_menu_column(
     mut column_pin: Local<PinState>,
     // Heights this seat's shapes have painted, for frame-one opens (see `remember_height`).
     mut heights: Local<Vec<HeightPin>>,
+    // Frames left of the dismissal umbrella; one period so every surface lands together.
+    mut dismiss_timer: Local<u8>,
+    // What the root's own visibility was at the end of last frame - the trigger for arming
+    // exactly once on a takeover, since `update_main_menu` already hides it before this runs.
+    mut ui_up_last: Local<bool>,
 ) {
     use crate::hud::menu_anim::{FullRect, WindowFx};
     let fresh = match &*mode {
@@ -10090,6 +10119,52 @@ pub(crate) fn squeeze_menu_column(
     // The tracked kind follows what stands here, so a landing never reads as another change and an
     // absent column remembers nothing until one returns.
     *prev_kind = column_shape.map(|(kind, _)| kind);
+
+    // The dismissal law (owner 2026-10-22: "it should work if I hit ESC to close the whole
+    // thing"): when `InputMode` leaves Menu while the UI stood up, the root is held painted for
+    // exactly one squeeze period - every surface's own close cycle plays under that umbrella and
+    // they all land on the same frame. The closing frame restores the column to its natural seat
+    // (height Auto, pin released; the remembering table re-adopts px on the next open) and hides
+    // the whole tree together - never a shrunken shell stranded mid-air.
+    let menu_now = matches!(&*mode, InputMode::Menu(_));
+    if menu_now {
+        *dismiss_timer = 0;
+    } else if *ui_up_last && *dismiss_timer == 0 {
+        // Armed once on the takeover frame; counting down is what bounds the hold.
+        *dismiss_timer = crate::hud::menu_anim::MENU_SQUEEZE_FRAMES;
+    }
+    if *dismiss_timer > 0 && !menu_now {
+        let last_frame = *dismiss_timer == 1;
+        if let Ok(mut root) = root_q.single_mut() {
+            // Held open for the period; on the closing frame handed back hidden, in order.
+            let want_root = if last_frame {
+                Display::None
+            } else {
+                Display::Flex
+            };
+            if root.display != want_root {
+                root.display = want_root;
+            }
+        }
+        if last_frame {
+            for (mut pane_node, _, _) in pane_q.iter_mut() {
+                let mut restore = pane_node.clone();
+                restore.left = Val::Auto;
+                restore.right = Val::Px(MENU_RIGHT_EDGE);
+                restore.bottom = Val::Auto;
+                restore.top = Val::Px(MENU_COLUMN_TOP);
+                restore.width = Val::Auto;
+                restore.height = Val::Auto;
+                pane_node.set_if_neq(restore);
+            }
+            *dismiss_timer = 0;
+        } else {
+            *dismiss_timer -= 1;
+        }
+    }
+    if let Ok(root) = root_q.single() {
+        *ui_up_last = root.display != Display::None;
+    }
 
     // Chrome-only while the cycle runs: hide this column's words (title band fill and chrome stay -
     // only text nodes leave). `update_main_menu` shows and fills them again on the landing frame.
@@ -18480,6 +18555,153 @@ mod tests {
             !title_text.is_empty(),
             "text is written at the end of an open"
         );
+    }
+
+    /// The takeover dismissal law (owner 2026-10-22: "this animation should be in generall on
+    /// the ui menu... and work if i hit esc to close the whole thing"): when `InputMode` leaves
+    /// Menu while surfaces stand, every one of them - selector column and pooled windows alike -
+    /// plays its squeeze-out under a root held painted, words off from frame one, and they all
+    /// land hidden on the same final frame. The closing frame restores the column to its natural
+    /// seat; nothing keeps animating or stands stranded after.
+    #[test]
+    fn takeover_dismissal_squeezes_the_whole_ui_out_together() {
+        let mut app = stack_app(MenuStack::root(), &[]); // Commands open...
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.push(MenuKind::QuestMenu); // ...plus a left-side pooled window standing up.
+        }
+        let pane_entity = app
+            .world_mut()
+            .query_filtered::<bevy::ecs::entity::Entity, With<MainMenuPane>>()
+            .single(app.world())
+            .expect("one selector column");
+        let window_entities: Vec<bevy::ecs::entity::Entity> = app
+            .world_mut()
+            .query_filtered::<bevy::ecs::entity::Entity, With<MenuStackWindow>>()
+            .iter(app.world())
+            .collect();
+        let feed_layout = |app: &mut App| {
+            app.world_mut()
+                .get_mut::<ComputedNode>(pane_entity)
+                .expect("the pane carries a computed node")
+                .size = Vec2::new(163.0, 57.0);
+            *app.world_mut()
+                .get_mut::<UiGlobalTransform>(pane_entity)
+                .expect("spawned UI nodes carry their transforms")
+                .as_mut() = UiGlobalTransform::from_xy(400.0, 76.5);
+            for entity in window_entities.iter() {
+                if let Some(mut computed) = app.world_mut().get_mut::<ComputedNode>(*entity) {
+                    computed.size = Vec2::new(366.0, 90.0);
+                }
+            }
+        };
+        for _ in 0..PIN_SETTLE_FRAMES + 1 {
+            feed_layout(&mut app);
+            app.update();
+        }
+        let root_display = |app: &mut App| -> Display {
+            app.world_mut()
+                .query_filtered::<&Node, With<MainMenu>>()
+                .single(app.world())
+                .expect("one menu root")
+                .display
+        };
+        let pane_node = |app: &mut App| -> Node {
+            app.world_mut()
+                .query_filtered::<&Node, With<MainMenuPane>>()
+                .single(app.world())
+                .expect("one selector column")
+                .clone()
+        };
+        let visible_boxes = |app: &mut App| -> Vec<(usize, Val, Val)> {
+            app.world_mut()
+                .query::<(&MenuStackWindow, &Node)>()
+                .iter(app.world())
+                .filter(|(_, node)| node.display != Display::None)
+                .map(|(window, node)| (window.slot, node.height, node.width))
+                .collect()
+        };
+        let visible_words = |app: &mut App| -> usize {
+            app.world_mut()
+                .query_filtered::<(&Node, &Text), (With<MainMenuRow>, Without<CompanionRow>)>()
+                .iter(app.world())
+                .filter(|(node, text)| node.display != Display::None && !text.as_str().is_empty())
+                .count()
+        };
+
+        // Standing and painted before the takeover.
+        assert_eq!(root_display(&mut app), Display::Flex);
+        let settled_boxes = visible_boxes(&mut app);
+        assert!(!settled_boxes.is_empty(), "a pooled window stands up");
+        let pane = pane_node(&mut app);
+        let (Val::Px(settled_w), Val::Px(_)) = (pane.width, pane.height) else {
+            panic!("the settled column stands at a full pixel box");
+        };
+        assert!(visible_words(&mut app) > 0);
+
+        // ESC: `InputMode` leaves Menu wholesale.
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::default();
+        let mut prev_pane_w = settled_w;
+        let mut prev_box_h = f32::MAX;
+        let last_frame = crate::hud::menu_anim::MENU_SQUEEZE_FRAMES - 1;
+        for frame in 0..crate::hud::menu_anim::MENU_SQUEEZE_FRAMES {
+            feed_layout(&mut app);
+            app.update();
+            assert_eq!(
+                visible_words(&mut app),
+                0,
+                "words go off at the close's start"
+            );
+            if frame == last_frame {
+                continue; // lands below - this is the closing frame itself
+            }
+            let pane = pane_node(&mut app);
+            assert_eq!(
+                root_display(&mut app),
+                Display::Flex,
+                "the dismissal umbrella keeps the tree painted while any surface animates"
+            );
+            let Val::Px(w) = pane.width else {
+                panic!("a collapsing column keeps pixelled axes (frame {frame})");
+            };
+            assert!(w < prev_pane_w, "the column closes out every frame");
+            prev_pane_w = w;
+            let boxes = visible_boxes(&mut app);
+            assert!(
+                !boxes.is_empty(),
+                "pooled windows hold painted mid-dismissal"
+            );
+            let Val::Px(h) = boxes[0].1 else {
+                panic!("a collapsing window keeps pixelled axes (frame {frame})")
+            };
+            assert!(h < prev_box_h, "the pooled window closes out every frame");
+            prev_box_h = h;
+        }
+
+        // The final dismissal frame: everything lands hidden together and the column is whole
+        // again for the next opening - no shrunken shell, no lingering anchors.
+        assert_eq!(
+            root_display(&mut app),
+            Display::None,
+            "the tree hands back hidden as one"
+        );
+        assert!(
+            visible_boxes(&mut app).is_empty(),
+            "pooled surfaces hide with the period"
+        );
+        let pane = pane_node(&mut app);
+        assert_eq!(pane.right, Val::Px(MENU_RIGHT_EDGE));
+        assert_eq!(
+            pane.height,
+            Val::Auto,
+            "the closing frame restores the natural seat"
+        );
+
+        // And it stays down: no ghost re-arms once dismissed.
+        for _ in 0..3 {
+            feed_layout(&mut app);
+            app.update();
+            assert_eq!(root_display(&mut app), Display::None);
+        }
     }
 
     /// ur/105's motivating example under law: Commands -> Missions on the relabel seat. The one

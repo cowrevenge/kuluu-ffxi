@@ -18704,6 +18704,611 @@ mod tests {
         }
     }
 
+    /// Debug round 2026-10-23 (owner: two menus pop per click; Currencies rows
+    /// double-draw at two offsets). Every consumer of `dynamic.rows` runs in the
+    /// production order against real install records and a full mode-1 currency
+    /// report, then names EVERY visible text node by its marker so any second
+    /// drawer identifies itself. Prints only; asserts nothing while the census
+    /// is being read.
+    #[test]
+    fn production_shape_currency_census_prints_every_visible_drawer() {
+        use bevy::ecs::system::RunSystemOnce;
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            eprintln!("no install: census skipped");
+            return;
+        };
+        let mut app = stack_app(MenuStack::root(), &[]);
+        // Parse the real install records, not `stack_app`'s seeded empty table.
+        {
+            let mut rows = app.world_mut().resource_mut::<ConfigDatRows>();
+            rows.loaded = false;
+            rows.frames.clear();
+            rows.frame_extents.clear();
+        }
+        app.insert_resource(crate::dat_root::SharedDatRoot(Some(std::sync::Arc::new(root))));
+        app.init_resource::<crate::hud::item_detail::SortKey>();
+        app.insert_resource(crate::hud::item_detail::SortOptions {
+            auto: true,
+            key: crate::hud::item_detail::SortKey::Category,
+        });
+        app.init_resource::<crate::hud::item_screen::ItemScreenContainer>();
+        app.init_resource::<MagicSchoolTable>();
+        app.init_resource::<EquipRecords>();
+        app.init_resource::<CommandSelectorCaptions>();
+        app.init_resource::<crate::keybinds::Bindings>();
+        app.init_resource::<crate::hud::unity_fp::UnityFpDat>();
+        app.init_resource::<crate::hud::merit_windows::MeritDat>();
+        // A full mode-1 report (widest read pkt+0xFA): every descriptor answers.
+        {
+            let mut body = vec![7u8; 0x100];
+            body[0x0..0x4].copy_from_slice(&7_777i32.to_le_bytes());
+            app.world_mut()
+                .resource_mut::<crate::snapshot::SceneState>()
+                .snapshot
+                .currencies_1 = Some(body);
+        }
+        app.world_mut()
+            .run_system_once(spawn_status_detail_window)
+            .unwrap();
+        app.add_systems(Update, refresh_dynamic_menu_rows);
+        app.add_systems(
+            Update,
+            (
+                settle_opened_windows
+                    .after(refresh_dynamic_menu_rows)
+                    .before(update_main_menu),
+                update_status_detail_window
+                    .after(refresh_dynamic_menu_rows)
+                    .before(update_main_menu),
+            ),
+        );
+
+        let entry = u8::try_from(
+            crate::hud::status_panel::STATUS_ENTRIES
+                .iter()
+                .position(|e| {
+                    e.kind == crate::hud::status_panel::StatusEntryKind::Currencies
+                })
+                .expect("Currencies is a Status row"),
+        )
+        .unwrap();
+
+        app.update();
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.push(MenuKind::Status);
+        }
+        for _ in 0..2 {
+            app.update();
+        }
+        println!("== push Currencies detail ==");
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.push(MenuKind::StatusDetail { entry });
+        }
+
+        for frame in 0..6 {
+            app.update();
+            let mut q = app.world_mut().query::<(
+                &Text,
+                &Node,
+                Option<&MainMenuRow>,
+                Option<&CompanionRow>,
+                Option<&MainMenuTitle>,
+                Option<&MenuStackWindowTitle>,
+                Option<&MenuStackWindowRow>,
+                Option<&StatusDetailLine>,
+                Option<&StatusDetailTitle>,
+            )>();
+            let mut words: Vec<(String, String)> = Vec::new();
+            for (text, node, mr, cr, mt, stw, strow, sdl, sdt) in q.iter(app.world()) {
+                if node.display == Display::None || text.as_str().is_empty() {
+                    continue;
+                }
+                let owner = match (mr.is_some(), cr.is_some(), mt, stw, strow, sdl, sdt) {
+                    (true, false, ..) => format!("MainMenuRow{}", mr.unwrap().slot),
+                    (_, true, ..) => format!("CompanionRow{}", cr.unwrap().slot),
+                    (_, _, Some(_), ..) => "MainMenuTitle".to_string(),
+                    (_, _, _, Some(tw), ..) => format!("PoolTitle[w{}]", tw.window),
+                    (_, _, _, _, Some(rw), ..) => {
+                        format!("PoolRow[w{}.s{}]", rw.window, rw.slot)
+                    }
+                    (_, _, _, _, _, Some(l), _) => format!("SdlLine[s{}]", l.slot),
+                    (_, _, _, _, _, None, Some(_)) => "SdlTitle".to_string(),
+                    _ => "other".to_string(),
+                };
+                words.push((owner, text.as_str().replace('\n', "\\n")));
+            }
+            drop(q);
+            let mut seen: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
+            for (owner, word) in &words {
+                seen.entry(word.clone()).or_default().push(owner.clone());
+            }
+            let dups: Vec<(&String, &Vec<String>)> = seen
+                .iter()
+                .filter(|(w, owners)| owners.len() > 1 && **w != "0")
+                .map(|(w, o)| (w, o))
+                .collect();
+
+            let mut surf: Vec<String> = Vec::new();
+            let mut pq = app.world_mut().query::<(&MenuStackWindow, &Node)>();
+            for (wi, n) in pq.iter(app.world()) {
+                if n.display != Display::None {
+                    surf.push(format!(
+                        "pool{} l{:?} t{:?}",
+                        wi.slot, n.position_type, n.left
+                    ));
+                }
+            }
+            drop(pq);
+            let mut dq = app
+                .world_mut()
+                .query_filtered::<&Node, With<StatusDetailWindow>>();
+            for n in dq.iter(app.world()) {
+                surf.push(format!(
+                    "sdlw disp{:?} l{:?} t{:?}",
+                    n.display, n.left, n.top
+                ));
+            }
+            drop(dq);
+            let mut pane = app.world_mut().query::<(&MainMenuPane, &Node)>();
+            for (_, n) in pane.iter(app.world()) {
+                surf.push(format!(
+                    "pane disp{:?} l{:?} t{:?}",
+                    n.display, n.position_type, n.left
+                ));
+            }
+            drop(pane);
+
+            let rows_kind = app.world().resource::<DynamicMenu>().rows_kind;
+            let built = app.world().resource::<DynamicMenu>().built_windows.clone();
+            let n_rows = app.world().resource::<DynamicMenu>().rows.len();
+            println!(
+                "frame {frame}: rows {:?} x{} built {:?}\n  surfaces {:?}\n  dup {:?}\n  words {:?}",
+                rows_kind,
+                n_rows,
+                built.map(|b| b.iter().map(|k| format!("{k:?}")).collect::<Vec<_>>()),
+                surf,
+                dups.iter()
+                    .map(|(w, o)| format!("{w:?}=>{:?}", **o))
+                    .collect::<Vec<_>>(),
+                words
+            );
+        }
+    }
+
+    /// Debug round 2026-10-23 chain sweep: every production window flow runs in a
+    /// fresh production-shaped app; after each settles, every visible text label is
+    /// tagged by the DRAWER that owns it (pane / mirror / pool / detail). A label
+    /// drawn by two different drawers is the duplicate the owner keeps capturing -
+    /// the sweep prints which flows do it instead of guessing.
+    #[test]
+    fn every_flow_is_swept_for_two_drawers_of_one_label() {
+        use bevy::ecs::system::RunSystemOnce;
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            eprintln!("no install: sweep skipped");
+            return;
+        };
+        let root = std::sync::Arc::new(root);
+        fn build_app(
+            root: &std::sync::Arc<ffxi_dat::DatRoot>,
+            chain: Vec<MenuKind>,
+        ) -> App {
+            let mut app = stack_app(MenuStack::root(), &[]);
+            // Parse the real install records, not `stack_app`'s seeded empty table.
+            {
+                let mut rows = app.world_mut().resource_mut::<ConfigDatRows>();
+                rows.loaded = false;
+                rows.frames.clear();
+                rows.frame_extents.clear();
+            }
+            app.insert_resource(crate::dat_root::SharedDatRoot(Some(root.clone())));
+            app.init_resource::<crate::hud::item_detail::SortKey>();
+            app.insert_resource(crate::hud::item_detail::SortOptions {
+                auto: true,
+                key: crate::hud::item_detail::SortKey::Category,
+            });
+            app.init_resource::<crate::hud::item_screen::ItemScreenContainer>();
+            app.init_resource::<MagicSchoolTable>();
+            app.init_resource::<EquipRecords>();
+            app.init_resource::<CommandSelectorCaptions>();
+            app.init_resource::<crate::keybinds::Bindings>();
+            app.init_resource::<crate::hud::unity_fp::UnityFpDat>();
+            app.init_resource::<crate::hud::merit_windows::MeritDat>();
+            let mut body = vec![7u8; 0x100];
+            body[0x0..0x4].copy_from_slice(&7_777i32.to_le_bytes());
+            app.world_mut()
+                .resource_mut::<crate::snapshot::SceneState>()
+                .snapshot
+                .currencies_1 = Some(body);
+            let mut stack = MenuStack::root();
+            for kind in chain {
+                stack.push(kind);
+            }
+            app.insert_resource(InputMode::Menu(stack));
+            app.world_mut()
+                .run_system_once(spawn_status_detail_window)
+                .unwrap();
+            app.add_systems(Update, refresh_dynamic_menu_rows);
+            app.add_systems(
+                Update,
+                (
+                    settle_opened_windows
+                        .after(refresh_dynamic_menu_rows)
+                        .before(update_main_menu),
+                    update_status_detail_window
+                        .after(refresh_dynamic_menu_rows)
+                        .before(update_main_menu),
+                ),
+            );
+            app
+        }
+        fn census(app: &mut App) -> Vec<(&'static str, String)> {
+            let mut q = app.world_mut().query::<(
+                &Text,
+                &Node,
+                Option<&MainMenuRow>,
+                Option<&CompanionRow>,
+                Option<&MenuStackWindowRow>,
+                Option<&StatusDetailLine>,
+            )>();
+            let mut out: Vec<(&'static str, String)> = Vec::new();
+            for (text, node, mr, cr, pr, sdl) in q.iter(app.world()) {
+                if node.display == Display::None || text.as_str().is_empty() {
+                    continue;
+                }
+                let family: &'static str = match (mr.is_some(), cr.is_some(), pr, sdl) {
+                    (true, false, ..) => "pane",
+                    (_, true, ..) => "mirror",
+                    (_, _, Some(_), _) => "pool",
+                    (_, _, _, Some(_)) => "detail",
+                    _ => continue,
+                };
+                out.push((family, text.as_str().replace('\n', "\\n")));
+            }
+            out
+        }
+        fn sweep(root: &std::sync::Arc<ffxi_dat::DatRoot>, chain: Vec<MenuKind>) {
+            let mut app = build_app(root, chain.clone());
+            for _ in 0..3 {
+                app.update();
+            }
+            let words = census(&mut app);
+            let mut seen: std::collections::BTreeMap<String, Vec<&'static str>> =
+                std::collections::BTreeMap::new();
+            for (family, word) in &words {
+                seen.entry(word.clone()).or_default().push(*family);
+            }
+            let dups: Vec<(&String, Vec<&'static str>)> = seen
+                .iter()
+                .filter(|(_, fams)| {
+                    fams.iter().collect::<std::collections::BTreeSet<_>>().len() > 1
+                })
+                .map(|(w, f)| (w, f.clone()))
+                .collect();
+            let kinds: Vec<String> = chain.iter().map(|k| format!("{k:?}")).collect();
+            println!(
+                "sweep {:?}: {} visible labels{}",
+                kinds.join(">"),
+                words.len(),
+                if dups.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " | DUPES: {}",
+                        dups.iter()
+                            .map(|(w, f)| format!("{w:?}=>{:?}", f))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            );
+        }
+
+        sweep(&root, vec![]);
+        sweep(&root, vec![MenuKind::Status]);
+        for entry in 0..8u8 {
+            sweep(
+                &root,
+                vec![MenuKind::Status, MenuKind::StatusDetail { entry }],
+            );
+        }
+        sweep(&root, vec![MenuKind::MissionList]);
+        sweep(
+            &root,
+            vec![
+                MenuKind::MissionList,
+                MenuKind::MissionDetail { log: 4, member: 0 },
+            ],
+        );
+        sweep(
+            &root,
+            vec![
+                MenuKind::MissionList,
+                MenuKind::MissionDetail { log: 4, member: 0 },
+                MenuKind::MissionText { log: 4, id: 1 },
+            ],
+        );
+        sweep(&root, vec![MenuKind::QuestMenu]);
+        sweep(
+            &root,
+            vec![
+                MenuKind::QuestMenu,
+                MenuKind::QuestList {
+                    completed: false,
+                    region: 0,
+                },
+            ],
+        );
+        sweep(
+            &root,
+            vec![
+                MenuKind::QuestMenu,
+                MenuKind::QuestList {
+                    completed: true,
+                    region: 1,
+                },
+            ],
+        );
+        sweep(
+            &root,
+            vec![
+                MenuKind::QuestMenu,
+                MenuKind::QuestDetail { log: 0, id: 1 },
+            ],
+        );
+        sweep(&root, vec![MenuKind::RetailConfig]);
+        sweep(
+            &root,
+            vec![
+                MenuKind::RetailConfig,
+                MenuKind::RetailConfigPage(0),
+                MenuKind::RetailConfigSub(0),
+            ],
+        );
+        sweep(&root, vec![MenuKind::MagicGroups]);
+        sweep(
+            &root,
+            vec![MenuKind::MagicGroups, MenuKind::MagicGroup(1)],
+        );
+        sweep(&root, vec![MenuKind::KeyItems]);
+        sweep(&root, vec![MenuKind::RoomList]);
+    }
+
+    /// Debug round 2026-10-23 transition census: settle a chain, then swap the
+    /// whole `InputMode` the way dispatch's `*mode = next` does mid-session and
+    /// print EVERY frame of the handoff - visible boxes (pane / each pool slot /
+    /// detail) with their seats and first rows. A box that shows up at a seat it
+    /// never held, or two boxes painting one window during the swap, is the flash
+    /// the owner captures as "two menus pop".
+    #[test]
+    fn transition_frames_expose_any_second_box_painting() {
+        use bevy::ecs::system::RunSystemOnce;
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            eprintln!("no install: transition census skipped");
+            return;
+        };
+        let root = std::sync::Arc::new(root);
+
+        fn build_app(root: &std::sync::Arc<ffxi_dat::DatRoot>, chain: &[MenuKind]) -> App {
+            let mut app = stack_app(MenuStack::root(), &[]);
+            // `stack_app` pre-marks the record table loaded (its fences seed it); undo
+            // that so the refresh pass parses the real install like a live front end.
+            {
+                let mut rows = app.world_mut().resource_mut::<ConfigDatRows>();
+                rows.loaded = false;
+                rows.frames.clear();
+                rows.frame_extents.clear();
+            }
+            app.insert_resource(crate::dat_root::SharedDatRoot(Some(root.clone())));
+            app.init_resource::<crate::hud::item_detail::SortKey>();
+            app.insert_resource(crate::hud::item_detail::SortOptions {
+                auto: true,
+                key: crate::hud::item_detail::SortKey::Category,
+            });
+            app.init_resource::<crate::hud::item_screen::ItemScreenContainer>();
+            app.init_resource::<MagicSchoolTable>();
+            app.init_resource::<EquipRecords>();
+            app.init_resource::<CommandSelectorCaptions>();
+            app.init_resource::<crate::keybinds::Bindings>();
+            app.init_resource::<crate::hud::unity_fp::UnityFpDat>();
+            app.init_resource::<crate::hud::merit_windows::MeritDat>();
+            let mut body = vec![7u8; 0x100];
+            body[0x0..0x4].copy_from_slice(&7_777i32.to_le_bytes());
+            app.world_mut()
+                .resource_mut::<crate::snapshot::SceneState>()
+                .snapshot
+                .currencies_1 = Some(body);
+            let mut stack = MenuStack::root();
+            for kind in chain {
+                stack.push(*kind);
+            }
+            app.insert_resource(InputMode::Menu(stack));
+            app.world_mut()
+                .run_system_once(spawn_status_detail_window)
+                .unwrap();
+            app.add_systems(Update, refresh_dynamic_menu_rows);
+            app.add_systems(
+                Update,
+                (
+                    settle_opened_windows
+                        .after(refresh_dynamic_menu_rows)
+                        .before(update_main_menu),
+                    update_status_detail_window
+                        .after(refresh_dynamic_menu_rows)
+                        .before(update_main_menu),
+                ),
+            );
+            app
+        }
+
+        /// One line per visible drawer: seat + first two words.
+        fn frame_line(app: &mut App) -> Vec<String> {
+            let mut boxes: std::collections::BTreeMap<String, (String, Vec<String>)> =
+                std::collections::BTreeMap::new();
+            // Frame roots first: they carry no Text, only the seat.
+            let mut fq = app.world_mut().query::<(
+                &Node,
+                Option<&MainMenuPane>,
+                Option<&MenuStackWindow>,
+                Option<&StatusDetailWindow>,
+            )>();
+            for (node, pane, pool, sdlw) in fq.iter(app.world()) {
+                if node.display == Display::None {
+                    continue;
+                }
+                let seat = format!("l{:?} t{:?}", node.left, node.top);
+                if pane.is_some() {
+                    boxes.entry("PANE-FRAME".into()).or_insert((seat, vec![]));
+                } else if let Some(p) = pool {
+                    boxes
+                        .entry(format!("POOL-FRAME[s{}]", p.slot))
+                        .or_insert((seat, vec![]));
+                } else if sdlw.is_some() {
+                    boxes.entry("DETAIL-FRAME".into()).or_insert((seat, vec![]));
+                }
+            }
+            drop(fq);
+            let mut q = app.world_mut().query::<(
+                &Text,
+                &Node,
+                Option<&MainMenuPane>,
+                Option<&MenuStackWindow>,
+                Option<&StatusDetailWindow>,
+                Option<&MainMenuRow>,
+                Option<&CompanionRow>,
+                Option<&MenuStackWindowRow>,
+                Option<&StatusDetailLine>,
+            )>();
+            for (text, node, pane, pool, sdlw, mr, cr, pr, sdl) in q.iter(app.world()) {
+                if node.display == Display::None {
+                    continue;
+                }
+                // Buckets: every row/word belongs to its surface bucket; the bare
+                // frame nodes (pane/pool/detail roots) report their own seat.
+                let seat = format!("l{:?} t{:?}", node.left, node.top);
+                if pane.is_some() {
+                    boxes.entry("PANE-FRAME".into()).or_insert((seat, vec![]));
+                    continue;
+                }
+                if let Some(p) = pool {
+                    let key = format!("POOL-FRAME[s{}]", p.slot);
+                    boxes.entry(key).or_insert((seat, vec![]));
+                    continue;
+                }
+                if sdlw.is_some() {
+                    boxes.entry("DETAIL-FRAME".into()).or_insert((seat, vec![]));
+                    continue;
+                }
+                let bucket: String = if mr.is_some() && cr.is_none() {
+                    "pane-rows".into()
+                } else if cr.is_some() {
+                    "mirror-rows".into()
+                } else if let Some(rw) = pr {
+                    format!("pool-rows[w{}]", rw.window)
+                } else if sdl.is_some() {
+                    "detail-lines".into()
+                } else {
+                    continue;
+                };
+                let e = boxes.entry(bucket.into()).or_insert((seat.clone(), vec![]));
+                if !text.as_str().is_empty() && e.1.len() < 4 {
+                    e.1.push(text.as_str().to_string());
+                }
+            }
+            boxes
+                .into_iter()
+                .map(|(b, (seat, w))| format!("{b}[{seat}] {}", w.join("|")))
+                .collect()
+        }
+
+        fn transition(
+            root: &std::sync::Arc<ffxi_dat::DatRoot>,
+            from: &[MenuKind],
+            to: &[MenuKind],
+        ) {
+            println!(
+                "== {} => {}",
+                from.iter()
+                    .map(|k| format!("{k:?}"))
+                    .collect::<Vec<_>>()
+                    .join(">"),
+                to.iter()
+                    .map(|k| format!("{k:?}"))
+                    .collect::<Vec<_>>()
+                    .join(">")
+            );
+            let mut app = build_app(root, from);
+            for _ in 0..3 {
+                app.update();
+            }
+            println!("  settled: {:?}", frame_line(&mut app));
+            {
+                let rows = app.world().resource::<ConfigDatRows>();
+                for name in ["quest00", "quest01", "miss00", "evitem"] {
+                    println!(
+                        "  record {name}: frame={:?} extents={:?} merged={:?}",
+                        rows.frames.get(name),
+                        rows.frame_extents.get(name),
+                        rows.record_frame(name),
+                    );
+                }
+            }
+            let mut stack = MenuStack::root();
+            for kind in to {
+                stack.push(*kind);
+            }
+            // Exactly what dispatch's `*mode = next` does.
+            {
+                let rows = app.world().resource::<ConfigDatRows>();
+                println!("  layout: {:?}", menu_stack_layout(&stack, rows).windows);
+            }
+            app.insert_resource(InputMode::Menu(stack));
+            for frame in 0..6 {
+                app.update();
+                println!("  f{frame}: {:?}", frame_line(&mut app));
+            }
+        }
+
+        let status = MenuKind::Status;
+        let cur_entry = u8::try_from(
+            crate::hud::status_panel::STATUS_ENTRIES
+                .iter()
+                .position(|e| {
+                    e.kind == crate::hud::status_panel::StatusEntryKind::Currencies
+                })
+                .expect("Currencies is a Status row"),
+        )
+        .unwrap();
+        transition(&root, &[], &[status]);
+        let sd = MenuKind::StatusDetail { entry: cur_entry };
+        transition(&root, &[status], &[status, sd]);
+        transition(
+            &root,
+            &[],
+            &[MenuKind::MissionList],
+        );
+        transition(
+            &root,
+            &[MenuKind::MissionList],
+            &[
+                MenuKind::MissionList,
+                MenuKind::MissionDetail { log: 4, member: 0 },
+            ],
+        );
+        transition(
+            &root,
+            &[MenuKind::QuestMenu],
+            &[
+                MenuKind::QuestMenu,
+                MenuKind::QuestList {
+                    completed: false,
+                    region: 0,
+                },
+            ],
+        );
+    }
+
+
     /// ur/105's motivating example under law: Commands -> Missions on the relabel seat. The one
     /// pane plays close-out then grow-in through the squeeze function (no word swap under a static
     /// frame), chrome-only while it animates, and `update_main_menu` writes the new words at the

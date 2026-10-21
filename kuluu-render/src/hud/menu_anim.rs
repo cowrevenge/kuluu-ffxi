@@ -70,6 +70,27 @@ impl FullRect {
         })
     }
 
+    /// The box a node last laid out - the selector column's law is right-anchored, so its style
+    /// has no `Px` left to read and only the laid-out frame carries its full seat. Same conversion
+    /// as [`crate::hud::dock::node_anchor`] (`drawn_height`'s both axes).
+    pub fn from_laid_out_box(
+        computed: &bevy::ui::ComputedNode,
+        transform: &bevy::ui::UiGlobalTransform,
+    ) -> Option<Self> {
+        let scale = computed.inverse_scale_factor();
+        let size = computed.size() * scale;
+        if size.x < ANIM_MIN_SIZE_PX || size.y < ANIM_MIN_SIZE_PX {
+            return None;
+        }
+        let center = transform.translation * scale;
+        Some(Self {
+            center_x: center.x,
+            center_y: center.y,
+            width: size.x,
+            height: size.y,
+        })
+    }
+
     /// The four style fields of a `width`-by-`height` box seated on this rect's center - write all
     /// four together and the box holds its center while the axes scale.
     pub fn centered(&self, width: f32, height: f32) -> (Val, Val, Val, Val) {

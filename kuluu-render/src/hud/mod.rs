@@ -442,6 +442,12 @@ impl Plugin for HudPlugin {
             )
                 .after(menu::refresh_dynamic_menu_rows),
         );
+        // The selector-column relabel squeeze: last writer of the pane's box, standing after
+        // `update_main_menu` places it natural with words filled underneath.
+        app.add_systems(
+            Update,
+            menu::squeeze_menu_column.after(menu::update_main_menu),
+        );
 
         // The end-of-frame forensic sample (owner debug 2026-10-19): runs last among the
         // menu systems and names every visible UI text node while a Status flow is open,

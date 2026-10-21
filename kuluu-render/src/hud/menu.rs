@@ -9539,15 +9539,9 @@ pub(crate) fn update_menu_stack_windows(
         ),
     >,
     mut arrow_q: Query<(&MenuStackWindowArrow, &mut Node), Without<MainMenuPane>>,
-    // The selector-column surface is pinned here because `update_main_menu`'s signature already
-    // stands at bevy's fn-parameter arity ceiling. Which pass runs first in a frame does not
-    // matter: this arm owns the height field of those nodes and writes nothing else on them,
-    // and that one copies the node before writing only its own fields.
-    mut column_q: Query<(&mut Node, &ComputedNode), With<MainMenuPane>>,
-    // One pin state per pooled surface (see `PinState`).
+    // One pin state per pooled surface (see `PinState`). The selector-column surface is pinned by
+    // `squeeze_menu_column` next door, never here.
     mut pins: Local<Vec<PinState>>,
-    // The selector-column surface's pin state.
-    mut column_pin: Local<PinState>,
     // Heights remembered for exact window shapes across slots and reopens (`remember_height`):
     // a shape the session measured once opens at final size, empty chrome, from frame one.
     mut heights: Local<Vec<HeightPin>>,
@@ -9581,7 +9575,6 @@ pub(crate) fn update_menu_stack_windows(
     // level's whole lifetime - allocation by IDENTITY, not by draw order. Ordering
     // was re-mapping surfaces every time a chain grew or shrank, which is how an
     // unrelated left-side open restyled right-column windows wholesale (ur/94-101).
-    let mut column_shape: Option<(MenuKind, usize)> = None;
     let shown: Vec<Option<Shown>> = match &*mode {
         InputMode::Menu(stack) => {
             // ur/94-98: under a covered child the pool draws that focused framed
@@ -9589,16 +9582,7 @@ pub(crate) fn update_menu_stack_windows(
             // opener never enters here; its column surface keeps painting in place.
             let layout = menu_stack_layout(stack, &config_rows);
             let focus_index = layout.focused().map(|(index, _)| index);
-            if let Some(surface) = column_surface(stack, &layout, &dynamic, settings.dlss_supported)
-            {
-                // The rows it paints are what its height measures - scrolled-off ones not.
-                column_shape = Some((
-                    surface.kind,
-                    surface
-                        .window
-                        .min(surface.total.saturating_sub(surface.start)),
-                ));
-            }
+
             let records = layout.pool_windows();
             // While the Status flow is open nothing else on the stack may be seen — retail
             // hides it under statcom2 at the Commands spot (owner ruling 2026-10-19: "that
@@ -9791,40 +9775,6 @@ pub(crate) fn update_menu_stack_windows(
         }
     }
 
-    // The selector-column surface shares the `HeightPin` law (see its system param note).
-    for (mut pane_node, computed) in column_q.iter_mut() {
-        let mut want = pane_node.clone();
-        match column_shape {
-            Some((kind, rows)) => {
-                let live = crate::hud::dock::drawn_height(computed);
-                if column_pin.adopt(&heights, kind, rows).is_none() {
-                    match column_pin.step(kind, rows, live) {
-                        Some(px) => want.height = Val::Px(px),
-                        None => {
-                            if pane_node.height != Val::Auto {
-                                want.height = Val::Auto;
-                            }
-                        }
-                    }
-                }
-                if fresh {
-                    if let Some(pin) = column_pin.held(kind, rows) {
-                        remember_height(&mut heights, pin);
-                    }
-                }
-            }
-            // No menu stack (or none with a column level): forget what the column measured, it
-            // will draw different content when next shown.
-            None => {
-                *column_pin = PinState::default();
-                if pane_node.height != Val::Auto {
-                    want.height = Val::Auto;
-                }
-            }
-        }
-        pane_node.set_if_neq(want);
-    }
-
     // Chrome-only fx law (owner 2026-10-22): a grow-in renders its box and background only -
     // rows, caption and right-edge furniture land together on the frame the squeeze completes. A
     // collapse loses them immediately through the hide arms below ("text ... removed at the
@@ -9974,6 +9924,184 @@ pub(crate) fn update_menu_stack_windows(
             }
             if node.height != want_height {
                 node.height = want_height;
+            }
+        }
+    }
+}
+
+/// The selector-column relabel law (owner ruling 2026-10-22): when that one surface takes a
+/// different menu kind - Commands to Missions, or yielding to and returning from a bespoke screen -
+/// it plays its close-out then grow-in through the same center-hold squeeze function as the
+/// record-framed windows instead of swapping words under a static frame. Words are hidden for every
+/// animating frame (`update_main_menu` fills them underneath all along) and show again once the box
+/// is full; a cycle whose new shape was never measured grows in plain once and learns.
+///
+/// The column's height pin rides here (the same law as the pooled pass): `update_main_menu`'s
+/// signature stands at bevy's arity ceiling, and with relabel fx it could not sit there either.
+/// Its remembered-height table is separate from the pool's by construction - selector kinds and
+/// record-window kinds are disjoint seats (ur/94-98), so no key names two surfaces. Runs after
+/// `update_main_menu` as the override writer of the box on fx frames only.
+#[allow(clippy::type_complexity)]
+pub(crate) fn squeeze_menu_column(
+    mode: Res<InputMode>,
+    settings: Res<GraphicsSettings>,
+    config_rows: Res<ConfigDatRows>,
+    dynamic: Res<DynamicMenu>,
+    mut pane_q: Query<(&mut Node, &ComputedNode, &bevy::ui::UiGlobalTransform), With<MainMenuPane>>,
+    // The column's own words - the companion mirrors draw their own surfaces and stay untouched.
+    mut row_q: Query<
+        &mut Node,
+        (
+            With<MainMenuRow>,
+            Without<MainMenuTitle>,
+            Without<CompanionRow>,
+            Without<MainMenuPane>,
+        ),
+    >,
+    // The title node never wears `MainMenuRow` and vice versa; the filters say so statically.
+    mut title_q: Query<
+        &mut Node,
+        (
+            With<MainMenuTitle>,
+            Without<MainMenuRow>,
+            Without<CompanionTitle>,
+            Without<MainMenuPane>,
+        ),
+    >,
+    mut fx_column: Local<crate::hud::menu_anim::WindowFx>,
+    mut prev_kind: Local<Option<MenuKind>>,
+    mut column_pin: Local<PinState>,
+    // Heights this seat's shapes have painted, for frame-one opens (see `remember_height`).
+    mut heights: Local<Vec<HeightPin>>,
+) {
+    use crate::hud::menu_anim::{FullRect, WindowFx};
+    let fresh = match &*mode {
+        InputMode::Menu(stack) => rows_built_for(&dynamic, &stack.levels),
+        _ => true,
+    };
+    // The kind and visible-row count standing here this frame - derived exactly as the pooled
+    // pass derives its column shape, so both read one law.
+    let column_shape: Option<(MenuKind, usize)> = match &*mode {
+        InputMode::Menu(stack) => {
+            let layout = menu_stack_layout(stack, &config_rows);
+            column_surface(stack, &layout, &dynamic, settings.dlss_supported).map(|surface| {
+                (
+                    surface.kind,
+                    surface
+                        .window
+                        .min(surface.total.saturating_sub(surface.start)),
+                )
+            })
+        }
+        _ => None,
+    };
+
+    let mut cfx = *fx_column;
+    let rested = matches!(cfx, WindowFx::Idle);
+    let was_closing = matches!(cfx, WindowFx::Closing { .. });
+    let mut animated = if rested { None } else { cfx.tick() };
+    // A relabel is one menu kind replacing another on this seat (or the column yielding while a
+    // kind stood here); a first stand or a return after an absent stretch draws plain.
+    let relabel = match (*prev_kind, column_shape) {
+        (Some(prev), Some((kind, _))) => kind != prev,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+
+    for (mut pane_node, computed, transform) in pane_q.iter_mut() {
+        if rested && relabel {
+            // The capture is the last laid-out frame: `place_in_column` anchors by right edge, so
+            // the style fields hold no px seat to center around.
+            if let Some(full) = FullRect::from_laid_out_box(computed, transform) {
+                cfx = WindowFx::closing(full);
+                animated = cfx.tick();
+            }
+        }
+        let mut want = pane_node.clone();
+        // The swap frame releases whatever pin the outgoing kind held: a seat moving between two
+        // menu kinds re-adopts for the incoming one (or starts learning it), never keeps measuring
+        // through an old shape's px.
+        let swap_frame = was_closing && matches!(cfx, WindowFx::Idle);
+        if swap_frame {
+            *column_pin = PinState::default();
+        }
+        match column_shape {
+            Some((kind, rows)) if matches!(cfx, WindowFx::Idle) => {
+                let live = crate::hud::dock::drawn_height(computed);
+                if let Some(px) = column_pin.adopt(&heights, kind, rows) {
+                    // Written explicitly: an fx just ended may have left the field at an old
+                    // fraction (same fix the pooled pass carries).
+                    want.height = Val::Px(px);
+                } else {
+                    match column_pin.step(kind, rows, live) {
+                        Some(px) => want.height = Val::Px(px),
+                        None => {
+                            if pane_node.height != Val::Auto {
+                                want.height = Val::Auto;
+                            }
+                        }
+                    }
+                }
+                if fresh {
+                    if let Some(pin) = column_pin.held(kind, rows) {
+                        remember_height(&mut heights, pin);
+                    }
+                }
+            }
+            None => {
+                *column_pin = PinState::default();
+                if pane_node.height != Val::Auto {
+                    want.height = Val::Auto;
+                }
+            }
+            // An fx frame owns the box; no pin observation off intermediate measurements.
+            _ => {}
+        }
+        // Grow into the full box the pass just stood, at the natural right-anchored seat
+        // `update_main_menu` writes this frame. Unknown shape (no px after re-adoption) draws
+        // plain and learns, exactly once.
+        if swap_frame {
+            if let (Val::Px(px), Val::Px(w)) = (want.height, want.width) {
+                cfx = WindowFx::opening(FullRect {
+                    center_x: MENU_DESIGN_WIDTH - MENU_RIGHT_EDGE - w / 2.0,
+                    center_y: MENU_COLUMN_TOP + px / 2.0,
+                    width: w,
+                    height: px,
+                });
+                animated = cfx.tick();
+            }
+        }
+        if let Some((width, height)) = animated {
+            if let Some(full) = cfx.full() {
+                let (left, top, w, h) = full.centered(width, height);
+                want.left = left;
+                want.top = top;
+                want.width = w;
+                want.height = h;
+                // At rest the column stands by its right edge; absolute anchors only while fx.
+                want.right = Val::Auto;
+                want.bottom = Val::Auto;
+                want.display = Display::Flex;
+            }
+        }
+        pane_node.set_if_neq(want);
+    }
+    *fx_column = cfx;
+    // The tracked kind follows what stands here, so a landing never reads as another change and an
+    // absent column remembers nothing until one returns.
+    *prev_kind = column_shape.map(|(kind, _)| kind);
+
+    // Chrome-only while the cycle runs: hide this column's words (title band fill and chrome stay -
+    // only text nodes leave). `update_main_menu` shows and fills them again on the landing frame.
+    if !matches!(cfx, WindowFx::Idle) {
+        for mut node in row_q.iter_mut() {
+            if node.display != Display::None {
+                node.display = Display::None;
+            }
+        }
+        for mut node in title_q.iter_mut() {
+            if node.display != Display::None {
+                node.display = Display::None;
             }
         }
     }
@@ -12769,7 +12897,15 @@ mod tests {
 
     fn stack_app(stack: MenuStack, frames: &[(&str, (i16, i16, i16, i16), u8)]) -> App {
         let mut app = root_menu_app(0);
-        app.add_systems(Update, update_menu_stack_windows);
+        // The production wiring: pooled windows and the column's pin/fx pass run side by
+        // side (mod.rs), so stack fences drive both surfaces' laws too.
+        app.add_systems(
+            Update,
+            (
+                update_menu_stack_windows,
+                squeeze_menu_column.after(update_main_menu),
+            ),
+        );
         {
             let mut rows = app.world_mut().resource_mut::<ConfigDatRows>();
             rows.loaded = true;
@@ -18344,6 +18480,135 @@ mod tests {
             !title_text.is_empty(),
             "text is written at the end of an open"
         );
+    }
+
+    /// ur/105's motivating example under law: Commands -> Missions on the relabel seat. The one
+    /// pane plays close-out then grow-in through the squeeze function (no word swap under a static
+    /// frame), chrome-only while it animates, and `update_main_menu` writes the new words at the
+    /// landing. Unit-world layout never runs, so fed `ComputedNode` sizes and an explicit transform
+    /// stand in for the laid-out box (as in the pin fences). The grow phase needs a remembered
+    /// shape, so cycle one (which learns) closes out and lands plain; cycle two must grow.
+    #[test]
+    fn column_relabel_squeezes_out_and_back_with_words_written_last() {
+        let mut app = root_menu_app(0); // Commands open: spawned + `update_main_menu` ran.
+        app.add_systems(Update, squeeze_menu_column.after(update_main_menu));
+
+        let pane = app
+            .world_mut()
+            .query_filtered::<bevy::ecs::entity::Entity, With<MainMenuPane>>()
+            .single(app.world())
+            .expect("one selector column");
+        let center = (400.0f32, 76.5f32);
+        let feed_layout = |app: &mut App| {
+            app.world_mut()
+                .get_mut::<ComputedNode>(pane)
+                .expect("the pane carries a computed node")
+                .size = Vec2::new(163.0, 57.0);
+            *app.world_mut()
+                .get_mut::<UiGlobalTransform>(pane)
+                .expect("spawned UI nodes carry their transforms")
+                .as_mut() = UiGlobalTransform::from_xy(center.0, center.1);
+        };
+        let pane_node = |app: &mut App| -> Node {
+            app.world_mut()
+                .query_filtered::<&Node, With<MainMenuPane>>()
+                .single(app.world())
+                .expect("one selector column")
+                .clone()
+        };
+        let visible_words = |app: &mut App| -> usize {
+            app.world_mut()
+                .query_filtered::<&Node, (With<MainMenuRow>, Without<CompanionRow>)>()
+                .iter(app.world())
+                .filter(|node| node.display != Display::None)
+                .count()
+                + app
+                    .world_mut()
+                    .query_filtered::<&Node, (With<MainMenuTitle>, Without<CompanionTitle>)>()
+                    .iter(app.world())
+                    .filter(|node| node.display != Display::None)
+                    .count()
+        };
+
+        feed_layout(&mut app);
+        for _ in 0..PIN_SETTLE_FRAMES + 1 {
+            app.update(); // Commands pin earned and remembered.
+        }
+        let natural = pane_node(&mut app);
+        let (Val::Px(w_root), Val::Px(h_root)) = (natural.width, natural.height) else {
+            panic!("Commands settles to a full pixel box");
+        };
+        assert_eq!(natural.right, Val::Px(MENU_RIGHT_EDGE));
+        assert!(
+            visible_words(&mut app) > 0,
+            "Commands paints its words at rest"
+        );
+
+        // Cycle one: learn the new shape. The close-out plays; the landing may be plain.
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.push(MenuKind::MissionList);
+        }
+        app.update();
+        let shrinking = pane_node(&mut app);
+        assert_eq!(
+            shrinking.right,
+            Val::Auto,
+            "fx takes the seat off its anchor"
+        );
+        let (Val::Px(l), Val::Px(t), Val::Px(w1), Val::Px(h1)) = (
+            shrinking.left,
+            shrinking.top,
+            shrinking.width,
+            shrinking.height,
+        ) else {
+            panic!("a collapsing box keeps pixelled axes");
+        };
+        assert!(
+            w1 < w_root && h1 < h_root,
+            "the relabel starts by closing out"
+        );
+        assert!((l + w1 / 2.0 - center.0).abs() < 0.5, "held its center x");
+        assert!((t + h1 / 2.0 - center.1).abs() < 0.5, "held its center y");
+        assert_eq!(
+            visible_words(&mut app),
+            0,
+            "words off from the first close frame"
+        );
+        for _ in 0..crate::hud::menu_anim::MENU_SQUEEZE_FRAMES + 8 {
+            feed_layout(&mut app); // unit-world keeps standing the fed box while fx runs.
+            app.update();
+        }
+
+        // Cycle two, back to Commands: now both shapes are known, so it must grow as well as close.
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.pop();
+        }
+        app.update();
+        assert_eq!(
+            pane_node(&mut app).right,
+            Val::Auto,
+            "cycle two closes out too"
+        );
+        let mut landed = None;
+        for _ in 0..2 * crate::hud::menu_anim::MENU_SQUEEZE_FRAMES + 8 {
+            feed_layout(&mut app);
+            app.update();
+            let node = pane_node(&mut app);
+            if node.right == Val::Px(MENU_RIGHT_EDGE) && landed.is_none() {
+                assert_eq!(
+                    node.width,
+                    Val::Px(w_root),
+                    "the landing keeps the natural width"
+                );
+                assert!(
+                    visible_words(&mut app) > 0,
+                    "words are written at the end of an open"
+                );
+                landed = Some(node.clone());
+            }
+        }
+        let landed = landed.expect("the relabel lands right-anchored with words rewritten");
+        assert_eq!(landed.height, Val::Px(h_root));
     }
 
     /// The remembering table keys on the exact shape: same (kind, rows) replaces, anything else

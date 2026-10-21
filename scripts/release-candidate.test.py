@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 import subprocess
+import shutil
+import textwrap
 import sys
 import tempfile
 import unittest
@@ -29,6 +31,36 @@ class CandidateTests(unittest.TestCase):
             '--sha', sha or self.base, '--publish', str(publish).lower()],
             cwd=self.cwd, capture_output=True, text=True,
             env={k: v for k, v in os.environ.items() if not k.startswith('GIT_')})
+
+    def test_workflow_event_context(self):
+        workflow = SCRIPT.parent.parent / '.github/workflows/release.yml'
+        body = workflow.read_text().split('        run: |\n', 1)[1].split('\n  # Gate', 1)[0]
+        body = textwrap.dedent(body)
+        scripts = Path(self.cwd) / 'scripts'
+        scripts.mkdir()
+        shutil.copyfile(SCRIPT, scripts / SCRIPT.name)
+        cases = [
+            ('push', 'branch', 'main', 'v0.7.0', True, 'v0.7.0', True),
+            ('push', 'branch', 'release/v0.8.0', '', False, 'v0.8.0', False),
+            ('push', 'branch', 'release/v0.8.0', '', True, 'v0.8.0', False),
+            ('push', 'tag', 'v0.7.0', '', True, 'v0.7.0', True),
+            ('workflow_dispatch', 'branch', 'main', 'v0.7.0', True, 'v0.7.0', True),
+            ('workflow_dispatch', 'branch', 'release/v0.8.0', 'v0.8.0', False, 'v0.8.0', False),
+        ]
+        for event, ref_type, ref_name, tag, publish, expected_tag, expected_publish in cases:
+            with self.subTest(event=event, ref=ref_name, publish=publish):
+                output = Path(self.cwd) / 'workflow-output'
+                output.write_text('')
+                env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+                env.update(GITHUB_EVENT_NAME=event, GITHUB_REF_TYPE=ref_type,
+                           GITHUB_REF_NAME=ref_name, GITHUB_SHA=self.base,
+                           INPUT_TAG=tag, PUBLISH=str(publish).lower(), GITHUB_OUTPUT=str(output))
+                result = subprocess.run(['bash', '-eu', '-c', body], cwd=self.cwd,
+                                        env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                self.assertEqual(values, dict(tag=expected_tag, sha=self.base,
+                                              publish=str(expected_publish).lower()))
 
     def test_matching_tag(self):
         self.assertEqual(self.run_candidate().returncode, 0)

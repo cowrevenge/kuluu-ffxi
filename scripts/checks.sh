@@ -163,6 +163,7 @@ run_harness() {
   local settings=".claude/settings.json" codex_hooks=".codex/hooks.json"
   local codex_config=".codex/config.toml" bad=0 link target cmd path doc mode target_rel
   local hook hook_file recipe check_output
+  python3 scripts/release-candidate.test.py
 
   # 1. Every tracked entry under .claude/ is a symlink resolving inside
   #    .agents/, or settings.json itself. Content never lives here. The

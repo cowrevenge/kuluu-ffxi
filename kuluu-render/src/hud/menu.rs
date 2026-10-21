@@ -9442,6 +9442,50 @@ impl PinState {
         }
         None
     }
+
+    /// First frame of a reappearance: take the height this exact shape already painted and was
+    /// remembered for (see [`remember_height`]), so the box opens AT its final size - empty chrome
+    /// under the box-first law, never a chrome-small one that jumps once words land. Only from a
+    /// pristine state; any observation in progress is left to `step`.
+    fn adopt(&mut self, table: &[HeightPin], kind: MenuKind, rows: usize) -> Option<f32> {
+        if self.pin.is_some() || self.observing.is_some() {
+            return None;
+        }
+        let px = learned_height(table, kind, rows)?;
+        self.pin = Some(HeightPin { kind, rows, px });
+        Some(px)
+    }
+
+    /// The pin currently held for exactly this shape - what the remembering records.
+    fn held(&self, kind: MenuKind, rows: usize) -> Option<HeightPin> {
+        self.pin.filter(|pin| pin.kind == kind && pin.rows == rows)
+    }
+}
+
+/// Every height the session learned, keyed by exact window shape (kind x visible rows). Pool
+/// surfaces forget on close and slots never share measurements; this table is what lets ANY
+/// surface opening a shape another already measured assert that px on its first frame.
+/// Kinds are an enum and visible rows are pool-capped, so the table stays small by construction.
+fn remember_height(table: &mut Vec<HeightPin>, pin: HeightPin) {
+    if let Some(seen) = table
+        .iter_mut()
+        .find(|held| held.kind == pin.kind && held.rows == pin.rows)
+    {
+        *seen = pin;
+        return;
+    }
+    const HEIGHT_CACHE_MAX: usize = 512;
+    if table.len() >= HEIGHT_CACHE_MAX {
+        table.remove(0);
+    }
+    table.push(pin);
+}
+
+fn learned_height(table: &[HeightPin], kind: MenuKind, rows: usize) -> Option<f32> {
+    table
+        .iter()
+        .find(|held| held.kind == kind && held.rows == rows)
+        .map(|held| held.px)
 }
 
 /// Draws the open windows under the focused one that sit at their own record frames, each with
@@ -9497,6 +9541,9 @@ pub(crate) fn update_menu_stack_windows(
     mut pins: Local<Vec<PinState>>,
     // The selector-column surface's pin state.
     mut column_pin: Local<PinState>,
+    // Heights remembered for exact window shapes across slots and reopens (`remember_height`):
+    // a shape the session measured once opens at final size, empty chrome, from frame one.
+    mut heights: Local<Vec<HeightPin>>,
 ) {
     // Order-of-operations law (owner 2026-10-21, ur/103): when a window opened or closed after
     // the last row build this frame's stack is newer than its content - boxes and placement
@@ -9609,13 +9656,22 @@ pub(crate) fn update_menu_stack_windows(
                     // The rows this surface paints are the content its height measures from.
                     let rows = open.visible.min(open.total.saturating_sub(open.start));
                     let live = crate::hud::dock::drawn_height(computed);
-                    match pin_slot.step(open.level.kind, rows, live) {
-                        Some(px) => want.height = Val::Px(px),
-                        None => {
-                            // Settling (new shape or first sighting): measure naturally.
-                            if node.height != Val::Auto {
-                                want.height = Val::Auto;
+                    if pin_slot.adopt(&heights, open.level.kind, rows).is_none() {
+                        match pin_slot.step(open.level.kind, rows, live) {
+                            Some(px) => want.height = Val::Px(px),
+                            None => {
+                                // Settling (new shape or first sighting): measure naturally.
+                                if node.height != Val::Auto {
+                                    want.height = Val::Auto;
+                                }
                             }
+                        }
+                    }
+                    // Only heights held over content that really painted enter the table; a
+                    // stale frame's chrome-only measurement never poisons it.
+                    if fresh {
+                        if let Some(pin) = pin_slot.held(open.level.kind, rows) {
+                            remember_height(&mut heights, pin);
                         }
                     }
                 }
@@ -9655,12 +9711,19 @@ pub(crate) fn update_menu_stack_windows(
         match column_shape {
             Some((kind, rows)) => {
                 let live = crate::hud::dock::drawn_height(computed);
-                match column_pin.step(kind, rows, live) {
-                    Some(px) => want.height = Val::Px(px),
-                    None => {
-                        if pane_node.height != Val::Auto {
-                            want.height = Val::Auto;
+                if column_pin.adopt(&heights, kind, rows).is_none() {
+                    match column_pin.step(kind, rows, live) {
+                        Some(px) => want.height = Val::Px(px),
+                        None => {
+                            if pane_node.height != Val::Auto {
+                                want.height = Val::Auto;
+                            }
                         }
+                    }
+                }
+                if fresh {
+                    if let Some(pin) = column_pin.held(kind, rows) {
+                        remember_height(&mut heights, pin);
                     }
                 }
             }
@@ -17840,6 +17903,115 @@ mod tests {
         app.update();
         assert_eq!(pane_height(&mut app), Val::Px(57.0));
         assert_eq!(hub_height(&mut app), Val::Px(57.0));
+    }
+
+    /// Box-first law's size partner (owner 2026-10-21): a window shape the session measured once
+    /// opens AT that height on its first frame after reopening - remembered px, empty chrome -
+    /// never as a chrome-small box that grows into place as words land and it re-measures.
+    #[test]
+    fn remembered_shapes_reopen_at_their_measured_height() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::QuestMenu);
+        let mut app = stack_app(stack, &[]);
+        for _ in 0..2 {
+            app.update();
+        }
+
+        // Fed `ComputedNode` sizes stand in for real layout (as in the re-assert fence).
+        let surface_entities: Vec<bevy::ecs::entity::Entity> = app
+            .world_mut()
+            .query::<bevy::ecs::entity::Entity>()
+            .iter(app.world())
+            .filter(|entity| {
+                app.world().get::<MenuStackWindow>(*entity).is_some()
+                    || app.world().get::<MainMenuPane>(*entity).is_some()
+            })
+            .collect();
+        assert!(!surface_entities.is_empty());
+        for entity in surface_entities {
+            app.world_mut()
+                .get_mut::<ComputedNode>(entity)
+                .expect("framed surfaces carry a computed node")
+                .size = Vec2::new(300.0, 57.0);
+        }
+        let hub_height = |app: &mut App| -> Val {
+            let mut got: Vec<Val> = app
+                .world_mut()
+                .query::<(&MenuStackWindow, &Node)>()
+                .iter(app.world())
+                .filter(|(window, node)| window.slot == 1 && node.display != Display::None)
+                .map(|(_, node)| node.height)
+                .collect();
+            assert_eq!(got.len(), 1, "the hub owns exactly one surface");
+            got.remove(0)
+        };
+
+        for _ in 1..PIN_SETTLE_FRAMES {
+            app.update();
+        }
+        app.update(); // the settling frame earns and records the height.
+        assert_eq!(hub_height(&mut app), Val::Px(57.0));
+
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.pop();
+        }
+        app.update(); // closed: the surface forgets; only the table remembers.
+
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.push(MenuKind::QuestMenu);
+        }
+        app.update();
+        assert_eq!(
+            hub_height(&mut app),
+            Val::Px(57.0),
+            "the reopened shape opens at its remembered height on frame one"
+        );
+    }
+
+    /// The remembering table keys on the exact shape: same (kind, rows) replaces, anything else
+    /// misses; `adopt` fires only from a pristine state and never while an observation runs.
+    #[test]
+    fn the_height_table_remembers_exact_shapes_only() {
+        let mut table = Vec::new();
+        remember_height(
+            &mut table,
+            HeightPin {
+                kind: MenuKind::MissionList,
+                rows: 5,
+                px: 97.0,
+            },
+        );
+        remember_height(
+            &mut table,
+            HeightPin {
+                kind: MenuKind::MissionList,
+                rows: 5,
+                px: 121.0,
+            },
+        );
+        assert_eq!(table.len(), 1, "a shape replaces its height, never stacks");
+        assert_eq!(
+            learned_height(&table, MenuKind::MissionList, 5),
+            Some(121.0)
+        );
+        assert_eq!(learned_height(&table, MenuKind::MissionList, 4), None);
+
+        let mut observing = PinState::default();
+        observing.step(MenuKind::MissionList, 5, 30.0);
+        assert_eq!(
+            observing.adopt(&table, MenuKind::MissionList, 5),
+            None,
+            "a running observation is left to step"
+        );
+        let mut pristine = PinState::default();
+        assert_eq!(
+            pristine.adopt(&table, MenuKind::MissionList, 5),
+            Some(121.0)
+        );
+        assert_eq!(
+            pristine.held(MenuKind::MissionList, 5).map(|p| p.px),
+            Some(121.0)
+        );
     }
 
     /// Placement-law fence: column and pooled surfaces never invent a width state as chains grow

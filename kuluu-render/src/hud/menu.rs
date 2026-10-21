@@ -5636,6 +5636,63 @@ impl MenuStackLayout {
     }
 }
 
+/// What the selector-column surface paints this frame - one law for both passes that touch it:
+/// `update_main_menu` places and draws its rows, `update_menu_stack_windows` pins its height.
+struct ColumnSurface<'a> {
+    /// Stack index of the level drawing (under a framed child: its covered opener).
+    view_index: usize,
+    seat: MenuWindowSeat,
+    kind: MenuKind,
+    cursor: usize,
+    rows: &'a [DynamicMenuRow],
+    total: usize,
+    start: usize,
+    window: usize,
+}
+
+fn column_surface<'a>(
+    stack: &crate::input_mode::MenuStack,
+    layout: &MenuStackLayout,
+    dynamic: &'a DynamicMenu,
+    dlss_supported: bool,
+) -> Option<ColumnSurface<'a>> {
+    let covered = layout.covered_child();
+    // ur/94-98 law: under a framed child the newest non-record opener draws in the column;
+    // otherwise the focused level does.
+    let (view_index, seat) = if covered {
+        (layout.covered_opener()?, MenuWindowSeat::Column)
+    } else {
+        layout.focused()?
+    };
+    let level = stack.levels.get(view_index)?;
+    // A covered opener reads the stacked entry it keeps while the child holds `dynamic.rows`.
+    let rows = if covered {
+        stacked_rows_for(level.kind, dynamic)
+    } else {
+        &dynamic.rows
+    };
+    let (total, start) = if covered {
+        viewport_over(
+            level.kind,
+            level.cursor,
+            rows_entry_count(level.kind, rows, dlss_supported),
+        )
+    } else {
+        resolve_viewport(level.kind, level.cursor, dynamic, dlss_supported)
+    };
+    let window = visible_window(level.kind, total);
+    Some(ColumnSurface {
+        view_index,
+        seat,
+        kind: level.kind,
+        cursor: level.cursor,
+        rows,
+        total,
+        start,
+        window,
+    })
+}
+
 /// Every open window stays on screen at its own record frame, oldest first and newest on top,
 /// and a window sitting on an older one's whole rectangle hides it
 /// (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md). A docked window
@@ -8774,16 +8831,13 @@ pub fn update_main_menu(
         return;
     };
     let dock = dock.as_deref();
-    let dock_y = |want: &mut Node, kind: MenuKind, computed: &ComputedNode| {
+    // Dock y follows the height a window is asserted at - pinned px where held, otherwise last
+    // measured - so it moves only when the window really does.
+    let dock_y = |want: &mut Node, kind: MenuKind, height: f32| {
         if let Some((board, placement)) =
             dock.and_then(|board| Some((board, dock_placement(kind, board)?)))
         {
-            crate::hud::dock::place_docked(
-                want,
-                placement,
-                crate::hud::dock::drawn_height(computed),
-                board.surface_height,
-            );
+            crate::hud::dock::place_docked(want, placement, height, board.surface_height);
         }
     };
 
@@ -8814,7 +8868,7 @@ pub fn update_main_menu(
         node.display = Display::Flex;
     }
     let layout = menu_stack_layout(stack, &config_rows);
-    let Some((focus_index, focus_seat)) = layout.focused() else {
+    if layout.focused().is_none() {
         hide(&mut node);
         return;
     };
@@ -8824,27 +8878,33 @@ pub fn update_main_menu(
     // same rows, untouched - only its `>` mark and cursor colour update there.
     // No pane transfer, no re-formed selector: that hop (and the stale-layout
     // frames it produced) was the flash/beetlejuice stretch.
-    let covered_child = layout.covered_child();
-    let (view_index, view_seat) = if covered_child {
-        (
-            layout.covered_opener().expect("covered_child"),
-            MenuWindowSeat::Column,
-        )
-    } else {
-        (focus_index, focus_seat)
+    // What this surface paints is one law (`column_surface`) shared with
+    // `update_menu_stack_windows`, which pins its height.
+    let Some(surface) = column_surface(stack, &layout, &dynamic, settings.dlss_supported) else {
+        hide(&mut node);
+        return;
     };
+    let covered_child = layout.covered_child();
+    let (view_index, view_seat) = (surface.view_index, surface.seat);
     // The width follows the level that actually draws in this window, not the top of the stack: a
     // `statcom2` detail opens as its own framed window and leaves the list drawing here (`menu_stack_layout`
     // picks that level), so sizing from `stack.current()` grew the box under the detail's feet
     // (owner 2026-10-19: "selecting anything from the menu makes the menu grow larger").
-    let want_width = pane_width_for(stack.levels[view_index].kind);
+    let want_width = pane_width_for(surface.kind);
     for (mut pane_node, mut z_index, computed) in pane_q.iter_mut() {
         let mut want = pane_node.clone();
+        // Width has exactly two sources - `place_in_column`'s pixel pin or the record frame;
+        // depth changes flip between them but never invent a third. Height belongs to
+        // `update_menu_stack_windows`, the sole writer of that field on these nodes.
         match view_seat {
             MenuWindowSeat::Record(frame) => place_at_record_frame(&mut want, &frame),
             _ => place_in_column(&mut want, MENU_RIGHT_EDGE, want_width),
         }
-        dock_y(&mut want, stack.levels[view_index].kind, computed);
+        dock_y(
+            &mut want,
+            surface.kind,
+            crate::hud::dock::drawn_height(computed),
+        );
         pane_node.set_if_neq(want);
         z_index.set_if_neq(stack_z_index(view_index));
     }
@@ -8855,7 +8915,10 @@ pub fn update_main_menu(
             cursor: l.cursor,
         })
     };
-    let view = level_view(view_index);
+    let view = PaneView {
+        kind: surface.kind,
+        cursor: surface.cursor,
+    };
     let column_window = layout.column_window();
     // Under a framed child the pane itself paints the opener (ur/94-98), so
     // nothing is mirrored on the companion frame for this stack.
@@ -8872,7 +8935,7 @@ pub fn update_main_menu(
                 .map(|p| menu_title(p.kind).to_string())
                 .unwrap_or_default()
         } else {
-            view.as_ref().map(root_aware_title).unwrap_or_default()
+            root_aware_title(&view)
         };
         if **text != want {
             **text = want;
@@ -8882,12 +8945,10 @@ pub fn update_main_menu(
     // ur/76: a mission log window wears its ◄ ► on the caption band; no other
     // window showed them until ur/91's ruling gave the same pair to the quest
     // lists, which step regions Left/Right under it.
-    let arrows_wanted = view.as_ref().is_some_and(|view| {
-        matches!(
-            view.kind,
-            MenuKind::MissionDetail { .. } | MenuKind::QuestList { .. }
-        )
-    });
+    let arrows_wanted = matches!(
+        surface.kind,
+        MenuKind::MissionDetail { .. } | MenuKind::QuestList { .. }
+    );
     for (_, arrow, mut node, _) in decor_q.iter_mut() {
         if arrow.is_none() {
             continue;
@@ -8902,30 +8963,9 @@ pub fn update_main_menu(
         }
     }
 
-    let Some(view) = view else {
-        for (_, _, mut row_node, _, _, _) in row_q.iter_mut() {
-            hide(&mut row_node);
-        }
-        return;
-    };
-
-    // Covered opener (ur/94-98): its rows are the stacked entry it keeps while
-    // the child draws above - `dynamic.rows` belongs to the focused child now.
-    let pane_rows: &[DynamicMenuRow] = if covered_child {
-        stacked_rows_for(view.kind, &dynamic)
-    } else {
-        &dynamic.rows
-    };
-    let (total, viewport_start) = if covered_child {
-        viewport_over(
-            view.kind,
-            view.cursor,
-            rows_entry_count(view.kind, pane_rows, settings.dlss_supported),
-        )
-    } else {
-        resolve_viewport(view.kind, view.cursor, &dynamic, settings.dlss_supported)
-    };
-    let window = visible_window(view.kind, total);
+    let pane_rows = surface.rows;
+    let (total, viewport_start) = (surface.total, surface.start);
+    let window = surface.window;
     // Mirror-side totals for the selector frame: the opener keeps its viewport while a
     // child holds focus — Root pages and scrolling lists follow the same `viewport_over`
     // law the focused pane does (ur/85: opening Quests repainted Commands from raw slot 0
@@ -9108,7 +9148,11 @@ pub fn update_main_menu(
     for (mut frame, mut z_index, computed) in comp_frame_q.iter_mut() {
         let mut want = frame.clone();
         place_in_column(&mut want, right, mirror_width);
-        dock_y(&mut want, parent.kind, computed);
+        dock_y(
+            &mut want,
+            parent.kind,
+            crate::hud::dock::drawn_height(computed),
+        );
         want.display = Display::Flex;
         frame.set_if_neq(want);
         z_index.set_if_neq(stack_z_index(parent_index));
@@ -9270,20 +9314,62 @@ pub(crate) fn ui_window_forensics(
     }
 }
 
+/// One drawn window surface's content height as it measured itself: the exact px painted for
+/// (kind, rows drawn). Re-asserting that px as an explicit `Node::height` on every following
+/// frame leaves Taffy no text to re-measure - bevy_ui can answer a stale squeezed measurement
+/// for one frame after unrelated UI changes (bevyengine/bevy#15826; the squeezed nodes of
+/// #18015), which is every kuluu window visibly distorting when any one closes. A pin adopted
+/// from the measured value keeps drawing at that number, so it is pixel-identical by
+/// construction and dock placement (`place_docked`'s height) reads it instead of a fresh measure.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct HeightPin {
+    kind: MenuKind,
+    rows: usize,
+    px: f32,
+}
+
+/// Below this a surface has never been laid out (an undrawn window computes height 0), so there
+/// is nothing worth learning - adopting here would pin a phantom.
+const PIN_MIN_HEIGHT_PX: f32 = 0.5;
+
+impl HeightPin {
+    /// One frame of the pin law for one surface: re-assert the learned px (Some) while the
+    /// shape matches; otherwise release the stale pin and adopt this frame's live height when
+    /// there is one - the caller falls back to `Val::Auto` so the node measures again.
+    fn assert_or_learn(
+        held: &mut Option<Self>,
+        kind: MenuKind,
+        rows: usize,
+        live_px: f32,
+    ) -> Option<f32> {
+        match *held {
+            Some(pin) if pin.kind == kind && pin.rows == rows => Some(pin.px),
+            _ => {
+                *held = (live_px > PIN_MIN_HEIGHT_PX).then_some(Self {
+                    kind,
+                    rows,
+                    px: live_px,
+                });
+                None
+            }
+        }
+    }
+}
+
 /// Draws the open windows under the focused one that sit at their own record frames, each with
 /// its own rows and cursor, newer ones on top
 /// (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md).
 #[allow(clippy::type_complexity)]
-pub fn update_menu_stack_windows(
+pub(crate) fn update_menu_stack_windows(
     mode: Res<InputMode>,
     settings: Res<GraphicsSettings>,
     scene: Res<crate::snapshot::SceneState>,
     dynamic: Res<DynamicMenu>,
     config_rows: Res<ConfigDatRows>,
     dock: Option<Res<crate::hud::dock::DockBoard>>,
-    mut window_q: Query<
+    #[allow(clippy::type_complexity)] mut window_q: Query<
         (&MenuStackWindow, &mut Node, &mut ZIndex, &ComputedNode),
-        Without<MenuStackWindowArrow>,
+        (Without<MenuStackWindowArrow>, Without<MainMenuPane>),
     >,
     // One query for both scrollbar nodes (they are disjoint entities), so no
     // `&mut Node` overlap with the frames or rows above.
@@ -9297,6 +9383,7 @@ pub fn update_menu_stack_windows(
             Without<MenuStackWindowRow>,
             Without<MenuStackWindow>,
             Without<MenuStackWindowArrow>,
+            Without<MainMenuPane>,
         ),
     >,
     // ur/94-98: the pooled caption pairs ride with their window's kind law.
@@ -9306,9 +9393,22 @@ pub fn update_menu_stack_windows(
     >,
     mut row_q: Query<
         (&MenuStackWindowRow, &mut Node, &mut Text, &mut TextColor),
-        (Without<MenuStackWindow>, Without<MenuStackWindowArrow>),
+        (
+            Without<MenuStackWindow>,
+            Without<MenuStackWindowArrow>,
+            Without<MainMenuPane>,
+        ),
     >,
-    mut arrow_q: Query<(&MenuStackWindowArrow, &mut Node)>,
+    mut arrow_q: Query<(&MenuStackWindowArrow, &mut Node), Without<MainMenuPane>>,
+    // The selector-column surface is pinned here because `update_main_menu`'s signature already
+    // stands at bevy's fn-parameter arity ceiling. Which pass runs first in a frame does not
+    // matter: this arm owns the height field of those nodes and writes nothing else on them,
+    // and that one copies the node before writing only its own fields.
+    mut column_q: Query<(&mut Node, &ComputedNode), With<MainMenuPane>>,
+    // One height pin per pooled surface (see `HeightPin`).
+    mut pins: Local<Vec<Option<HeightPin>>>,
+    // The selector-column surface's height pin.
+    mut column_pin: Local<Option<HeightPin>>,
 ) {
     struct Shown<'a> {
         stack_index: usize,
@@ -9325,6 +9425,7 @@ pub fn update_menu_stack_windows(
     // level's whole lifetime - allocation by IDENTITY, not by draw order. Ordering
     // was re-mapping surfaces every time a chain grew or shrank, which is how an
     // unrelated left-side open restyled right-column windows wholesale (ur/94-101).
+    let mut column_shape: Option<(MenuKind, usize)> = None;
     let shown: Vec<Option<Shown>> = match &*mode {
         InputMode::Menu(stack) => {
             // ur/94-98: under a covered child the pool draws that focused framed
@@ -9332,6 +9433,16 @@ pub fn update_menu_stack_windows(
             // opener never enters here; its column surface keeps painting in place.
             let layout = menu_stack_layout(stack, &config_rows);
             let focus_index = layout.focused().map(|(index, _)| index);
+            if let Some(surface) = column_surface(stack, &layout, &dynamic, settings.dlss_supported)
+            {
+                // The rows it paints are what its height measures - scrolled-off ones not.
+                column_shape = Some((
+                    surface.kind,
+                    surface
+                        .window
+                        .min(surface.total.saturating_sub(surface.start)),
+                ));
+            }
             let records = layout.pool_windows();
             // While the Status flow is open nothing else on the stack may be seen — retail
             // hides it under statcom2 at the Commands spot (owner ruling 2026-10-19: "that
@@ -9388,19 +9499,49 @@ pub fn update_menu_stack_windows(
     // A surface's occupant, by identity: `window` slot == stack index (ur/102).
     let open_of = |window: usize| shown.get(window).and_then(|entry| entry.as_ref());
 
+    if pins.len() < MAX_STACKED_WINDOWS {
+        pins.resize(MAX_STACKED_WINDOWS, None);
+    }
+
     for (window, mut node, mut z_index, computed) in window_q.iter_mut() {
         let mut want = node.clone();
-        match open_of(window.slot) {
+        let open = open_of(window.slot);
+        if let Some(pin_slot) = pins.get_mut(window.slot) {
+            match open {
+                Some(open) => {
+                    // The rows this surface paints are the content its height measures from.
+                    let rows = open.visible.min(open.total.saturating_sub(open.start));
+                    let live = crate::hud::dock::drawn_height(computed);
+                    match HeightPin::assert_or_learn(pin_slot, open.level.kind, rows, live) {
+                        Some(px) => want.height = Val::Px(px),
+                        None => {
+                            // New shape or first sighting: release any stale px so the frame
+                            // measures once under it.
+                            if node.height != Val::Auto {
+                                want.height = Val::Auto;
+                            }
+                        }
+                    }
+                }
+                None => *pin_slot = None,
+            }
+        }
+        match open {
             Some(open) => {
                 place_at_record_frame(&mut want, &open.frame);
                 if let Some((board, placement)) = dock
                     .as_deref()
                     .and_then(|board| Some((board, dock_placement(open.level.kind, board)?)))
                 {
+                    // Dock y follows the height asserted above, never a fresh measurement.
+                    let height = match want.height {
+                        Val::Px(px) => px,
+                        _ => crate::hud::dock::drawn_height(computed),
+                    };
                     crate::hud::dock::place_docked(
                         &mut want,
                         placement,
-                        crate::hud::dock::drawn_height(computed),
+                        height,
                         board.surface_height,
                     );
                 }
@@ -9411,6 +9552,34 @@ pub fn update_menu_stack_windows(
         }
         node.set_if_neq(want);
     }
+
+    // The selector-column surface shares the `HeightPin` law (see its system param note).
+    for (mut pane_node, computed) in column_q.iter_mut() {
+        let mut want = pane_node.clone();
+        match column_shape {
+            Some((kind, rows)) => {
+                let live = crate::hud::dock::drawn_height(computed);
+                match HeightPin::assert_or_learn(&mut column_pin, kind, rows, live) {
+                    Some(px) => want.height = Val::Px(px),
+                    None => {
+                        if pane_node.height != Val::Auto {
+                            want.height = Val::Auto;
+                        }
+                    }
+                }
+            }
+            // No menu stack (or none with a column level): forget what the column measured, it
+            // will draw different content when next shown.
+            None => {
+                *column_pin = None;
+                if pane_node.height != Val::Auto {
+                    want.height = Val::Auto;
+                }
+            }
+        }
+        pane_node.set_if_neq(want);
+    }
+
     for (title, mut text) in title_q.iter_mut() {
         let want = open_of(title.window).map_or("", |open| menu_title(open.level.kind));
         if **text != *want {
@@ -17395,6 +17564,166 @@ mod tests {
             selector_rows(&mut app),
             before,
             "ESC back: byte-identical, cursor and all"
+        );
+    }
+
+    /// HeightPin law fence: a window surface that measured its own content into px keeps that px
+    /// across an unrelated chain growing and shrinking - the height never takes a value other
+    /// than the learned one or a fresh measurement (the re-measurement pass is what squeezed
+    /// every window for a frame when any closed). The unit world runs no UI layout, so fed
+    /// `ComputedNode` sizes stand in for real measurement.
+    #[test]
+    fn measured_heights_reassert_through_child_open_and_close() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::QuestMenu);
+        let mut app = stack_app(stack, &[]);
+        for _ in 0..2 {
+            app.update();
+        }
+        let pane_height = |app: &mut App| -> Val {
+            app.world_mut()
+                .query::<(&MainMenuPane, &Node)>()
+                .iter(app.world())
+                .next()
+                .expect("pane exists")
+                .1
+                .height
+        };
+        let hub_height = |app: &mut App| -> Val {
+            let mut got: Vec<Val> = app
+                .world_mut()
+                .query::<(&MenuStackWindow, &Node)>()
+                .iter(app.world())
+                .filter(|(window, node)| window.slot == 1 && node.display != Display::None)
+                .map(|(_, node)| node.height)
+                .collect();
+            assert_eq!(got.len(), 1, "the hub owns exactly one surface");
+            got.remove(0)
+        };
+        // Nothing has measured yet (unit-world computed sizes are zero), so nothing is pinned.
+        assert_eq!(pane_height(&mut app), Val::Auto);
+        assert_eq!(hub_height(&mut app), Val::Auto);
+        for _ in 0..3 {
+            app.update();
+            assert_eq!(
+                pane_height(&mut app),
+                Val::Auto,
+                "no phantom pin from zero sizes"
+            );
+        }
+
+        // Stand-in for the real layout's measurement: what the unit world never computes.
+        let surface_entities: Vec<bevy::ecs::entity::Entity> = app
+            .world_mut()
+            .query::<bevy::ecs::entity::Entity>()
+            .iter(app.world())
+            .filter(|entity| {
+                app.world().get::<MenuStackWindow>(*entity).is_some()
+                    || app.world().get::<MainMenuPane>(*entity).is_some()
+            })
+            .collect();
+        assert!(!surface_entities.is_empty());
+        for entity in surface_entities {
+            app.world_mut()
+                .get_mut::<ComputedNode>(entity)
+                .expect("framed surfaces carry a computed node")
+                .size = Vec2::new(300.0, 57.0);
+        }
+        app.update(); // this pass learns the pins...
+        assert_eq!(pane_height(&mut app), Val::Auto);
+        assert_eq!(hub_height(&mut app), Val::Auto);
+        app.update(); // ...the next asserts them back as explicit px.
+        assert_eq!(pane_height(&mut app), Val::Px(57.0));
+        assert_eq!(hub_height(&mut app), Val::Px(57.0));
+
+        let grown_ok = |height: Val| {
+            // A survivor holds its pinned px, or (shape key moved) releases to remeasure - and
+            // the fresh measurement feeds straight back into the same learned value.
+            matches!(height, Val::Px(57.0) | Val::Auto)
+        };
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.push(MenuKind::QuestList {
+                completed: false,
+                region: 0,
+            });
+        }
+        app.update();
+        assert!(grown_ok(hub_height(&mut app)));
+        app.update();
+        assert_eq!(pane_height(&mut app), Val::Px(57.0));
+
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.pop();
+        }
+        app.update(); // the close frame: survivors stay on their pinned px...
+        assert!(grown_ok(hub_height(&mut app)));
+        app.update();
+        assert_eq!(pane_height(&mut app), Val::Px(57.0));
+        assert_eq!(hub_height(&mut app), Val::Px(57.0));
+    }
+
+    /// Placement-law fence: column and pooled surfaces never invent a width state as chains grow
+    /// and shrink - `place_in_column`'s pin or the record frame are their only sources.
+    #[test]
+    fn right_side_widths_never_gain_a_third_state_across_depth_changes() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::QuestMenu);
+        let mut app = stack_app(stack, &[]);
+        for _ in 0..2 {
+            app.update();
+        }
+        let widths = |app: &mut App| -> Vec<(String, String)> {
+            let pane_width = format!(
+                "{:?}",
+                app.world_mut()
+                    .query::<(&MainMenuPane, &Node)>()
+                    .iter(app.world())
+                    .next()
+                    .expect("pane exists")
+                    .1
+                    .width
+            );
+            let mut got: Vec<(String, String)> = app
+                .world_mut()
+                .query::<(&MenuStackWindow, &Node)>()
+                .iter(app.world())
+                .filter(|(_, node)| node.display != Display::None)
+                .map(|(window, node)| {
+                    (format!("pool-{}", window.slot), format!("{:?}", node.width))
+                })
+                .collect();
+            got.push(("pane".into(), pane_width));
+            got.sort();
+            got
+        };
+
+        let first = widths(&mut app);
+        assert!(first.iter().any(|(key, _)| key == "pool-1"), "hub seen");
+
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.push(MenuKind::QuestList {
+                completed: false,
+                region: 0,
+            });
+        }
+        app.update();
+        let grown = widths(&mut app);
+        for (key, width) in &first {
+            let seen = grown
+                .iter()
+                .find(|(k, _)| k == key)
+                .unwrap_or_else(|| panic!("{key} vanished when the chain grew"));
+            assert_eq!(&seen.1, width, "{key} width changed as the chain grew");
+        }
+
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.pop();
+        }
+        app.update();
+        assert_eq!(
+            widths(&mut app),
+            first,
+            "same surfaces, same widths after the shrink"
         );
     }
 

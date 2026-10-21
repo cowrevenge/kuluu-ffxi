@@ -186,6 +186,11 @@ Investigate ambiguous behavior in the main agent.
 
 ## Character strategy
 
+For checks unrelated to introductions, use a character that has completed its introduction.
+For new characters, follow [introduction control](references/stack.md#introduction-control).
+Do not depend on `//skipcs` to end an active cutscene script.
+Keep cutscene input, skip behavior, and missing actors separate from the feature under test.
+
 **Never ask the user for credentials.** This is a local dev stack with
 throwaway accounts; verification is expected to launch sessions on its own.
 Default to one of the documented local accounts below (or provision a fresh

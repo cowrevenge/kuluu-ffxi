@@ -22,6 +22,10 @@ name = "kuluu"
 path = "src/main.rs"
 
 [[example]]
+name = "dev-diagnostics-capture"
+required-features = ["native-window"]
+
+[[example]]
 # Headless replay of the single-authority walker over real MZB geometry
 # (plan §4). Needs the viewer feature: the walker lives in `view_native`.
 name = "zz-field-walk"
@@ -43,6 +47,7 @@ default = ["native-window"]
 # main thread on macOS, so main.rs handles the dispatch specially when
 # this feature is active.
 native-window = [
+    "dep:cpu-time",
     "dep:winit",
     "dep:bevy",
     "dep:bevy_framepace",
@@ -134,6 +139,7 @@ ffxi-dat = { path = "../ffxi-dat" }
 ffxi-install = { path = "../ffxi-install" }
 
 anyhow.workspace = true
+cpu-time = { version = "1.0", optional = true }
 clap.workspace = true
 dirs = "7"
 # Already linked transitively via ffxi-nav-recast with the identical
@@ -174,6 +180,7 @@ bevy = { workspace = true, optional = true, features = [
     # doesn't silently lose widget support.
     "bevy_feathers",
     "bevy_scene",
+    "sysinfo_plugin",
     "bevy_ui_widgets",
 ] }
 # The workspace patch in vendor/bevy_framepace supports Bevy 0.20.

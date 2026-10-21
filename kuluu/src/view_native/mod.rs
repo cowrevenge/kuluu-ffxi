@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::disallowed_methods))]
+
 mod app_icon;
 pub mod auto_target;
 pub mod bridge;
@@ -7,6 +9,7 @@ pub mod collision_bvh;
 pub mod command_surface;
 pub mod cutscene_motion_done;
 pub mod debug_heights;
+pub mod dev_diagnostics;
 pub mod engage;
 pub mod entity_list_hud;
 pub mod exit_watchdog;
@@ -625,6 +628,13 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     add_hud_spawners(&mut app, OnEnter(AppPhase::InGame));
     app.init_resource::<perf_hud::PerfMonitor>();
     app.init_resource::<perf_hud::AssetChurn>();
+    app.add_plugins((
+        bevy::diagnostic::SystemInformationDiagnosticsPlugin,
+        bevy::render::diagnostic::MeshAllocatorDiagnosticPlugin,
+        bevy::render::diagnostic::RenderAssetDiagnosticPlugin::<
+            bevy::render::texture::GpuImage,
+        >::new(" images"),
+    ));
     // Ungated: fires ~15s in regardless of app phase so the dump can't be
     // silently skipped if InGame is late (or never) entered.
     app.add_systems(Update, perf_hud::dump_render_diagnostics);
@@ -659,6 +669,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         (
             perf_hud::update_perf_monitor,
             perf_hud::update_perf_graph,
+            dev_diagnostics::update_summary,
             target_list_hud::update_target_list_hud,
             entity_list_hud::update_entity_list_hud,
         )
@@ -673,6 +684,14 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             entity_list_hud::apply_entity_list_visibility,
             entity_list_hud::entity_list_wheel_system,
         )
+            .run_if(in_state(AppPhase::InGame)),
+    );
+    app.add_systems(
+        PreUpdate,
+        perf_hud::scroll_perf_panel
+            .after(bevy::ui::UiSystems::Focus)
+            .after(kuluu_render::mouse::collect_mouse_system)
+            .before(kuluu_render::mouse::wheel_zoom_accumulate_system)
             .run_if(in_state(AppPhase::InGame)),
     );
     app.add_systems(
@@ -999,9 +1018,11 @@ fn discard_distortion_on_zone_change(
 
 fn despawn_ingame_entities(
     mut commands: Commands,
-    (q, mut shop): (
+    (q, mut shop, mut perf, mut churn): (
         Query<Entity, With<InGameEntity>>,
         ResMut<kuluu_render::hud::shop::ShopScreenState>,
+        ResMut<perf_hud::PerfMonitor>,
+        ResMut<perf_hud::AssetChurn>,
     ),
     mut scene: ResMut<SceneState>,
     mut events: ResMut<EventLog>,
@@ -1044,6 +1065,8 @@ fn despawn_ingame_entities(
     }
 
     shop.reset();
+    *perf = default();
+    *churn = default();
     tracked.by_id.clear();
     // Whole-resource reset, not a field-by-field clear: the parallel per-triangle
     // arrays and `cell_index` must go together, or a stale cell index will hand
@@ -1477,6 +1500,8 @@ mod zone_teardown_tests {
         world.init_resource::<kuluu_render::ffxi_actor_render::SelfKnockback>();
         world.init_resource::<kuluu_render::scheduler_runtime::PendingKnockbacks>();
         world.init_resource::<kuluu_render::hud::shop::ShopScreenState>();
+        world.init_resource::<super::perf_hud::PerfMonitor>();
+        world.init_resource::<super::perf_hud::AssetChurn>();
         world.init_resource::<super::EventLog>();
         world.init_resource::<super::TrackedEntities>();
         world.init_resource::<super::MzbCollisionGeometry>();

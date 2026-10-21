@@ -288,7 +288,7 @@ const CONTROLS_ENTRIES: &[&str] = &[
     "Show current bindings",
 ];
 
-pub const DEBUG_PERF: &str = "Perf";
+pub const DEBUG_PERF: &str = "Diagnostics";
 pub const DEBUG_TARGET_CYCLE: &str = "Target Cycle";
 pub const DEBUG_MESH: &str = "Mesh Debug";
 pub const DEBUG_NET_STATUS: &str = "Net Status";

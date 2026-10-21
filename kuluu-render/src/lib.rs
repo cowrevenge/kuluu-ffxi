@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(not(test), deny(clippy::disallowed_methods))]
 #![allow(clippy::type_complexity, clippy::too_many_arguments)]
 
 #[cfg(not(target_arch = "wasm32"))]

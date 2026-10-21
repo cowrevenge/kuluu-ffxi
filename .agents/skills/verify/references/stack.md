@@ -5,6 +5,37 @@ Use the task's existing authority for local development setup.
 A stopped service or a missing container is not, by itself, a final blocker.
 Preserve existing profiles, database contents, and unrelated workloads.
 
+## Introduction control
+
+For unrelated checks, reuse a character that has completed its introduction.
+For a task-owned isolated server, set `NEW_CHARACTER_CUTSCENE = 0` before the first character login.
+Use the server's settings override procedure.
+Do not change a shared server solely to avoid an introduction.
+The setting disables the introduction quest check.
+The character initialization also supplies the starting coupon and home point.
+Sources: `vendor/server/settings/default/main.lua`, `vendor/server/scripts/quests/hiddenQuests/New_Character_Cutscenes.lua`, and `vendor/server/scripts/globals/player.lua`.
+
+The GUI requests an introduction skip only when the lobby advertises `CAP_SKIP_INTRO_CS`.
+The `create-char` CLI requests the skip by default without that capability check.
+A server can ignore the request.
+Check the first login for an active event before treating the character as ready.
+The pinned LSB source has no implementation of this lobby extension.
+
+`//endevent` requests cancellation of an active event script.
+Cancellation can wait until the next message frame.
+The agent socket command `end_event` provides the same operation without keyboard input.
+For a task-owned character, send `{"cmd":"end_event"}` through the agent socket.
+Check for `event_ended` and inspect a fresh snapshot before continuing.
+`//skipcs` submits choice `0` through `EndEventChoice`.
+An active event script consumes that choice and can continue playing.
+Neither command guarantees an immediate skip through chained events.
+Inspect event state, the camera, and movement after cancellation.
+Do not repeatedly type commands through gaps between cutscene frames.
+If cancellation does not finish the introduction, use a completed character or an isolated server with introductions disabled.
+
+When testing introductions, event completion, cancellation, or cutscene input, preserve the required event path.
+Do not disable introductions for those checks.
+
 ## Configured stack
 
 `scripts/lsb-stack.sh` controls the default Colima profile and these configured containers.

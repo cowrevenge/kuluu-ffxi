@@ -5108,7 +5108,24 @@ pub struct ActorLoadInFlight {
     cache: ActorPrepCache,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ActorLoadDiagnosticCounts {
+    pub queued: usize,
+    pub preparing: usize,
+    pub uploading: usize,
+    pub awaiting_gpu: usize,
+}
+
 impl ActorLoadInFlight {
+    pub fn diagnostic_counts(&self) -> ActorLoadDiagnosticCounts {
+        ActorLoadDiagnosticCounts {
+            queued: self.queued.len(),
+            preparing: self.tasks.len(),
+            uploading: self.uploads.len(),
+            awaiting_gpu: self.ready.len(),
+        }
+    }
+
     fn cancel(&mut self, entity_id: u32) {
         self.queued.retain(|req| req.entity_id != entity_id);
         self.tasks.remove(&entity_id);

@@ -66,8 +66,18 @@ Verify that media survived publication. Check each final public URL without auth
 
 Publication does not authorize a Discord post or another external announcement.
 When requested, confirm the server and channel from current application state.
-Use a short summary of new changes and link to the full release notes and media.
+Write for players. Describe what they can see or do differently.
+Replace internal terms with concrete results. For example, describe clearer menus instead of a HUD fixture.
+Keep test status, comparison plans, bead references, and development-process notes out of announcements.
+If a limitation affects players, describe the visible problem and any useful action in plain language.
+Use a short summary of new changes and link to the full release notes.
+Include selected screenshots and short videos with feature captions when the release has visible changes.
+Prefer native attachments or verified playable embeds over a page link alone.
+Show more than one relevant feature when suitable inspected media exists.
+Check that images render and videos have playback controls in the posted message.
+Keep test-scene context brief and factual; do not present an animation-room clip as live combat.
 Do not repeat README setup instructions or unchanged information from previous releases.
 Do not add mass mentions unless requested.
 Prefer an available connector. Otherwise, use the signed-in application through computer use.
-Verify that the message was posted. Correct an existing announcement by editing it instead of sending a duplicate.
+Verify that the message was posted. Correct existing text by editing it instead of sending a duplicate announcement.
+If an existing message cannot accept attachments, add one captioned media reply beside it.

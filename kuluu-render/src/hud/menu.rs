@@ -9318,10 +9318,11 @@ pub(crate) fn ui_window_forensics(
 /// (kind, rows drawn). Re-asserting that px as an explicit `Node::height` on every following
 /// frame leaves Taffy no text to re-measure - bevy_ui can answer a stale squeezed measurement
 /// for one frame after unrelated UI changes (bevyengine/bevy#15826; the squeezed nodes of
-/// #18015), which is every kuluu window visibly distorting when any one closes. A pin adopted
-/// from the measured value keeps drawing at that number, so it is pixel-identical by
-/// construction and dock placement (`place_docked`'s height) reads it instead of a fresh measure.
-#[derive(Clone, Copy, PartialEq)]
+/// #18015), which is every kuluu window visibly distorting when any one closes. A pin is learned
+/// only from settled measurements (`PinState`) and keeps drawing at that number, so it is
+/// pixel-identical by construction and dock placement (`place_docked`'s height) reads it instead
+/// of a fresh measure.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct HeightPin {
     kind: MenuKind,
     rows: usize,
@@ -9329,30 +9330,71 @@ pub(crate) struct HeightPin {
 }
 
 /// Below this a surface has never been laid out (an undrawn window computes height 0), so there
-/// is nothing worth learning - adopting here would pin a phantom.
+/// is nothing to observe.
 const PIN_MIN_HEIGHT_PX: f32 = 0.5;
 
-impl HeightPin {
-    /// One frame of the pin law for one surface: re-assert the learned px (Some) while the
-    /// shape matches; otherwise release the stale pin and adopt this frame's live height when
-    /// there is one - the caller falls back to `Val::Auto` so the node measures again.
-    fn assert_or_learn(
-        held: &mut Option<Self>,
-        kind: MenuKind,
-        rows: usize,
-        live_px: f32,
-    ) -> Option<f32> {
-        match *held {
-            Some(pin) if pin.kind == kind && pin.rows == rows => Some(pin.px),
-            _ => {
-                *held = (live_px > PIN_MIN_HEIGHT_PX).then_some(Self {
-                    kind,
-                    rows,
-                    px: live_px,
-                });
-                None
+/// Measurements this close count as the same value - neither could move a painted box.
+const PIN_STABLE_PX: f32 = 0.5;
+
+/// Identical measurements required in a row before one is learned. A shown surface's first frames
+/// may measure short while text still travels through the glyph pipeline (the squeeze channel of
+/// `HeightPin`'s upstream issue), and adopting an unsettled frame would hold that wrong box for
+/// every later shape-matching frame.
+const PIN_SETTLE_FRAMES: u8 = 4;
+
+/// One surface's pin bookkeeping: the learned height plus the run of identical measurements it
+/// was earned from. Any shape or measurement change restarts the run.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PinState {
+    /// While (kind, rows) match this px it is re-asserted - the node never measures again.
+    pin: Option<HeightPin>,
+    /// The observation in progress: (kind, rows, px, identical frames so far).
+    observing: Option<(MenuKind, usize, f32, u8)>,
+}
+
+impl PinState {
+    /// One frame of the pin law: Some(px) re-asserts the learned height while its shape holds;
+    /// otherwise this frame's live measurement is observed - `None` means stay `Val::Auto` and
+    /// measure naturally until PIN_SETTLE_FRAMES identical frames earn the pin.
+    fn step(&mut self, kind: MenuKind, rows: usize, live_px: f32) -> Option<f32> {
+        if let Some(pin) = self.pin {
+            // Content changes arrive through the (kind, rows) key; row nodes are nowrap, so no
+            // same-key change can alter this height. Live drift while the pin holds is ignored
+            // by design - re-measurement IS the distortion channel.
+            if pin.kind == kind && pin.rows == rows {
+                return Some(pin.px);
             }
+            *self = Self::default();
         }
+        if live_px <= PIN_MIN_HEIGHT_PX {
+            self.observing = None;
+            return None;
+        }
+        let mut earned = false;
+        let next_observing = match self.observing {
+            Some((k, r, px, run))
+                if k == kind && r == rows && (px - live_px).abs() <= PIN_STABLE_PX =>
+            {
+                let run = run + 1;
+                if run >= PIN_SETTLE_FRAMES {
+                    earned = true;
+                    None
+                } else {
+                    Some((k, r, px, run))
+                }
+            }
+            _ => Some((kind, rows, live_px, 1)),
+        };
+        self.observing = next_observing;
+        if earned {
+            self.pin = Some(HeightPin {
+                kind,
+                rows,
+                px: live_px,
+            });
+            return Some(live_px);
+        }
+        None
     }
 }
 
@@ -9405,10 +9447,10 @@ pub(crate) fn update_menu_stack_windows(
     // matter: this arm owns the height field of those nodes and writes nothing else on them,
     // and that one copies the node before writing only its own fields.
     mut column_q: Query<(&mut Node, &ComputedNode), With<MainMenuPane>>,
-    // One height pin per pooled surface (see `HeightPin`).
-    mut pins: Local<Vec<Option<HeightPin>>>,
-    // The selector-column surface's height pin.
-    mut column_pin: Local<Option<HeightPin>>,
+    // One pin state per pooled surface (see `PinState`).
+    mut pins: Local<Vec<PinState>>,
+    // The selector-column surface's pin state.
+    mut column_pin: Local<PinState>,
 ) {
     struct Shown<'a> {
         stack_index: usize,
@@ -9500,7 +9542,7 @@ pub(crate) fn update_menu_stack_windows(
     let open_of = |window: usize| shown.get(window).and_then(|entry| entry.as_ref());
 
     if pins.len() < MAX_STACKED_WINDOWS {
-        pins.resize(MAX_STACKED_WINDOWS, None);
+        pins.resize(MAX_STACKED_WINDOWS, PinState::default());
     }
 
     for (window, mut node, mut z_index, computed) in window_q.iter_mut() {
@@ -9512,18 +9554,17 @@ pub(crate) fn update_menu_stack_windows(
                     // The rows this surface paints are the content its height measures from.
                     let rows = open.visible.min(open.total.saturating_sub(open.start));
                     let live = crate::hud::dock::drawn_height(computed);
-                    match HeightPin::assert_or_learn(pin_slot, open.level.kind, rows, live) {
+                    match pin_slot.step(open.level.kind, rows, live) {
                         Some(px) => want.height = Val::Px(px),
                         None => {
-                            // New shape or first sighting: release any stale px so the frame
-                            // measures once under it.
+                            // Settling (new shape or first sighting): measure naturally.
                             if node.height != Val::Auto {
                                 want.height = Val::Auto;
                             }
                         }
                     }
                 }
-                None => *pin_slot = None,
+                None => *pin_slot = PinState::default(),
             }
         }
         match open {
@@ -9559,7 +9600,7 @@ pub(crate) fn update_menu_stack_windows(
         match column_shape {
             Some((kind, rows)) => {
                 let live = crate::hud::dock::drawn_height(computed);
-                match HeightPin::assert_or_learn(&mut column_pin, kind, rows, live) {
+                match column_pin.step(kind, rows, live) {
                     Some(px) => want.height = Val::Px(px),
                     None => {
                         if pane_node.height != Val::Auto {
@@ -9571,7 +9612,7 @@ pub(crate) fn update_menu_stack_windows(
             // No menu stack (or none with a column level): forget what the column measured, it
             // will draw different content when next shown.
             None => {
-                *column_pin = None;
+                *column_pin = PinState::default();
                 if pane_node.height != Val::Auto {
                     want.height = Val::Auto;
                 }
@@ -17567,6 +17608,28 @@ mod tests {
         );
     }
 
+    /// A height that keeps moving is never learned, whatever shape it wears; only an identical
+    /// run earns the pin. The live-world failure this prevents: a freshly shown first frame
+    /// measures short while text travels the glyph pipeline, and adopting it would hold every
+    /// later frame to that wrong box.
+    #[test]
+    fn unsettled_heights_are_never_pinned() {
+        let mut state = PinState::default();
+        // A surface growing toward its settled height: chrome-only, partial, then full.
+        assert_eq!(state.step(MenuKind::Root, 4, 18.0), None);
+        assert_eq!(state.step(MenuKind::Root, 4, 57.0), None);
+        assert_eq!(state.step(MenuKind::Root, 4, 97.0), None);
+        for _ in 2..PIN_SETTLE_FRAMES {
+            assert_eq!(state.step(MenuKind::Root, 4, 97.0), None);
+        }
+        // The settling frame itself asserts - equal to what just painted.
+        assert_eq!(state.step(MenuKind::Root, 4, 97.0), Some(97.0));
+        // Held pins ignore live drift; only the shape key releases them.
+        assert_eq!(state.step(MenuKind::Root, 4, 13.0), Some(97.0));
+        assert_eq!(state.step(MenuKind::Root, 5, 121.0), None);
+        assert_eq!(state.pin, None, "a released surface must re-earn its pin");
+    }
+
     /// HeightPin law fence: a window surface that measured its own content into px keeps that px
     /// across an unrelated chain growing and shrinking - the height never takes a value other
     /// than the learned one or a fresh measurement (the re-measurement pass is what squeezed
@@ -17629,10 +17692,13 @@ mod tests {
                 .expect("framed surfaces carry a computed node")
                 .size = Vec2::new(300.0, 57.0);
         }
-        app.update(); // this pass learns the pins...
-        assert_eq!(pane_height(&mut app), Val::Auto);
-        assert_eq!(hub_height(&mut app), Val::Auto);
-        app.update(); // ...the next asserts them back as explicit px.
+        for _ in 1..PIN_SETTLE_FRAMES {
+            // Identical frames are observed, not learned yet.
+            app.update();
+            assert_eq!(pane_height(&mut app), Val::Auto);
+            assert_eq!(hub_height(&mut app), Val::Auto);
+        }
+        app.update(); // the settling frame earns the pins and asserts the measured px.
         assert_eq!(pane_height(&mut app), Val::Px(57.0));
         assert_eq!(hub_height(&mut app), Val::Px(57.0));
 

@@ -756,6 +756,12 @@ pub struct DynamicMenu {
     /// The rows of every dynamic window open under the top one, by kind, so a window that
     /// stays on screen under a newer one keeps listing its own rows.
     pub stacked_rows: Vec<(MenuKind, Vec<DynamicMenuRow>)>,
+    /// The exact sequence of open windows [`Self::rows`] and [`Self::stacked_rows`] were built
+    /// for last time [`refresh_dynamic_menu_rows`] ran. A window opening or closing between that
+    /// build and a draw pass makes this differ from the live stack, and the draw passes then hold
+    /// their text (boxes and placement still update): chrome first, words once the box's own rows
+    /// are built - never another window's rows. `None` until a row build has run.
+    pub built_windows: Option<Vec<MenuKind>>,
     /// The remodel confirm question, copied from the DAT table-12 catalog by
     /// [`refresh_dynamic_menu_rows`] (GetText id [`ROOMLIST_CONFIRM_PROMPT_ID`]; bead
     /// kuluu-o9qt7.13.5.2). `None` while that catalog has not loaded or holds no such string.
@@ -7565,6 +7571,7 @@ pub fn refresh_dynamic_menu_rows(
     if dynamic.rows_kind != rows_kind {
         dynamic.rows_kind = rows_kind;
     }
+    stamp_built_rows(&mut dynamic, stack);
     let Some(level) = top.filter(|level| is_dynamic(level.kind)) else {
         if !dynamic.rows.is_empty() {
             dynamic.rows.clear();
@@ -7589,6 +7596,30 @@ pub fn refresh_dynamic_menu_rows(
     if rows != dynamic.rows {
         dynamic.rows = rows;
     }
+}
+
+/// Record the window sequence `dynamic.rows`/`stacked_rows` were just built for (see
+/// [`DynamicMenu::built_windows`]).
+fn stamp_built_rows(dynamic: &mut DynamicMenu, stack: Option<&crate::input_mode::MenuStack>) {
+    let built = dynamic.built_windows.get_or_insert_with(Vec::new);
+    built.clear();
+    if let Some(stack) = stack {
+        built.extend(stack.levels.iter().map(|level| level.kind));
+    }
+}
+
+/// Whether `dynamic`'s row content was built for exactly this sequence of open windows; a
+/// window opening or closing between the row build and a draw pass fails it, so box text waits
+/// for the rows (see [`DynamicMenu::built_windows`]). Worlds that never ran a row build have no
+/// stamp and draw as-is.
+fn rows_built_for(dynamic: &DynamicMenu, levels: &[crate::input_mode::MenuLevel]) -> bool {
+    dynamic.built_windows.as_ref().is_none_or(|built| {
+        built.len() == levels.len()
+            && built
+                .iter()
+                .zip(levels)
+                .all(|(kind, level)| *kind == level.kind)
+    })
 }
 
 /// The menu stack an input mode keeps open, through a sub-target cursor waiting to return to it.
@@ -8885,6 +8916,10 @@ pub fn update_main_menu(
         return;
     };
     let covered_child = layout.covered_child();
+    // Order-of-operations law shared with `update_menu_stack_windows`: a stack newer than its
+    // last row build gets boxes and placement only - no text fill until the rows catch up.
+    // Clears (blank captions, hidden rows) still run ungated.
+    let fresh = rows_built_for(&dynamic, &stack.levels);
     let (view_index, view_seat) = (surface.view_index, surface.seat);
     // The width follows the level that actually draws in this window, not the top of the stack: a
     // `statcom2` detail opens as its own framed window and leaves the list drawing here (`menu_stack_layout`
@@ -8937,7 +8972,8 @@ pub fn update_main_menu(
         } else {
             root_aware_title(&view)
         };
-        if **text != want {
+        // A caption is a fill and waits for fresh rows; blanking always runs (see `fresh`).
+        if (want.is_empty() || fresh) && **text != want {
             **text = want;
         }
     }
@@ -8994,6 +9030,10 @@ pub fn update_main_menu(
                 hide(&mut row_node);
                 continue;
             }
+            // No mirror row shows or labels from unbuilt rows (see `fresh`).
+            if !fresh {
+                continue;
+            }
             if row_node.display != Display::Flex {
                 row_node.display = Display::Flex;
             }
@@ -9037,6 +9077,11 @@ pub fn update_main_menu(
         let list_idx = viewport_start + row.slot;
         if row.slot >= window || list_idx >= total {
             hide(&mut row_node);
+            continue;
+        }
+        // No pane row shows or labels from unbuilt rows (see `fresh`): a newly shown pane
+        // stays empty chrome, one already drawn freezes at its last true pixels.
+        if !fresh {
             continue;
         }
         if row_node.display != Display::Flex {
@@ -9129,7 +9174,8 @@ pub fn update_main_menu(
         } else {
             ""
         };
-        if span.as_str() != want {
+        // A dot is a fill and waits for fresh rows; blanking always runs (see `fresh`).
+        if (want.is_empty() || fresh) && span.as_str() != want {
             **span = want.to_string();
         }
     }
@@ -9452,6 +9498,15 @@ pub(crate) fn update_menu_stack_windows(
     // The selector-column surface's pin state.
     mut column_pin: Local<PinState>,
 ) {
+    // Order-of-operations law (owner 2026-10-21, ur/103): when a window opened or closed after
+    // the last row build this frame's stack is newer than its content - boxes and placement
+    // update, text fills wait for that window's own rows to be built. Clears run ungated so a
+    // reused surface never carries an old occupant's words into new chrome.
+    let fresh = match &*mode {
+        InputMode::Menu(stack) => rows_built_for(&dynamic, &stack.levels),
+        _ => true,
+    };
+
     struct Shown<'a> {
         stack_index: usize,
         /// The live top window of the stack (ur/94-98): its cursor row wears the `>` mark.
@@ -9622,9 +9677,19 @@ pub(crate) fn update_menu_stack_windows(
     }
 
     for (title, mut text) in title_q.iter_mut() {
-        let want = open_of(title.window).map_or("", |open| menu_title(open.level.kind));
-        if **text != *want {
-            **text = want.to_string();
+        let Some(open) = open_of(title.window) else {
+            // Hiding a window blanks its caption so the next occupant's chrome never re-shows
+            // the old one's word - clearing is not a fill and waits for nothing.
+            if !text.is_empty() {
+                **text = String::new();
+            }
+            continue;
+        };
+        if fresh {
+            let want = menu_title(open.level.kind);
+            if **text != *want {
+                **text = want.to_string();
+            }
         }
     }
     for (row, mut node, mut text, mut color) in row_q.iter_mut() {
@@ -9643,6 +9708,12 @@ pub(crate) fn update_menu_stack_windows(
             if node.display != Display::None {
                 node.display = Display::None;
             }
+            continue;
+        }
+        // No row shows or labels from unbuilt rows (box-first law above): a surface newly
+        // appearing on a stale frame came off the unoccupied hide arm, so its rows stay hidden
+        // with no words; what was already drawn freezes at its last true pixels.
+        if !fresh {
             continue;
         }
         if node.display != Display::Flex {
@@ -11199,6 +11270,49 @@ pub fn view_house_blocked(zone_id: Option<u16>, self_in_mog_house: bool) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn levels_slice(kinds: &[MenuKind]) -> Vec<crate::input_mode::MenuLevel> {
+        kinds.iter().map(|k| MenuLevel::new(*k, 0)).collect()
+    }
+
+    /// The box-first law's gate: no stamp (a world that never built rows) draws as-is; a stamp
+    /// matching the live sequence is fresh; every window change - push, pop, kind swap under a
+    /// same-length stack - fails until the next build restamps. `update_main_menu` and
+    /// `update_menu_stack_windows` hold their text fills on exactly this answer.
+    #[test]
+    fn rows_are_fresh_only_for_the_sequence_they_were_built_for() {
+        let mut dynamic = DynamicMenu::default();
+        let open = levels_slice(&[MenuKind::MissionList]);
+        let deeper = levels_slice(&[
+            MenuKind::MissionList,
+            MenuKind::MissionDetail { log: 4, member: 0 },
+        ]);
+
+        // Never built: draw as-is, hand-driven worlds keep drawing untouched.
+        assert!(dynamic.built_windows.is_none());
+        assert!(rows_built_for(&dynamic, &open));
+
+        let build = |d: &mut DynamicMenu, ls: &[crate::input_mode::MenuLevel]| {
+            let stack = crate::input_mode::MenuStack {
+                levels: ls.to_vec(),
+                ..Default::default()
+            };
+            stamp_built_rows(d, Some(&stack));
+        };
+        build(&mut dynamic, &open);
+        assert!(rows_built_for(&dynamic, &open));
+
+        // A child opening (or a kind swapping under the same depth) is stale for one frame -
+        // its window's text waits for rows built against it.
+        assert!(!rows_built_for(&dynamic, &deeper));
+        let swapped = levels_slice(&[MenuKind::QuestMenu]);
+        assert!(!rows_built_for(&dynamic, &swapped));
+
+        // The build catches up, and closing is stale the same way until it does.
+        build(&mut dynamic, &deeper);
+        assert!(rows_built_for(&dynamic, &deeper));
+        assert!(!rows_built_for(&dynamic, &open));
+    }
 
     /// The bit-15 skill line maps to retail's blue 0x802060A0 and survives the gate order.
     #[test]

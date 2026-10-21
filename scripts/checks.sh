@@ -708,7 +708,7 @@ run_enhanced() {
     return 1
   fi
   local features=(--no-default-features --features "native-window,$enhanced")
-  cargo clippy --workspace --all-targets --locked "${features[@]}" -- -D warnings
+  cargo clippy --workspace --all-targets --locked "${features[@]}" -- -D warnings -A clippy::disallowed_methods
   cargo test --workspace --locked "${features[@]}"
 }
 

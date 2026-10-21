@@ -17270,6 +17270,134 @@ mod tests {
         assert_eq!(arrows_shown(&mut app), 0, "the selector shows none either");
     }
 
+    /// ur/102 fence: pooled surfaces are allocated by identity (slot == stack
+    /// index) for the level's whole lifetime - growing or shrinking a chain never
+    /// re-maps them. That re-map was the root of the right-column churn owners
+    /// photographed through ur/94-101.
+    #[test]
+    fn pooled_surfaces_stay_on_their_stack_index_as_chains_grow_and_shrink() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::QuestMenu);
+        stack.push(MenuKind::QuestList {
+            completed: false,
+            region: 0,
+        });
+        let mut app = stack_app(stack, &[]);
+        app.update();
+        let surfaces = |app: &mut App| -> Vec<(usize, bevy::ecs::entity::Entity)> {
+            let mut got: Vec<(usize, bevy::ecs::entity::Entity)> = app
+                .world_mut()
+                .query::<(bevy::ecs::entity::Entity, &MenuStackWindow, &Node)>()
+                .iter(app.world())
+                .filter(|(_, _, node)| node.display != Display::None)
+                .map(|(entity, window, _)| (window.slot, entity))
+                .collect();
+            got.sort();
+            got
+        };
+
+        let before = surfaces(&mut app);
+        assert_eq!(before.len(), 2, "the hub and its list each own a surface");
+        assert_eq!(before[0].0, 1, "the hub rides slot 1 - its stack index");
+        assert_eq!(before[1].0, 2, "the list rides slot 2 - its stack index");
+
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.pop();
+        }
+        app.update();
+        let after = surfaces(&mut app);
+        assert_eq!(after.len(), 1, "only the hub's own surface remains");
+        assert_eq!(
+            after[0], before[0],
+            "same slot, same entities - never re-mapped by depth"
+        );
+
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.push(MenuKind::QuestList {
+                completed: false,
+                region: 0,
+            });
+        }
+        app.update();
+        let grown = surfaces(&mut app);
+        assert_eq!(grown.len(), 2, "the chain grew back");
+        assert_eq!(
+            (grown[1].0, grown[0]),
+            (2, before[0]),
+            "the reopened level takes slot 2; the hub's surface never moved"
+        );
+    }
+
+    /// ur/102 fence: opening a quest hub over Commands never re-creates the
+    /// selector - same entities painting, byte for byte except the cursor line's
+    /// marker under the child (ur/77), and ESC closes it back to the identical
+    /// focused state.
+    #[test]
+    fn right_side_survives_a_quest_hub_open_and_close() {
+        let mut app = stack_app(MenuStack::root(), &[]);
+        type Snapshot = Vec<(usize, bevy::ecs::entity::Entity, String, bevy::color::Color)>;
+        let selector_rows = |app: &mut App| -> Snapshot {
+            let mut rows: Snapshot = app
+                .world_mut()
+                .query::<(
+                    &MainMenuRow,
+                    Option<&CompanionRow>,
+                    bevy::ecs::entity::Entity,
+                    &Text,
+                    &TextColor,
+                    &Node,
+                )>()
+                .iter(app.world())
+                .filter(|(_, comp, _, _, _, node)| comp.is_none() && node.display != Display::None)
+                .map(|(row, _, entity, text, color, _)| (row.slot, entity, text.0.clone(), color.0))
+                .collect();
+            rows.sort_by_key(|(slot, _, _, _)| *slot);
+            rows
+        };
+
+        let before = selector_rows(&mut app);
+        assert!(!before.is_empty());
+
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.push(MenuKind::QuestMenu);
+        }
+        app.update();
+        let open = selector_rows(&mut app);
+
+        assert_eq!(
+            open.len(),
+            before.len(),
+            "the very same row entities keep painting under the hub"
+        );
+        let mut marked = 0;
+        for ((slot, entity, text, color), (slot2, entity2, text2, color2)) in
+            open.iter().zip(before.iter())
+        {
+            assert_eq!((slot, entity), (slot2, entity2), "same rows, same entities");
+            assert_eq!(color, color2, "row colours never change under the hub");
+            if text != text2 {
+                marked += 1;
+                let body = text2.strip_prefix("> ").unwrap_or(text2.as_str());
+                assert_eq!(
+                    (format!("  {body}"), format!("> {body}")),
+                    (text.clone(), text2.clone()),
+                    "only the cursor line's marker changes, on one row"
+                );
+            }
+        }
+        assert_eq!(marked, 1, "exactly the cursor line drops its mark");
+
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.pop();
+        }
+        app.update();
+        assert_eq!(
+            selector_rows(&mut app),
+            before,
+            "ESC back: byte-identical, cursor and all"
+        );
+    }
+
     #[test]
     fn mission_windows_are_dynamic_titled_and_rooted() {
         assert!(is_dynamic(MenuKind::MissionList));

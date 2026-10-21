@@ -5557,9 +5557,6 @@ pub enum MenuWindowSeat {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MenuStackLayout {
     pub windows: Vec<(usize, MenuWindowSeat)>,
-    /// The focused level's kind, kept so the covered-child law (ur/94-98) can
-    /// check which family owns the routing without walking the stack.
-    focused_kind: Option<MenuKind>,
 }
 
 impl MenuStackLayout {
@@ -5576,40 +5573,22 @@ impl MenuStackLayout {
             .find(|(_, seat)| !matches!(seat, MenuWindowSeat::Record(_)))
     }
 
-    /// Owner law (ur/94-98): the newest opener under focus that keeps drawing in
-    /// or beside the selector column while a framed child is on top of it. Only
-    /// the mission/quest family owns this routing - those chains open their log
-    /// windows as separate surfaces over a live selector (Commands and the
-    /// Missions list both). A dockable side list (`emotes`) that happens to sit
-    /// at a left record frame is NOT such a child: it stays drawn in place.
+    /// Owner law (ur/94-98 + ur/102): the newest opener under focus keeps drawing
+    /// in or beside the selector column while a framed child is on top of it -
+    /// every window family, Commands being the template. There is no kind gate and
+    /// no index hack any more: with identity-allocated surfaces (ur/102) there are
+    /// no re-mapped slots to protect against, so a selector under any framed child
+    /// keeps its own surface painting in place.
     fn covered_opener(&self) -> Option<usize> {
-        let (focus_index, focus_seat) = self.focused()?;
+        let (_, focus_seat) = self.focused()?;
         let MenuWindowSeat::Record(_) = focus_seat else {
             return None;
         };
-        let Some(focused_kind) = self.focused_kind else {
-            return None;
-        };
-        if !matches!(
-            focused_kind,
-            MenuKind::MissionDetail { .. }
-                | MenuKind::MissionText { .. }
-                | MenuKind::QuestMenu
-                | MenuKind::QuestList { .. }
-                | MenuKind::QuestDetail { .. }
-        ) {
-            return None;
-        }
         let (_, below) = self.windows.split_last()?;
         below
             .iter()
             .rev()
-            // Index 0 is the Commands root: it never opens these chains itself
-            // (ur/62 - they run off their own selector), and a framed child
-            // focused directly over Commands keeps its pre-ur/94 pane placement.
-            .filter(|(index, _)| *index > 0)
             .find(|(_, seat)| !matches!(seat, MenuWindowSeat::Record(_)))
-            .filter(|(index, _)| *index < focus_index)
             .map(|(index, _)| *index)
     }
 
@@ -5721,10 +5700,7 @@ pub fn menu_stack_layout(stack: &MenuStack, frames: &ConfigDatRows) -> MenuStack
         focused,
         focused_frame.map_or(MenuWindowSeat::Column, MenuWindowSeat::Record),
     ));
-    MenuStackLayout {
-        windows,
-        focused_kind: Some(levels[focused].kind),
-    }
+    MenuStackLayout { windows }
 }
 
 /// Wider pane for the Graphics menu: its rows are `label:<16>[value]` pairs
@@ -11829,9 +11805,13 @@ mod tests {
     /// wide window THERE while the parent list keeps the selector column.
     /// Frames seeded by hand keep this deterministic on machines without an
     /// install; `config_family_frames_census` (ffxi-dat) pins the real values.
+    /// ur/102 identity law: the page rides its own pooled surface and every parent
+    /// keeps painting on its own surface - nobody is mirrored away or re-formed.
     #[test]
     fn config_pages_open_wide_on_the_left_with_the_parent_kept_right() {
         let mut app = root_menu_app(0);
+        // The real HUD's pair of draw passes: framed children ride pooled surfaces.
+        app.add_systems(Update, update_menu_stack_windows);
         {
             let mut rows = app.world_mut().resource_mut::<ConfigDatRows>();
             rows.loaded = true;
@@ -11855,17 +11835,30 @@ mod tests {
         app.insert_resource(InputMode::Menu(stack));
         app.update();
         {
+            let mut stacked = drawn_stack_windows(&mut app);
+            assert_eq!(stacked.len(), 1, "the page rides its own pooled surface");
+            let page = stacked.remove(0).node;
+            assert_eq!(page.left, Val::Px(16.0), "wide page window at record x");
+            assert_eq!(page.top, Val::Px(48.0));
+            assert_eq!(page.width, Val::Px(366.0), "record width");
+            assert!(matches!(page.right, Val::Auto));
+        }
+        {
             let mut q = app.world_mut().query::<(&MainMenuPane, &Node)>();
             let pane = q.iter(app.world()).next().expect("pane exists").1;
-            assert_eq!(pane.left, Val::Px(16.0), "wide page window at record x");
-            assert_eq!(pane.top, Val::Px(48.0));
-            assert_eq!(pane.width, Val::Px(366.0), "record width");
-            assert!(matches!(pane.right, Val::Auto));
+            assert_eq!(
+                pane.right,
+                Val::Px(8.0),
+                "the parent list keeps the selector column on its own surface"
+            );
         }
-        let (visible, title, rows) = companion_frame_visible(&mut app);
-        assert!(visible, "the parent list stays visible on the right");
-        assert_eq!(title, menu_title(MenuKind::RetailConfig));
-        assert!(!rows.is_empty());
+        let (visible, _title, _rows) = companion_frame_visible(&mut app);
+        assert!(
+            !visible,
+            "ur/102: a parent that owns its surface is not mirrored"
+        );
+        assert_eq!(title_text(&mut app), menu_title(MenuKind::RetailConfig));
+        assert!(!pane_row_texts(&mut app).is_empty());
 
         // Going back moves nothing: pop closes the page only (retail keeps the
         // hub), so the column owns its anchor again.
@@ -12332,6 +12325,31 @@ mod tests {
         (node.left, node.top, node.width)
     }
 
+    /// The column surface's own row texts top to bottom (ur/102): with identity
+    /// allocation the opener paints on its very entities - no mirror copy.
+    fn pane_row_texts(app: &mut App) -> Vec<String> {
+        let mut rows: Vec<(usize, String)> = app
+            .world_mut()
+            .query::<(&MainMenuRow, Option<&CompanionRow>, &Node, &Text)>()
+            .iter(app.world())
+            .filter(|(_, comp, node, _)| comp.is_none() && node.display != Display::None)
+            .map(|(row, _, _, text)| (row.slot, text.0.clone()))
+            .collect();
+        rows.sort();
+        rows.into_iter().map(|(_, label)| label).collect()
+    }
+
+    /// The lone drawn pooled surface for a framed child over the selector (ur/102).
+    fn docked_surface(app: &mut App) -> Node {
+        let mut stacked = drawn_stack_windows(app);
+        assert_eq!(
+            stacked.len(),
+            1,
+            "the framed window rides its own pooled surface"
+        );
+        stacked.remove(0).node
+    }
+
     /// Two record windows stay on screen together: the quest list keeps its own frame, rows and
     /// cursor under the detail it opened, the main menu keeps the selector column, and each
     /// newer window draws over the older ones.
@@ -12360,15 +12378,15 @@ mod tests {
         )];
         app.update();
 
-        let (pane, pane_z) = drawn_pane(&mut app);
-        assert_eq!(
-            frame_rect(&pane),
-            (Val::Px(40.0), Val::Px(120.0), Val::Px(300.0)),
-            "the detail sits at its own frame"
-        );
+        // ur/102 identity law: every stacked window draws itself - the list and
+        // the detail each ride their own surface, Commands keeps its column.
         let stacked = drawn_stack_windows(&mut app);
-        assert_eq!(stacked.len(), 1, "the list it opened from stays drawn");
-        let list = &stacked[0];
+        assert_eq!(
+            stacked.len(),
+            2,
+            "the list and the detail each draw at their own frame"
+        );
+        let (list, detail) = (&stacked[0], &stacked[1]);
         assert_eq!(
             frame_rect(&list.node),
             (Val::Px(16.0), Val::Px(48.0), Val::Px(366.0)),
@@ -12383,14 +12401,30 @@ mod tests {
         );
         // ur/77: under focus the window keeps no `>` mark; its cursor row stays gold.
         assert_eq!(list.rows, vec!["  Quest A", "  Quest B"]);
-        let (mirror, mirror_z) = drawn_mirror(&mut app).expect("the main menu stays open");
-        assert_eq!(mirror.right, Val::Px(MENU_RIGHT_EDGE));
-        let (_, title, _) = companion_frame_visible(&mut app);
-        assert_eq!(title, menu_title(MenuKind::Root));
+        assert_eq!(
+            frame_rect(&detail.node),
+            (Val::Px(40.0), Val::Px(120.0), Val::Px(300.0)),
+            "the detail sits at its own frame"
+        );
+        let (pane, pane_z) = drawn_pane(&mut app);
+        assert_eq!(
+            pane.right,
+            Val::Px(MENU_RIGHT_EDGE),
+            "Commands keeps painting its own selector surface under the chain"
+        );
         assert!(
-            mirror_z < list.z && list.z < pane_z,
-            "oldest first, newest on top: {mirror_z} {} {pane_z}",
-            list.z
+            title_text(&mut app).starts_with(menu_title(MenuKind::Root)),
+            "the column wears the Commands caption"
+        );
+        assert!(
+            drawn_mirror(&mut app).is_none(),
+            "ur/102: nothing mirrors an opener that owns its surface"
+        );
+        assert!(
+            pane_z < stacked[0].z && stacked[0].z < stacked[1].z,
+            "oldest first, newest on top: {pane_z} {} {}",
+            stacked[0].z,
+            stacked[1].z
         );
     }
 
@@ -12436,13 +12470,10 @@ mod tests {
         }
         app.update();
 
-        let (pane, pane_z) = drawn_pane(&mut app);
-        assert_eq!(
-            frame_rect(&pane),
-            (Val::Px(40.0), Val::Px(200.0), Val::Px(300.0))
-        );
+        // ur/102 identity law: the hub keeps its own selector surface and both
+        // framed windows draw themselves - oldest first, newest on top.
         let stacked = drawn_stack_windows(&mut app);
-        assert_eq!(stacked.len(), 1, "the page stays drawn under its window");
+        assert_eq!(stacked.len(), 2, "the page stays drawn under its window");
         assert_eq!(
             frame_rect(&stacked[0].node),
             (Val::Px(16.0), Val::Px(48.0), Val::Px(366.0))
@@ -12450,21 +12481,24 @@ mod tests {
         assert_eq!(stacked[0].title, menu_title(MenuKind::RetailConfigPage(3)));
         // ur/77: the same no-mark law under focus.
         assert_eq!(stacked[0].rows, vec!["  Page A"]);
-        let (mirror, mirror_z) = drawn_mirror(&mut app).expect("the hub stays visible");
         assert_eq!(
-            mirror.right,
-            Val::Px(MENU_RIGHT_EDGE),
-            "the hub keeps the selector column"
+            frame_rect(&stacked[1].node),
+            (Val::Px(40.0), Val::Px(200.0), Val::Px(300.0)),
+            "the sub-window sits at its own frame"
         );
-        let (_, title, rows) = companion_frame_visible(&mut app);
-        assert_eq!(title, menu_title(MenuKind::RetailConfig));
+        let (pane, pane_z) = drawn_pane(&mut app);
+        assert_eq!(
+            pane.right,
+            Val::Px(MENU_RIGHT_EDGE),
+            "the hub keeps the selector column on its own surface"
+        );
         // ur/77: unfocused windows list their rows without the `>` mark.
         assert_eq!(
-            rows,
+            pane_row_texts(&mut app),
             vec!["  Hub A", "  Hub B"],
             "the hub lists its own rows, not the focused window's"
         );
-        assert!(mirror_z < stacked[0].z && stacked[0].z < pane_z);
+        assert!(pane_z < stacked[0].z && stacked[0].z < stacked[1].z);
     }
 
     /// A newer window on an older window's whole record rectangle hides it; with no known
@@ -12485,9 +12519,14 @@ mod tests {
             ],
         );
         app.update();
-        assert!(
-            drawn_stack_windows(&mut app).is_empty(),
-            "quest01 covers quest00 whole"
+        // ur/102 identity law: the covering window draws itself on its own pooled
+        // surface, and the one it covers whole never appears.
+        let stacked = drawn_stack_windows(&mut app);
+        assert_eq!(stacked.len(), 1, "quest01 covers quest00 whole");
+        assert_eq!(
+            stacked[0].title,
+            menu_title(MenuKind::QuestDetail { log: 1, id: 7 }),
+            "the survivor is the newer window"
         );
 
         let mut unknown = ConfigDatRows::default();
@@ -17199,9 +17238,10 @@ mod tests {
     /// shown whenever such a window focuses, and no other window shows them.
     #[test]
     fn mission_log_windows_wear_their_caption_band_arrows() {
+        // ur/102: the framed log wears its caption pair on its own pooled surface.
         let arrows_shown = |app: &mut App| -> usize {
             app.world_mut()
-                .query::<(&MissionLogArrow, &Node)>()
+                .query::<(&MenuStackWindowArrow, &Node)>()
                 .iter(app.world())
                 .filter(|(_, node)| node.display != Display::None)
                 .count()
@@ -17211,8 +17251,9 @@ mod tests {
             log: MISSION_LOG_COP,
             member: 0,
         });
-        let mut app = root_menu_app(0);
-        app.insert_resource(InputMode::Menu(stack));
+        // The real HUD's pair of draw passes (ur/102): the framed log rides its
+        // own pooled surface and wears its arrows there.
+        let mut app = stack_app(stack, &[]);
         app.update();
         assert_eq!(arrows_shown(&mut app), 2, "a log window wears both arrows");
 
@@ -17534,12 +17575,13 @@ mod tests {
         );
     }
 
-    /// ur/85: opening Quests over Commands must not repaint that opener from raw
-    /// slot 0 — the mirror keeps exactly the focused pane's `viewport_over` law:
-    /// only the cursor's page of entries, no `>` mark (ur/77), and the selected
-    /// line stays gold so the window reads as holding the place until ESC.
+    /// ur/85 + ur/102: opening Quests over Commands must not repaint that opener
+    /// from raw slot 0. The opener keeps its OWN surface (no mirror copy), with
+    /// exactly the focused pane's `viewport_over` law: only the cursor's page of
+    /// entries, no `>` mark (ur/77), and the selected line stays gold so the window
+    /// reads as holding the place until ESC.
     #[test]
-    fn opening_quests_leaves_the_mirrored_commands_page_intact() {
+    fn opening_quests_leaves_the_commands_page_intact() {
         let commands = entries_for(MenuKind::Root, false);
         let quests_at = commands
             .iter()
@@ -17556,23 +17598,35 @@ mod tests {
         let mut app = stack_app(stack, &[]);
         app.update();
 
+        let stacked = drawn_stack_windows(&mut app);
         assert_eq!(
-            title_text(&mut app),
+            stacked.len(),
+            1,
+            "the quest list draws on its own pooled surface"
+        );
+        assert_eq!(
+            stacked[0].title,
             menu_title(MenuKind::QuestList {
                 completed: false,
                 region: 0
             })
         );
         assert!(
-            drawn_mirror(&mut app).is_some(),
-            "Commands stays framed beside the quest list"
+            drawn_mirror(&mut app).is_none(),
+            "ur/102: Commands is never mirrored away from its own surface"
         );
         let mut mirror: Vec<(usize, String, bevy::color::Color)> = app
             .world_mut()
-            .query::<(&CompanionRow, &Node, &Text, &TextColor)>()
+            .query::<(
+                &MainMenuRow,
+                Option<&CompanionRow>,
+                &Node,
+                &Text,
+                &TextColor,
+            )>()
             .iter(app.world())
-            .filter(|(_, node, _, _)| node.display != Display::None)
-            .map(|(row, _, text, color)| (row.slot, text.0.clone(), color.0))
+            .filter(|(_, comp, node, _, _)| comp.is_none() && node.display != Display::None)
+            .map(|(row, _, _, text, color)| (row.slot, text.0.clone(), color.0))
             .collect();
         mirror.sort_by_key(|(slot, _, _)| *slot);
 
@@ -18410,26 +18464,28 @@ mod tests {
                 FRAME_ANCHOR_NONE,
             )],
         );
+        // ur/102 identity law: the framed window rides its own pooled surface
+        // while Commands keeps painting the selector column underneath.
         app.update();
-        let (pane, _) = drawn_pane(&mut app);
+        let win = docked_surface(&mut app);
         assert!(f32::from(EMOTE_X) >= LEFT_HALF_MAX_X);
         assert_eq!(
-            (pane.left, pane.margin.left, pane.right),
+            (win.left, win.margin.left, win.right),
             (Val::Px(f32::from(EMOTE_X)), Val::ZERO, Val::Auto)
         );
-        assert_eq!((pane.top, pane.bottom), (Val::Auto, docked_bottom(LOG_TOP)));
+        assert_eq!((win.top, win.bottom), (Val::Auto, docked_bottom(LOG_TOP)));
 
         move_log(&mut app, log, LOG_TOP - LOG_RAISE);
         app.update();
         assert_eq!(
-            drawn_pane(&mut app).0.bottom,
+            docked_surface(&mut app).bottom,
             docked_bottom(LOG_TOP - LOG_RAISE)
         );
 
         app.world_mut().get_mut::<Node>(log).unwrap().display = Display::None;
         app.update();
         assert_eq!(
-            drawn_pane(&mut app).0.bottom,
+            docked_surface(&mut app).bottom,
             docked_bottom(LOG_TOP - LOG_RAISE),
             "a hidden log leaves it in place"
         );
@@ -18437,7 +18493,7 @@ mod tests {
         app.world_mut().entity_mut(log).despawn();
         app.update();
         assert_eq!(
-            drawn_pane(&mut app).0.bottom,
+            docked_surface(&mut app).bottom,
             docked_bottom(LOG_TOP - LOG_RAISE),
             "a closed log leaves it in place"
         );
@@ -18452,20 +18508,24 @@ mod tests {
             stack,
             &[(EMOTE_LIST_WINDOW, (16, 120, 100, 200), FRAME_ANCHOR_NONE)],
         );
-        let pane = app
+        // ur/102 identity law: the emote list is stack level 1, so it rides pooled
+        // surface slot 1 - and that one entity's height pushes it to the dock floor.
+        let win = app
             .world_mut()
-            .query_filtered::<Entity, With<MainMenuPane>>()
-            .single(app.world())
-            .expect("one pane");
-        app.world_mut().entity_mut(pane).insert(ComputedNode {
+            .query::<(Entity, &MenuStackWindow)>()
+            .iter(app.world())
+            .find(|(_, window)| window.slot == 1)
+            .map(|(entity, _)| entity)
+            .expect("the emote list's surface (slot == stack index)");
+        app.world_mut().entity_mut(win).insert(ComputedNode {
             size: Vec2::new(MENU_PANE_WIDTH, LOG_TOP),
             inverse_scale_factor: 1.0,
             ..default()
         });
         app.update();
-        let (pane, _) = drawn_pane(&mut app);
+        let win = docked_surface(&mut app);
         assert_eq!(
-            (pane.top, pane.bottom),
+            (win.top, win.bottom),
             (Val::Px(crate::hud::dock::DOCK_MIN_TOP), Val::Auto)
         );
     }
@@ -18491,16 +18551,21 @@ mod tests {
             ],
         );
         app.update();
-        let (pane, _) = drawn_pane(&mut app);
-        assert_eq!(
-            (pane.left, pane.bottom),
-            (Val::Px(f32::from(JOBCHANG_X)), docked_bottom(LOG_TOP))
-        );
+        // ur/102 identity law: both windows ride their own pooled surfaces,
+        // oldest first under the Commands column.
         let stacked = drawn_stack_windows(&mut app);
-        assert_eq!(stacked.len(), 1, "the Mog House menu stays drawn");
+        assert_eq!(
+            stacked.len(),
+            2,
+            "the Mog House menu stays drawn under Change Jobs"
+        );
         assert_eq!(
             (stacked[0].node.left, stacked[0].node.bottom),
             (Val::Px(f32::from(MYROOM_X)), docked_bottom(LOG_TOP))
+        );
+        assert_eq!(
+            (stacked[1].node.left, stacked[1].node.bottom),
+            (Val::Px(f32::from(JOBCHANG_X)), docked_bottom(LOG_TOP))
         );
     }
 
@@ -18530,10 +18595,12 @@ mod tests {
                 ),
             ],
         );
+        // ur/102 identity law: each framed child rides its own pooled surface at
+        // its record frame - no anchor and the dock law keeps it there too.
         app.update();
-        let (pane, _) = drawn_pane(&mut app);
+        let win = docked_surface(&mut app);
         assert_eq!(
-            (pane.top, pane.bottom),
+            (win.top, win.bottom),
             (Val::Px(f32::from(QUEST_Y)), Val::Auto)
         );
 
@@ -18542,9 +18609,9 @@ mod tests {
         stack.push(MenuKind::EmoteList);
         app.insert_resource(InputMode::Menu(stack));
         app.update();
-        let (pane, _) = drawn_pane(&mut app);
+        let win = docked_surface(&mut app);
         assert_eq!(
-            (pane.top, pane.bottom),
+            (win.top, win.bottom),
             (Val::Px(f32::from(EMOTE_Y)), Val::Auto)
         );
     }

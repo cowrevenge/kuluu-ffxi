@@ -1228,7 +1228,8 @@ mod tests {
     /// menu's host is laid out over the whole screen and visible, as the UI lays it out.
     fn chat_screen() -> (App, Entity, Entity) {
         use crate::hud::menu::{
-            spawn_main_menu, update_main_menu, ConfigDatRows, DynamicMenu, MainMenu,
+            spawn_main_menu, update_main_menu, update_menu_stack_windows, ConfigDatRows,
+            DynamicMenu, MainMenu,
         };
         let mut app = App::new();
         app.init_resource::<GraphicsSettings>()
@@ -1243,11 +1244,14 @@ mod tests {
             .add_systems(Startup, spawn_main_menu)
             .add_systems(
                 Update,
+                // The real HUD's pair of draw passes (ur/102): framed children ride
+                // their own pooled surfaces under the selector.
                 (
                     apply_chat_layout,
                     lay_out_the_log,
                     crate::hud::dock::dock_windows_system,
                     update_main_menu,
+                    update_menu_stack_windows,
                 )
                     .chain(),
             );
@@ -1363,9 +1367,13 @@ mod tests {
 
     /// A log-slot window docks against the log where it sits with no menu open
     /// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md).
+    /// ur/102 retarget: every stacked window is its own pooled surface (slot ==
+    /// stack index), so the emote window hangs on its own `MenuStackWindow` while
+    /// the Commands column keeps painting untouched - same dock law and value as
+    /// when the pane itself carried the window.
     #[test]
     fn a_docked_window_hangs_above_the_chat_log_with_a_menu_open() {
-        use crate::hud::menu::{ConfigDatRows, MainMenuPane, EMOTE_LIST_WINDOW};
+        use crate::hud::menu::{ConfigDatRows, MainMenuPane, MenuStackWindow, EMOTE_LIST_WINDOW};
         use crate::input_mode::{MenuKind, MenuStack};
         const EMOTE_FRAME: (i16, i16, i16) = (16, 120, 100);
         let (mut app, stack, log) = chat_screen();
@@ -1379,18 +1387,35 @@ mod tests {
         emotes.push(MenuKind::EmoteList);
         open_menu(&mut app, emotes);
         assert_eq!(log_place(&app, stack, log), closed);
-        let pane = app
+        let mut hung: Vec<(Val, Val)> = app
             .world_mut()
-            .query_filtered::<&Node, With<MainMenuPane>>()
-            .single(app.world())
-            .expect("the pane")
-            .clone();
+            .query::<(&Node, &MenuStackWindow)>()
+            .iter(app.world())
+            .filter(|(node, _)| node.display != Display::None)
+            .map(|(node, _)| (node.top, node.bottom))
+            .collect();
         assert_eq!(
-            (pane.top, pane.bottom),
+            hung.len(),
+            1,
+            "exactly one pooled window - the emote list on its own surface"
+        );
+        let (top, bottom) = hung.remove(0);
+        assert_eq!(
+            (top, bottom),
             (
                 Val::Auto,
                 Val::Px(surface().y - (log_top - crate::hud::dock::DOCK_GAP))
             )
+        );
+        let pane = app
+            .world_mut()
+            .query_filtered::<&Node, With<MainMenuPane>>()
+            .single(app.world())
+            .expect("the pane");
+        assert_ne!(
+            pane.display,
+            Display::None,
+            "ur/102: the Commands column keeps painting under a docked child"
         );
     }
 

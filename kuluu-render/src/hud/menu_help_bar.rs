@@ -604,6 +604,126 @@ pub fn update_menu_help_bar(
     }
 }
 
+/// One bar-subtree node's captured paint, taken the frame the bar appears so restoration returns
+/// each node to its own byte-exact colors afterwards.
+#[derive(Clone, Copy)]
+pub struct BarPaint {
+    background: Option<Color>,
+    text: Option<Color>,
+    border: Option<bevy::ui::BorderColor>,
+}
+
+pub struct BarFadeIn {
+    elapsed_frames: u8,
+    painted: Vec<(bevy::ecs::entity::Entity, BarPaint)>,
+}
+
+fn collect_bar_paint(
+    entity: bevy::ecs::entity::Entity,
+    children_q: &Query<&Children>,
+    read_q: &Query<(Option<&BackgroundColor>, Option<&TextColor>)>,
+    border_q: &Query<&bevy::ui::BorderColor>,
+    out: &mut Vec<(bevy::ecs::entity::Entity, BarPaint)>,
+) {
+    if let Ok((background, text)) = read_q.get(entity) {
+        let border = border_q.get(entity).ok().copied();
+        if background.is_some() || text.is_some() || border.is_some() {
+            out.push((
+                entity,
+                BarPaint {
+                    background: background.map(|c| c.0),
+                    text: text.map(|c| c.0),
+                    border,
+                },
+            ));
+        }
+    }
+    if let Ok(children) = children_q.get(entity) {
+        for child in children.iter() {
+            collect_bar_paint(child, children_q, read_q, border_q, out);
+        }
+    }
+}
+
+/// The top command bar fades in instead of squeezing (owner ruling 2026-10-22): over
+/// [`menu_anim::MENU_FADE_FRAMES`] frames only the framed parts and their backgrounds paint -
+/// every text node stays hidden from the appearing frame until the opaque one restores it. Runs
+/// immediately after `update_menu_help_bar` so its fills are in place (invisible) underneath.
+pub fn fade_menu_help_bar_in(
+    bar_q: Query<(Entity, &Node), With<MenuHelpBar>>,
+    children_q: Query<&Children>,
+    read_q: Query<(Option<&BackgroundColor>, Option<&TextColor>)>,
+    border_read_q: Query<&bevy::ui::BorderColor>,
+    mut paint_q: Query<(
+        Option<&mut BackgroundColor>,
+        Option<&mut TextColor>,
+        Option<&mut bevy::ui::BorderColor>,
+    )>,
+    mut shown_before: Local<bool>,
+    mut fade: Local<Option<BarFadeIn>>,
+) {
+    let Ok((bar, node)) = bar_q.single() else {
+        return;
+    };
+    let showing = node.display != Display::None;
+    if !*shown_before && showing {
+        // Appearing frame: take the exact paint of every drawn part; words go transparent with it.
+        let mut painted = Vec::new();
+        collect_bar_paint(bar, &children_q, &read_q, &border_read_q, &mut painted);
+        *fade = Some(BarFadeIn {
+            elapsed_frames: 0,
+            painted,
+        });
+    }
+    *shown_before = showing;
+    let Some(state) = fade.as_mut() else { return };
+    state.elapsed_frames += 1;
+    let fading_out_early = !showing;
+    let done = fading_out_early || state.elapsed_frames >= crate::hud::menu_anim::MENU_FADE_FRAMES;
+    // Opaque frame hands back the captured paint byte-exact; middle frames scale chrome alphas
+    // from that same base (never from last frame's, which would compound) and hold every word at
+    // zero - only box and background render while it animates.
+    let share = if done {
+        1.0
+    } else {
+        crate::hud::menu_anim::fade_share(
+            state.elapsed_frames,
+            crate::hud::menu_anim::MENU_FADE_FRAMES,
+        )
+    };
+    for (entity, base) in state.painted.iter() {
+        let Ok((background, text, border)) = paint_q.get_mut(*entity) else {
+            continue;
+        };
+        if let (Some(base_color), Some(mut background)) = (&base.background, background) {
+            let mut color = *base_color;
+            color.set_alpha(base_color.alpha() * share);
+            background.0 = color;
+        }
+        if let (Some(base_color), Some(mut text)) = (&base.text, text) {
+            // Text is written only when the final frame lands (owner 2026-10-22).
+            let mut color = *base_color;
+            color.set_alpha(if done { base_color.alpha() } else { 0.0 });
+            text.0 = color;
+        }
+        if let (Some(border_base), Some(mut border)) = (&base.border, border) {
+            let scale_edge = |base_edge: Color| {
+                let mut color = base_edge;
+                color.set_alpha(base_edge.alpha() * share);
+                color
+            };
+            // Written as one whole so every edge scales off its captured base in the same frame.
+            border.top = scale_edge(border_base.top);
+            border.right = scale_edge(border_base.right);
+            border.bottom = scale_edge(border_base.bottom);
+            border.left = scale_edge(border_base.left);
+        }
+    }
+    if done {
+        *fade = None;
+    }
+}
+
 /// The level holding the keys: a display-only Status detail on top leaves them on the selector
 /// under it (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md).
 fn focused_level(stack: &MenuStack) -> Option<&MenuLevel> {

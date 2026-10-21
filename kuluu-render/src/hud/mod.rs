@@ -34,6 +34,7 @@ pub mod graphics_debug;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod map_screen;
 pub mod menu;
+pub mod menu_anim;
 pub mod menu_help_bar;
 pub mod merit_windows;
 pub mod mesh_debug;
@@ -471,9 +472,16 @@ impl Plugin for HudPlugin {
             ),
         );
 
+        // The bar's fade-in rider (owner law 2026-10-22): runs on the same frame as its fills so
+        // the appearing frame already renders chrome-only at the first alpha step.
         app.add_systems(
             Update,
-            menu_help_bar::update_menu_help_bar.after(menu::refresh_dynamic_menu_rows),
+            (
+                menu_help_bar::update_menu_help_bar,
+                menu_help_bar::fade_menu_help_bar_in,
+            )
+                .chain()
+                .after(menu::refresh_dynamic_menu_rows),
         );
 
         #[cfg(feature = "enhanced-shutdown-counter")]

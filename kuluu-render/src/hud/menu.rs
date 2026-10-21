@@ -9551,7 +9551,12 @@ pub(crate) fn update_menu_stack_windows(
     // Heights remembered for exact window shapes across slots and reopens (`remember_height`):
     // a shape the session measured once opens at final size, empty chrome, from frame one.
     mut heights: Local<Vec<HeightPin>>,
+    // One center-hold squeeze state per pooled surface (owner law 2026-10-22): boxes animate
+    // open and closed in `MENU_SQUEEZE_FRAMES`; an fx owns the node's geometry only on frames
+    // where it is animating, so pin/placement stands every other frame natural and full.
+    mut fxs: Local<Vec<crate::hud::menu_anim::WindowFx>>,
 ) {
+    use crate::hud::menu_anim::{FullRect, WindowFx};
     // Order-of-operations law (owner 2026-10-21, ur/103): when a window opened or closed after
     // the last row build this frame's stack is newer than its content - boxes and placement
     // update, text fills wait for that window's own rows to be built. Clears run ungated so a
@@ -9653,18 +9658,48 @@ pub(crate) fn update_menu_stack_windows(
     if pins.len() < MAX_STACKED_WINDOWS {
         pins.resize(MAX_STACKED_WINDOWS, PinState::default());
     }
+    if fxs.len() < MAX_STACKED_WINDOWS {
+        fxs.resize(MAX_STACKED_WINDOWS, WindowFx::default());
+    }
 
     for (window, mut node, mut z_index, computed) in window_q.iter_mut() {
         let mut want = node.clone();
         let shown_before = node.display != Display::None;
         let open = open_of(window.slot);
+        // One fx frame per surface. A surface taken back over mid-collapse stands full at once: ESC
+        // to the same place is instant and never grows its box back; an opening orphaned by a fast
+        // close collapses from its own full box instead of vanishing.
+        let mut fx = *fxs.get(window.slot).unwrap_or(&WindowFx::Idle);
+        if open.is_some() && matches!(fx, WindowFx::Closing { .. }) {
+            fx = WindowFx::Idle;
+        }
+        if open.is_none() {
+            if let WindowFx::Opening { full, .. } = fx {
+                fx = WindowFx::closing(full);
+            }
+        }
+        // Ticking before the pin passes means a squeeze's last frame runs natural again in-frame:
+        // it re-asserts the pinned px and fills text (the chrome-only law below keeps words off
+        // every earlier frame - owner 2026-10-22: "ONLY render the box and the background").
+        // A squeeze that finished this tick must not arm a new one over its stale shrunken fields:
+        // arming is for surfaces that sat idle when the frame began.
+        let rested = matches!(fx, WindowFx::Idle);
+        let mut animated = fx.tick();
         if let Some(pin_slot) = pins.get_mut(window.slot) {
-            match open {
-                Some(open) => {
+            match (open, fx) {
+                // A grow-in frame owns the height field; observing its intermediate boxes would
+                // poison the pin or the remembered-height table. (`fx` is never Closing with an
+                // occupant here - the steal arm above already stood those up.)
+                (Some(_), WindowFx::Opening { .. }) => {}
+                (Some(open), _) => {
                     // The rows this surface paints are the content its height measures from.
                     let rows = open.visible.min(open.total.saturating_sub(open.start));
                     let live = crate::hud::dock::drawn_height(computed);
-                    if pin_slot.adopt(&heights, open.level.kind, rows).is_none() {
+                    if let Some(px) = pin_slot.adopt(&heights, open.level.kind, rows) {
+                        // The adopted px stands the box on frame one - written explicitly, as a
+                        // squeeze may well have left this node's height field at an old fraction.
+                        want.height = Val::Px(px);
+                    } else {
                         match pin_slot.step(open.level.kind, rows, live) {
                             Some(px) => want.height = Val::Px(px),
                             None => {
@@ -9683,7 +9718,7 @@ pub(crate) fn update_menu_stack_windows(
                         }
                     }
                 }
-                None => *pin_slot = PinState::default(),
+                (None, _) => *pin_slot = PinState::default(),
             }
         }
         match open {
@@ -9719,7 +9754,41 @@ pub(crate) fn update_menu_stack_windows(
             }
             None => want.display = Display::None,
         }
+        // Arm the squeeze law where a box change just happened on a shape it already knows in
+        // pixels: grows start only on a freshly appearing surface whose pinned/adopted height and
+        // record seat stand a full box (`fresh` keeps grow-in behind the rows-built stamp, so no
+        // chrome leads its content), collapses start from whatever box it drew last frame. A
+        // first sighting of a shape (height still `Auto`) draws plain and learns, as before.
+        if rested && matches!(fx, WindowFx::Idle) {
+            let opening = open.is_some() && !shown_before && fresh;
+            let collapsing = open.is_none() && shown_before;
+            if let Some(full) = FullRect::from_style(&want).filter(|_| opening || collapsing) {
+                fx = if opening {
+                    WindowFx::opening(full)
+                } else {
+                    WindowFx::closing(full)
+                };
+                animated = fx.tick();
+            }
+        }
+        // The center-hold override: only the box and its background move; rows, caption and
+        // right-edge furniture are held off by their passes below until the target lands.
+        if let Some((width, height)) = animated {
+            if let Some(full) = fx.full() {
+                let (left, top, w, h) = full.centered(width, height);
+                want.left = left;
+                want.top = top;
+                want.width = w;
+                want.height = h;
+                // A collapsing surface's hide arm wrote `Display::None`; the chrome still paints
+                // every fx frame, and its z-seat is whatever it held while open.
+                want.display = Display::Flex;
+            }
+        }
         node.set_if_neq(want);
+        if let Some(slot) = fxs.get_mut(window.slot) {
+            *slot = fx;
+        }
     }
 
     // The selector-column surface shares the `HeightPin` law (see its system param note).
@@ -9756,6 +9825,17 @@ pub(crate) fn update_menu_stack_windows(
         pane_node.set_if_neq(want);
     }
 
+    // Chrome-only fx law (owner 2026-10-22): a grow-in renders its box and background only -
+    // rows, caption and right-edge furniture land together on the frame the squeeze completes. A
+    // collapse loses them immediately through the hide arms below ("text ... removed at the
+    // start"), which is what the unoccupied `open_of` answers already do.
+    let growing = |slot: usize| {
+        matches!(
+            fxs.get(slot),
+            Some(crate::hud::menu_anim::WindowFx::Opening { .. })
+        )
+    };
+
     for (title, mut text) in title_q.iter_mut() {
         let Some(open) = open_of(title.window) else {
             // Hiding a window blanks its caption so the next occupant's chrome never re-shows
@@ -9765,7 +9845,9 @@ pub(crate) fn update_menu_stack_windows(
             }
             continue;
         };
-        if fresh {
+        // During the grow-in the caption stays blank - whatever word sat here was cleared while
+        // the surface was free, and it lands with the rows on the frame full size arrives.
+        if fresh && !growing(title.window) {
             let want = menu_title(open.level.kind);
             if **text != *want {
                 **text = want.to_string();
@@ -9783,6 +9865,13 @@ pub(crate) fn update_menu_stack_windows(
             }
             continue;
         };
+        if growing(row.window) {
+            // Chrome-only grow-in frame (the law above the passes): stay hidden, no words crawl.
+            if node.display != Display::None {
+                node.display = Display::None;
+            }
+            continue;
+        }
         let idx = open.start + row.slot;
         if row.slot >= open.visible || idx >= open.total {
             if node.display != Display::None {
@@ -9829,8 +9918,8 @@ pub(crate) fn update_menu_stack_windows(
     for (arrow, mut node) in arrow_q.iter_mut() {
         let want = open_of(arrow.window)
             .is_some_and(|open| matches!(open.level.kind, MenuKind::MissionDetail { .. }))
-            .then_some(Display::Flex)
-            .unwrap_or(Display::None);
+            && !growing(arrow.window);
+        let want = if want { Display::Flex } else { Display::None };
         if node.display != want {
             node.display = want;
         }
@@ -9840,11 +9929,13 @@ pub(crate) fn update_menu_stack_windows(
     // right-edge scrollbar; every other kind keeps no bar. The furniture is anchored
     // inside the chrome on the right edge at spawn, top to bottom of the fill.
     let scroll_page = |window: usize| -> Option<(usize, usize, usize)> {
-        open_of(window).and_then(|open| {
-            matches!(open.level.kind, MenuKind::MissionDetail { .. })
-                .then_some((open.start, open.total, open.visible))
-                .filter(|(_, total, visible)| total > visible)
-        })
+        open_of(window)
+            .filter(|_| !growing(window))
+            .and_then(|open| {
+                matches!(open.level.kind, MenuKind::MissionDetail { .. })
+                    .then_some((open.start, open.total, open.visible))
+                    .filter(|(_, total, visible)| total > visible)
+            })
     };
     for (track, thumb, mut node) in scroll_q.iter_mut() {
         if let Some(track) = track {
@@ -18024,6 +18115,234 @@ mod tests {
             hub_height(&mut app),
             Val::Px(57.0),
             "the reopened shape opens at its remembered height on frame one"
+        );
+    }
+
+    /// The squeeze law (owner ruling 2026-10-22): a released window does not vanish - it collapses
+    /// toward the center of the box it stood at, both axes reaching zero within
+    /// `MENU_SQUEEZE_FRAMES` frames at their own per-axis speed. Its words are gone from the first
+    /// collapse frame; only box and background animate out.
+    #[test]
+    fn released_windows_collapse_to_their_center_within_the_squeeze_period() {
+        // A kind with a real caption (`QuestList`), so "text gone from frame one" asserts against
+        // words that were actually painted there.
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::QuestList {
+            completed: false,
+            region: 0,
+        });
+        let mut app = stack_app(stack, &[]);
+        for _ in 0..2 {
+            app.update();
+        }
+        let surface_entities: Vec<bevy::ecs::entity::Entity> = app
+            .world_mut()
+            .query::<bevy::ecs::entity::Entity>()
+            .iter(app.world())
+            .filter(|entity| {
+                app.world().get::<MenuStackWindow>(*entity).is_some()
+                    || app.world().get::<MainMenuPane>(*entity).is_some()
+            })
+            .collect();
+        for entity in surface_entities {
+            app.world_mut()
+                .get_mut::<ComputedNode>(entity)
+                .expect("framed surfaces carry a computed node")
+                .size = Vec2::new(300.0, 57.0);
+        }
+        for _ in 1..PIN_SETTLE_FRAMES {
+            app.update();
+        }
+        app.update(); // pins earned: the hub stands at a full pixel box.
+
+        let hub_box = |app: &mut App| -> Option<(f32, f32, f32, f32)> {
+            app.world_mut()
+                .query::<(&MenuStackWindow, &Node)>()
+                .iter(app.world())
+                .filter(|(window, node)| window.slot == 1 && node.display != Display::None)
+                .map(
+                    |(_, node)| match (node.left, node.top, node.width, node.height) {
+                        (Val::Px(l), Val::Px(t), Val::Px(w), Val::Px(h)) => (l, t, w, h),
+                        _ => panic!("a collapsing box keeps pixelled axes"),
+                    },
+                )
+                .next()
+        };
+        let before = hub_box(&mut app).expect("the hub paints its full box while open");
+        assert_eq!((before.2, before.3), (366.0, 57.0));
+
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.pop();
+        }
+
+        // Frame one of the collapse: chrome only - caption cleared, rows hidden with it.
+        app.update();
+        let first = hub_box(&mut app).expect("the released box keeps painting");
+        assert!(
+            first.2 < before.2 && first.3 < before.3,
+            "both axes started moving"
+        );
+        {
+            let title_text = app
+                .world_mut()
+                .query::<(&MenuStackWindowTitle, &Text)>()
+                .iter(app.world())
+                .filter(|(title, _)| title.window == 1)
+                .map(|(_, text)| text.as_str().to_string())
+                .next()
+                .expect("the hub owns a caption node");
+            assert!(
+                title_text.is_empty(),
+                "text is removed at the start of a close"
+            );
+            let visible_rows = app
+                .world_mut()
+                .query::<(&MenuStackWindowRow, &Node)>()
+                .iter(app.world())
+                .filter(|(row, node)| row.window == 1 && node.display != Display::None)
+                .count();
+            assert_eq!(visible_rows, 0, "no row rides out the collapse");
+        }
+
+        // Every frame: strictly smaller, same center; gone by the period.
+        let center = (before.0 + before.2 / 2.0, before.1 + before.3 / 2.0);
+        let mut previous = first;
+        for _ in 1..crate::hud::menu_anim::MENU_SQUEEZE_FRAMES {
+            app.update();
+            match hub_box(&mut app) {
+                Some(box_now) => {
+                    assert!(
+                        box_now.2 < previous.2 && box_now.3 < previous.3,
+                        "each axis keeps its own distance-to-zero speed"
+                    );
+                    assert!((box_now.0 + box_now.2 / 2.0 - center.0).abs() < 0.5);
+                    assert!((box_now.1 + box_now.3 / 2.0 - center.1).abs() < 0.5);
+                    previous = box_now;
+                }
+                None => break,
+            }
+        }
+        app.update();
+        assert!(
+            hub_box(&mut app).is_none(),
+            "hidden within the squeeze period"
+        );
+    }
+
+    /// The same function draws a menu (owner ruling 2026-10-22): a shape the session already knows
+    /// in pixels grows from its center to full over the same period - and only box and background
+    /// paint until it lands, caption and rows written on the final frame.
+    #[test]
+    fn remembered_shapes_grow_from_their_center_with_text_written_last() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::QuestList {
+            completed: false,
+            region: 0,
+        });
+        let mut app = stack_app(stack, &[]);
+        for _ in 0..2 {
+            app.update();
+        }
+        let surface_entities: Vec<bevy::ecs::entity::Entity> = app
+            .world_mut()
+            .query::<bevy::ecs::entity::Entity>()
+            .iter(app.world())
+            .filter(|entity| {
+                app.world().get::<MenuStackWindow>(*entity).is_some()
+                    || app.world().get::<MainMenuPane>(*entity).is_some()
+            })
+            .collect();
+        for entity in surface_entities {
+            app.world_mut()
+                .get_mut::<ComputedNode>(entity)
+                .expect("framed surfaces carry a computed node")
+                .size = Vec2::new(300.0, 57.0);
+        }
+        for _ in 1..PIN_SETTLE_FRAMES {
+            app.update();
+        }
+        app.update(); // pin earned and remembered.
+
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.pop();
+        }
+        for _ in 0..crate::hud::menu_anim::MENU_SQUEEZE_FRAMES {
+            app.update(); // run the collapse out to a free surface.
+        }
+
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.push(MenuKind::QuestList {
+                completed: false,
+                region: 0,
+            });
+        }
+        {
+            let InputMode::Menu(live) = app.world().resource::<InputMode>() else {
+                unreachable!()
+            };
+            let kinds: Vec<MenuKind> = live.levels.iter().map(|l| l.kind).collect();
+            app.world_mut().resource_mut::<DynamicMenu>().built_windows = Some(kinds);
+        }
+
+        let hub_box = |app: &mut App| -> Option<(f32, f32, f32, f32)> {
+            app.world_mut()
+                .query::<(&MenuStackWindow, &Node)>()
+                .iter(app.world())
+                .filter(|(window, node)| window.slot == 1 && node.display != Display::None)
+                .map(
+                    |(_, node)| match (node.left, node.top, node.width, node.height) {
+                        (Val::Px(l), Val::Px(t), Val::Px(w), Val::Px(h)) => (l, t, w, h),
+                        _ => panic!("a growing box keeps pixelled axes"),
+                    },
+                )
+                .next()
+        };
+
+        // Frame one: the remembered box grows in from 1/5 of full - never shown whole first.
+        app.update();
+        let grown = hub_box(&mut app).expect("the remembered shape appears at once");
+        assert!(
+            grown.2 > 0.0 && grown.2 < 366.0,
+            "growing from a fraction of full"
+        );
+        assert!(grown.3 > 0.0 && grown.3 < 57.0);
+        let center = (16.0 + 366.0 / 2.0, 48.0 + 57.0 / 2.0); // the record seat's own center.
+        for _ in 1..crate::hud::menu_anim::MENU_SQUEEZE_FRAMES - 1 {
+            app.update();
+            let box_now = hub_box(&mut app).expect("still growing");
+            assert!(box_now.2 > grown.2 && box_now.3 > grown.3);
+            assert!((box_now.0 + box_now.2 / 2.0 - center.0).abs() < 0.5);
+        }
+        // Chrome-only while it grows: the caption stays blank until full size lands.
+        let title_text = app
+            .world_mut()
+            .query::<(&MenuStackWindowTitle, &Text)>()
+            .iter(app.world())
+            .filter(|(title, _)| title.window == 1)
+            .map(|(_, text)| text.as_str().to_string())
+            .next()
+            .expect("caption node exists");
+        assert!(
+            title_text.is_empty(),
+            "words wait for the box: nothing crawls on moving chrome"
+        );
+
+        // The landing frame: exact full pixel shape again, and the caption written at last.
+        app.update();
+        let landed = hub_box(&mut app).expect("grown to full within the period");
+        assert_eq!((landed.0, landed.1), (16.0, 48.0));
+        assert_eq!((landed.2, landed.3), (366.0, 57.0));
+        let title_text = app
+            .world_mut()
+            .query::<(&MenuStackWindowTitle, &Text)>()
+            .iter(app.world())
+            .filter(|(title, _)| title.window == 1)
+            .map(|(_, text)| text.as_str().to_string())
+            .next()
+            .expect("caption node exists");
+        assert!(
+            !title_text.is_empty(),
+            "text is written at the end of an open"
         );
     }
 

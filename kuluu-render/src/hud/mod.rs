@@ -263,6 +263,9 @@ impl Plugin for HudPlugin {
         app.init_resource::<menu::DynamicMenu>();
         app.init_resource::<menu::MagicSchoolTable>();
         app.init_resource::<menu::ConfigDatRows>();
+        // ur/139: which level stands on which pooled surface, shared between the draw pass and
+        // row hit routing (a shared seat relabels in place instead of opening a second box).
+        app.init_resource::<menu::PooledSeats>();
         app.init_resource::<dock::DockBoard>();
         app.init_resource::<menu::CommandSelectorCaptions>();
         app.init_resource::<menu::EquipRecords>();
@@ -578,8 +581,9 @@ impl Plugin for HudPlugin {
             (
                 party_frame::party_row_click_system,
                 party_frame::ui_settings_click_system,
-                menu::menu_mouse_hover_system,
-                menu::menu_mouse_click_system,
+                // ur/139: routes clicks through the seat table, so it reads it current.
+                menu::menu_mouse_hover_system.after(menu::update_menu_stack_windows),
+                menu::menu_mouse_click_system.after(menu::update_menu_stack_windows),
                 item_screen::item_row_mouse_hover_system,
                 item_screen::item_row_mouse_click_system,
                 item_screen::sort_option_mouse_system,

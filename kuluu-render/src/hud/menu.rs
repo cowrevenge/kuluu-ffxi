@@ -5179,6 +5179,56 @@ pub struct MenuStackWindowScrollThumb {
 /// oldest stay open undrawn.
 pub const MAX_STACKED_WINDOWS: usize = 8;
 
+/// The rectangle a pooled surface stands on, rounded to whole pixels. Two record frames with
+/// equal keys are the same seat: quest00's hub and its lists, `miss00`'s log, detail and text,
+/// and every pinned-left fallback share one key by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SeatKey {
+    x: i32,
+    y: i32,
+    w: i32,
+    anchor: u8,
+}
+
+fn seat_key(frame: &RecordFrame) -> SeatKey {
+    SeatKey {
+        x: frame.x.round() as i32,
+        y: frame.y.round() as i32,
+        w: frame.width.round() as i32,
+        anchor: frame.anchor,
+    }
+}
+
+/// ur/139 seat-keyed pool identity (owner: "two menus pop when you click... find the duplicate
+/// menu opening code"): a pooled surface belongs to the RECT it last drew, not to a stack index.
+/// When one window replaces another at an identical frame record - quest00 hub then list,
+/// `miss00` log then detail then text, any same-seated pair including pinned fallbacks before
+/// DAT records load - they share ONE surface and relabel it in place: there is never a closing
+/// box standing on top of an opening one at the same seat. Click routing reads the live table.
+#[derive(bevy::prelude::Resource)]
+pub struct PooledSeats {
+    level_of_slot: Vec<Option<usize>>,
+    seat_of_slot: Vec<Option<SeatKey>>,
+    kind_of_slot: Vec<Option<MenuKind>>,
+}
+
+impl Default for PooledSeats {
+    fn default() -> Self {
+        Self {
+            level_of_slot: vec![None; MAX_STACKED_WINDOWS],
+            seat_of_slot: vec![None; MAX_STACKED_WINDOWS],
+            kind_of_slot: vec![None; MAX_STACKED_WINDOWS],
+        }
+    }
+}
+
+impl PooledSeats {
+    /// The stack level currently drawn by a pooled surface, for row hit routing.
+    pub(crate) fn level_at(&self, slot: usize) -> Option<usize> {
+        self.level_of_slot.get(slot).copied().flatten()
+    }
+}
+
 /// The mission log's size limit (ur/64: "w/ scroll, has size limit") — retail's
 /// `miss00` frames six rows and hands the rest to the right-edge bar. Pins are
 /// lines counted, not measured.
@@ -9506,6 +9556,8 @@ pub(crate) fn update_menu_stack_windows(
     dynamic: Res<DynamicMenu>,
     config_rows: Res<ConfigDatRows>,
     dock: Option<Res<crate::hud::dock::DockBoard>>,
+    // Which level stands on which pooled surface (ur/139); click routing reads the same table.
+    mut seats: ResMut<PooledSeats>,
     #[allow(clippy::type_complexity)] mut window_q: Query<
         (&MenuStackWindow, &mut Node, &mut ZIndex, &ComputedNode),
         (Without<MenuStackWindowArrow>, Without<MainMenuPane>),
@@ -9571,11 +9623,14 @@ pub(crate) fn update_menu_stack_windows(
         start: usize,
         visible: usize,
     }
-    // ur/102 identity law: pooled surface slot N draws stack level N for the
-    // level's whole lifetime - allocation by IDENTITY, not by draw order. Ordering
-    // was re-mapping surfaces every time a chain grew or shrank, which is how an
-    // unrelated left-side open restyled right-column windows wholesale (ur/94-101).
-    let shown: Vec<Option<Shown>> = match &*mode {
+    // ur/139 seat-keyed pool identity (owner: "two menus pop when you click... find the duplicate
+    // menu opening code"). A pooled surface belongs to the RECT it last drew, not to a stack index.
+    // Occupants are built in layout order and merged onto ONE entry per seat key: quest00's hub and
+    // its lists, `miss00`'s log/detail/text, and the pinned fallbacks share a seat by construction,
+    // so they become one box relabelled in place instead of two surfaces drawing over each other -
+    // or, once records load, a closing box standing exactly where its replacement opens.
+    let mut status_flow_open = false;
+    let occupants: Vec<Shown> = match &*mode {
         InputMode::Menu(stack) => {
             // ur/94-98: under a covered child the pool draws that focused framed
             // child too - it is one window of the stack like any other. The
@@ -9584,22 +9639,18 @@ pub(crate) fn update_menu_stack_windows(
             let focus_index = layout.focused().map(|(index, _)| index);
 
             let records = layout.pool_windows();
-            // While the Status flow is open nothing else on the stack may be seen — retail
+            // While the Status flow is open nothing else on the stack may be seen - retail
             // hides it under statcom2 at the Commands spot (owner ruling 2026-10-19: "that
             // menu should not be seen... IT will be hidden"), and kuluu now hides it in code.
             // The stack itself is untouched, so Esc returns to it with its cursor.
-            let status_flow_open = stack.levels.iter().any(|level| {
+            status_flow_open = stack.levels.iter().any(|level| {
                 matches!(level.kind, MenuKind::Status | MenuKind::StatusDetail { .. })
             });
-            let mut shown: Vec<Option<Shown>> = (0..MAX_STACKED_WINDOWS).map(|_| None).collect();
+            let mut ordered: Vec<Shown> = Vec::new();
             for &(stack_index, frame) in &records {
-                // The pool has one surface per stack position; the deepest chain ever
-                // drawn is ~5 levels against MAX_STACKED_WINDOWS=8 surfaces, so a level
-                // past the pool can't happen - if chains ever grow, deeper ones stay
-                // undrawn until the pool grows with them (never re-map older slots).
-                let Some(slot) = shown.get_mut(stack_index) else {
-                    continue;
-                };
+                // The deepest chain ever drawn is ~5 levels against
+                // MAX_STACKED_WINDOWS=8 surfaces; a level past the pool simply stays
+                // undrawn until the pool grows with it.
                 let Some(level) = stack.levels.get(stack_index) else {
                     continue;
                 };
@@ -9621,7 +9672,7 @@ pub(crate) fn update_menu_stack_windows(
                 };
                 let count = rows_entry_count(level.kind, rows, settings.dlss_supported);
                 let (total, start) = viewport_over(level.kind, level.cursor, count);
-                *slot = Some(Shown {
+                ordered.push(Shown {
                     stack_index,
                     focused: focused_entry,
                     frame,
@@ -9632,11 +9683,94 @@ pub(crate) fn update_menu_stack_windows(
                     visible: visible_window(level.kind, total),
                 });
             }
-            shown
+            // One box per seat. `pool_windows` walks the stack ascending, so a repeat key is
+            // always the deeper window arriving on top of the shallower one it covers.
+            let mut merged: Vec<Shown> = Vec::with_capacity(ordered.len());
+            for occ in ordered {
+                match merged
+                    .iter()
+                    .position(|older| seat_key(&older.frame) == seat_key(&occ.frame))
+                {
+                    Some(at) => merged[at] = occ,
+                    None => merged.push(occ),
+                }
+            }
+            merged
         }
         _ => Vec::new(),
     };
-    // A surface's occupant, by identity: `window` slot == stack index (ur/102).
+
+    // Allocation by SEAT, remembering where each surface sat in `PooledSeats` (ur/139):
+    //   1. a surface seated on this key holding this very level - the window kept its box;
+    //   2. else any free surface seated on this key - an in-place relabel, the fix itself: one
+    //      chrome standing on the shared seat, only its words and rows changing hands, so there is
+    //      never a close/open pair on it (ur/77's "JUST UPDATE");
+    //   3. else the stack index, exactly as the ur/102 identity law allocated fresh states;
+    //   4. else any free surface. Past that the occupant goes undrawn.
+    // Vacant surfaces KEEP their seat and kind: that memory is what closes the one-frame hole where
+    // nothing drew between a window going away and its replacement appearing (ur/138).
+    let prev_level_of_slot = seats.level_of_slot.clone();
+    let prev_seat_of_slot = seats.seat_of_slot.clone();
+    let mut shown: Vec<Option<Shown>> = (0..MAX_STACKED_WINDOWS).map(|_| None).collect();
+    // A surface that changed hands this frame. Its words belong to the outgoing window, so its
+    // rows and caption are blanked instead of frozen until `fresh` writes the new ones - the box
+    // stands first and no other menu's label ever appears on it (ur/103 order-of-operations law).
+    let mut relabelled: Vec<bool> = vec![false; MAX_STACKED_WINDOWS];
+    let mut used_slot = [false; MAX_STACKED_WINDOWS];
+    let mut slot_of: Vec<Option<usize>> = vec![None; occupants.len()];
+    for pass in 0..2 {
+        for (i, occ) in occupants.iter().enumerate() {
+            if slot_of[i].is_some() {
+                continue;
+            }
+            let key = seat_key(&occ.frame);
+            let found = prev_seat_of_slot
+                .iter()
+                .enumerate()
+                .find(|(at, seated)| {
+                    !used_slot[*at]
+                        && **seated == Some(key)
+                        && (pass == 1
+                            || prev_level_of_slot.get(*at).copied().flatten()
+                                == Some(occ.stack_index))
+                })
+                .map(|(at, _)| at);
+            if let Some(at) = found {
+                used_slot[at] = true;
+                slot_of[i] = Some(at);
+            }
+        }
+    }
+    for (i, occ) in occupants.iter().enumerate() {
+        if slot_of[i].is_some() {
+            continue;
+        }
+        let at = occ.stack_index;
+        if at < MAX_STACKED_WINDOWS && !used_slot[at] {
+            used_slot[at] = true;
+            slot_of[i] = Some(at);
+        }
+    }
+    for i in 0..occupants.len() {
+        if slot_of[i].is_some() {
+            continue;
+        }
+        if let Some(at) = used_slot.iter().position(|used| !*used) {
+            used_slot[at] = true;
+            slot_of[i] = Some(at);
+        }
+    }
+    for (i, occ) in occupants.into_iter().enumerate() {
+        let Some(at) = slot_of[i] else { continue };
+        // Changed hands means the surface had an OWNER and it was somebody else: a first sighting
+        // stays a first sighting (draws plain, measures, learns - ur/105).
+        relabelled[at] = matches!(
+            prev_level_of_slot.get(at).copied().flatten(),
+            Some(prev) if prev != occ.stack_index
+        );
+        shown[at] = Some(occ);
+    }
+    // A surface's occupant, by seat: `PooledSeats` says which level each one draws this frame.
     let open_of = |window: usize| shown.get(window).and_then(|entry| entry.as_ref());
 
     if pins.len() < MAX_STACKED_WINDOWS {
@@ -9654,10 +9788,25 @@ pub(crate) fn update_menu_stack_windows(
         // to the same place is instant and never grows its box back; an opening orphaned by a fast
         // close collapses from its own full box instead of vanishing.
         let mut fx = *fxs.get(window.slot).unwrap_or(&WindowFx::Idle);
+        // A box that changed hands mid-animation is one window relabelled (ur/139): the in-flight
+        // squeeze belongs to the outgoing shape, so stand it full at once and let the incoming
+        // occupant draw complete chrome instead of morphing through another window's geometry.
+        if open.is_some() && relabelled.get(window.slot).copied().unwrap_or(false) {
+            fx = WindowFx::Idle;
+        }
+        // The Status flow hides its windows outright (ur/138): collapsing Commands-era surfaces in
+        // place is what painted ghost boxes over the seat a survivor already held. Entering and
+        // leaving statcom both count; an ordinary Esc pop of any other window keeps its squeeze.
+        let hidden_by_statcom = open.is_none()
+            && (status_flow_open
+                || matches!(
+                    seats.kind_of_slot.get(window.slot).copied().flatten(),
+                    Some(MenuKind::Status) | Some(MenuKind::StatusDetail { .. })
+                ));
         if open.is_some() && matches!(fx, WindowFx::Closing { .. }) {
             fx = WindowFx::Idle;
         }
-        if open.is_none() {
+        if open.is_none() && !hidden_by_statcom {
             if let WindowFx::Opening { full, .. } = fx {
                 fx = WindowFx::closing(full);
             }
@@ -9667,6 +9816,19 @@ pub(crate) fn update_menu_stack_windows(
         // every earlier frame - owner 2026-10-22: "ONLY render the box and the background").
         // A squeeze that finished this tick must not arm a new one over its stale shrunken fields:
         // arming is for surfaces that sat idle when the frame began.
+        // A seat that changed hands must adopt the incoming shape's own remembered height rather
+        // than measure through another window's box: park what this surface had learned (the
+        // outgoing occupant's px) and clear its state so `adopt` answers for the new kind on frame
+        // one. That is what lets a parent return under its own list at full size with no measuring
+        // frames in between (ur/139).
+        if open.is_some() && relabelled.get(window.slot).copied().unwrap_or(false) {
+            if let Some(pin_slot) = pins.get_mut(window.slot) {
+                if let Some(pin) = pin_slot.pin {
+                    remember_height(&mut heights, pin);
+                }
+                *pin_slot = PinState::default();
+            }
+        }
         let rested = matches!(fx, WindowFx::Idle);
         let mut animated = fx.tick();
         if let Some(pin_slot) = pins.get_mut(window.slot) {
@@ -9724,6 +9886,16 @@ pub(crate) fn update_menu_stack_windows(
                         board.surface_height,
                     );
                 }
+                // A relabelled box must not spend its first frame measuring the incoming content
+                // short (ur/139, "drawing boxes that are too small on frame one"): with no pin to
+                // answer for the new shape yet, assert the record's own height.
+                if relabelled.get(window.slot).copied().unwrap_or(false)
+                    && matches!(want.height, Val::Auto)
+                {
+                    if let Some(px) = open.frame.height.filter(|px| *px > 0.0) {
+                        want.height = Val::Px(px);
+                    }
+                }
                 // ur/104 (owner): a window shows NO part of itself before its rows exist - on
                 // frames where this surface is newly appearing and the stamp differs, chrome
                 // stays hidden too. Placement and pins above have already stood it at its final
@@ -9745,7 +9917,7 @@ pub(crate) fn update_menu_stack_windows(
         // first sighting of a shape (height still `Auto`) draws plain and learns, as before.
         if rested && matches!(fx, WindowFx::Idle) {
             let opening = open.is_some() && !shown_before && fresh;
-            let collapsing = open.is_none() && shown_before;
+            let collapsing = open.is_none() && shown_before && !hidden_by_statcom;
             // A collapse captures whatever box was last on screen - even an unsettled `Auto`
             // height (dismissal must animate every standing window, not just pinned ones). An
             // opening still requires the asserted px, or grow would lead unmeasured content.
@@ -9792,6 +9964,13 @@ pub(crate) fn update_menu_stack_windows(
             Some(crate::hud::menu_anim::WindowFx::Opening { .. })
         )
     };
+    // A surface that changed hands this frame wears its new occupant's chrome while its rows are
+    // still being built (ur/139). The words on it belong to the window that just left, so they are
+    // blanked for those frames - never frozen, which is exactly what looked like another menu's
+    // labels being written into this box. Same law as the chrome-only grow-in above.
+    let relabel_holding_words = |slot: usize| {
+        !fresh && relabelled.get(slot).copied().unwrap_or(false)
+    };
 
     for (title, mut text) in title_q.iter_mut() {
         let Some(open) = open_of(title.window) else {
@@ -9802,6 +9981,13 @@ pub(crate) fn update_menu_stack_windows(
             }
             continue;
         };
+        if relabel_holding_words(title.window) {
+            // Blank rather than carry the outgoing window's word onto the incoming one's box.
+            if !text.is_empty() {
+                **text = String::new();
+            }
+            continue;
+        }
         // During the grow-in the caption stays blank - whatever word sat here was cleared while
         // the surface was free, and it lands with the rows on the frame full size arrives.
         if fresh && !growing(title.window) {
@@ -9824,6 +10010,14 @@ pub(crate) fn update_menu_stack_windows(
         };
         if growing(row.window) {
             // Chrome-only grow-in frame (the law above the passes): stay hidden, no words crawl.
+            if node.display != Display::None {
+                node.display = Display::None;
+            }
+            continue;
+        }
+        if relabel_holding_words(row.window) {
+            // The box is this seat's new owner's; its rows are not built yet, so the old
+            // occupant's labels come off rather than freeze in place (ur/139).
             if node.display != Display::None {
                 node.display = Display::None;
             }
@@ -9875,7 +10069,8 @@ pub(crate) fn update_menu_stack_windows(
     for (arrow, mut node) in arrow_q.iter_mut() {
         let want = open_of(arrow.window)
             .is_some_and(|open| matches!(open.level.kind, MenuKind::MissionDetail { .. }))
-            && !growing(arrow.window);
+            && !growing(arrow.window)
+            && !relabel_holding_words(arrow.window);
         let want = if want { Display::Flex } else { Display::None };
         if node.display != want {
             node.display = want;
@@ -9887,7 +10082,7 @@ pub(crate) fn update_menu_stack_windows(
     // inside the chrome on the right edge at spawn, top to bottom of the fill.
     let scroll_page = |window: usize| -> Option<(usize, usize, usize)> {
         open_of(window)
-            .filter(|_| !growing(window))
+            .filter(|_| !growing(window) && !relabel_holding_words(window))
             .and_then(|open| {
                 matches!(open.level.kind, MenuKind::MissionDetail { .. })
                     .then_some((open.start, open.total, open.visible))
@@ -9932,6 +10127,30 @@ pub(crate) fn update_menu_stack_windows(
             if node.height != want_height {
                 node.height = want_height;
             }
+        }
+    }
+
+    // Publish who sits where, for this system's own next frame and for row hit routing
+    // (`stack_pool_hit`): after a relabel a surface's level is no longer its slot number.
+    // Vacant surfaces keep their seat and kind memory (see the allocation law above).
+    if seats.level_of_slot.len() < MAX_STACKED_WINDOWS {
+        seats.level_of_slot.resize(MAX_STACKED_WINDOWS, None);
+    }
+    if seats.seat_of_slot.len() < MAX_STACKED_WINDOWS {
+        seats.seat_of_slot.resize(MAX_STACKED_WINDOWS, None);
+    }
+    if seats.kind_of_slot.len() < MAX_STACKED_WINDOWS {
+        seats.kind_of_slot.resize(MAX_STACKED_WINDOWS, None);
+    }
+    for at in 0..MAX_STACKED_WINDOWS {
+        match shown.get(at).and_then(|entry| entry.as_ref()) {
+            Some(occ) => {
+                seats.level_of_slot[at] = Some(occ.stack_index);
+                seats.seat_of_slot[at] = Some(seat_key(&occ.frame));
+                seats.kind_of_slot[at] = Some(occ.level.kind);
+            }
+            None if at < seats.level_of_slot.len() => seats.level_of_slot[at] = None,
+            None => {}
         }
     }
 }
@@ -11284,19 +11503,21 @@ fn stack_pool_hit(
     stack: &MenuStack,
     frames: &ConfigDatRows,
     dynamic: &DynamicMenu,
+    seats: &PooledSeats,
     window: usize,
 ) -> Option<(usize, usize)> {
     let layout = menu_stack_layout(stack, frames);
     if !layout.covered_child() {
         return None;
     }
-    // ur/102 identity law: surface slot == stack index (see the same allocation in
-    // `update_menu_stack_windows`), so a pooled row answers only on the focused
-    // child's own surface - no slot re-lookup, and depth changes can't re-map it.
+    // ur/139 seat-keyed pool identity: the surface that DRAWS the focused level is whatever
+    // `update_menu_stack_windows` seated there this frame (a shared seat relabels in place, so a
+    // surface's level stopped being its slot number). Only rows on that one surface answer; every
+    // other pooled surface stays inert as it always was.
     let Some((focus_index, _seat)) = layout.focused() else {
         return None;
     };
-    if window != focus_index {
+    if seats.level_at(window) != Some(focus_index) {
         return None;
     }
     let Some(level) = stack.levels.get(focus_index) else {
@@ -11315,6 +11536,7 @@ pub fn menu_mouse_hover_system(
     settings: Res<GraphicsSettings>,
     dynamic: Res<DynamicMenu>,
     config_rows: Option<Res<ConfigDatRows>>,
+    seats: Res<PooledSeats>,
     rows: Query<(&Interaction, &MainMenuRow), Changed<Interaction>>,
     pool_q: Query<(&Interaction, &MenuStackWindowRow), Changed<Interaction>>,
 ) {
@@ -11363,7 +11585,8 @@ pub fn menu_mouse_hover_system(
         let Some(frames) = config_rows.as_deref() else {
             continue;
         };
-        let Some((level, viewport_start)) = stack_pool_hit(stack, frames, &dynamic, row.window)
+        let Some((level, viewport_start)) =
+            stack_pool_hit(stack, frames, &dynamic, &seats, row.window)
         else {
             continue;
         };
@@ -11391,6 +11614,7 @@ pub fn menu_mouse_click_system(
     settings: Res<GraphicsSettings>,
     dynamic: Res<DynamicMenu>,
     config_rows: Option<Res<ConfigDatRows>>,
+    seats: Res<PooledSeats>,
     rows: Query<(&Interaction, &MainMenuRow), Changed<Interaction>>,
     pool_q: Query<(&Interaction, &MenuStackWindowRow), Changed<Interaction>>,
     mut out: MessageWriter<MenuRowActivated>,
@@ -11433,7 +11657,7 @@ pub fn menu_mouse_click_system(
             continue;
         };
         let Some((level_index, viewport_start)) =
-            stack_pool_hit(stack, frames, &dynamic, row.window)
+            stack_pool_hit(stack, frames, &dynamic, &seats, row.window)
         else {
             continue;
         };
@@ -11959,7 +12183,8 @@ mod tests {
             .init_resource::<NetStatusVisible>()
             .init_resource::<SceneState>()
             .init_resource::<DynamicMenu>()
-            .init_resource::<ConfigDatRows>();
+            .init_resource::<ConfigDatRows>()
+            .init_resource::<PooledSeats>();
         #[cfg(not(target_arch = "wasm32"))]
         app.init_resource::<crate::audio::AudioMuteState>();
 
@@ -12196,7 +12421,8 @@ mod tests {
             .init_resource::<NetStatusVisible>()
             .init_resource::<SceneState>()
             .init_resource::<DynamicMenu>()
-            .init_resource::<ConfigDatRows>();
+            .init_resource::<ConfigDatRows>()
+            .init_resource::<PooledSeats>();
         #[cfg(not(target_arch = "wasm32"))]
         app.init_resource::<crate::audio::AudioMuteState>();
         let mut stack = MenuStack::root();
@@ -12329,7 +12555,8 @@ mod tests {
             .init_resource::<NetStatusVisible>()
             .init_resource::<SceneState>()
             .init_resource::<DynamicMenu>()
-            .init_resource::<ConfigDatRows>();
+            .init_resource::<ConfigDatRows>()
+            .init_resource::<PooledSeats>();
         #[cfg(not(target_arch = "wasm32"))]
         app.init_resource::<crate::audio::AudioMuteState>();
         let job_idx = crate::hud::status_panel::STATUS_ENTRIES
@@ -12429,7 +12656,8 @@ mod tests {
                 .init_resource::<NetStatusVisible>()
                 .init_resource::<SceneState>()
                 .init_resource::<DynamicMenu>()
-                .init_resource::<ConfigDatRows>();
+                .init_resource::<ConfigDatRows>()
+                .init_resource::<PooledSeats>();
             #[cfg(not(target_arch = "wasm32"))]
             app.init_resource::<crate::audio::AudioMuteState>();
             let entry = crate::hud::status_panel::STATUS_ENTRIES
@@ -13490,6 +13718,7 @@ mod tests {
             .init_resource::<crate::hud::item_screen::ItemScreenContainer>()
             .init_resource::<MagicSchoolTable>()
             .init_resource::<ConfigDatRows>()
+            .init_resource::<PooledSeats>()
             .init_resource::<CommandSelectorCaptions>()
             .init_resource::<EquipRecords>()
             .init_resource::<crate::keybinds::Bindings>()
@@ -18018,19 +18247,27 @@ mod tests {
         assert_eq!(arrows_shown(&mut app), 0, "the selector shows none either");
     }
 
-    /// ur/102 fence: pooled surfaces are allocated by identity (slot == stack
-    /// index) for the level's whole lifetime - growing or shrinking a chain never
-    /// re-maps them. That re-map was the root of the right-column churn owners
-    /// photographed through ur/94-101.
+    /// ur/102 fence, amended by ur/139: pooled surfaces are allocated by SEAT for
+    /// a window's whole lifetime - growing or shrinking a chain never re-maps them,
+    /// and two windows sharing one record frame (the quest hub and its filtered
+    /// lists are both `quest00`) share ONE box that relabels in place. Two surfaces
+    /// standing on the identical rect was the duplicate draw owners photographed as
+    /// "two menus pop when you click"; before this fence's amendment it also let a
+    /// same-seated pair close and open on top of each other.
     #[test]
-    fn pooled_surfaces_stay_on_their_stack_index_as_chains_grow_and_shrink() {
+    fn pooled_surfaces_stay_on_their_seat_as_chains_grow_and_shrink() {
         let mut stack = MenuStack::root();
         stack.push(MenuKind::QuestMenu);
         stack.push(MenuKind::QuestList {
             completed: false,
             region: 0,
         });
-        let mut app = stack_app(stack, &[]);
+        // `quest01` is a different frame from the pinned `quest00` seat, so the detail
+        // stage exercises multi-seat allocation.
+        let mut app = stack_app(
+            stack,
+            &[("quest01", (40, 120, 300, 150), FRAME_ANCHOR_NONE)],
+        );
         app.update();
         let surfaces = |app: &mut App| -> Vec<(usize, bevy::ecs::entity::Entity)> {
             let mut got: Vec<(usize, bevy::ecs::entity::Entity)> = app
@@ -18045,19 +18282,22 @@ mod tests {
         };
 
         let before = surfaces(&mut app);
-        assert_eq!(before.len(), 2, "the hub and its list each own a surface");
-        assert_eq!(before[0].0, 1, "the hub rides slot 1 - its stack index");
-        assert_eq!(before[1].0, 2, "the list rides slot 2 - its stack index");
+        assert_eq!(
+            before.len(),
+            1,
+            "the hub and its list share quest00's seat, so they share one box (ur/139)"
+        );
+        let shared_seat = before[0];
 
         if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
             live.pop();
         }
         app.update();
         let after = surfaces(&mut app);
-        assert_eq!(after.len(), 1, "only the hub's own surface remains");
+        assert_eq!(after.len(), 1, "the hub keeps that one box when its list closes");
         assert_eq!(
-            after[0], before[0],
-            "same slot, same entities - never re-mapped by depth"
+            after[0], shared_seat,
+            "same slot, same entity - the seat is handed back in place, never reopened"
         );
 
         if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
@@ -18068,11 +18308,37 @@ mod tests {
         }
         app.update();
         let grown = surfaces(&mut app);
-        assert_eq!(grown.len(), 2, "the chain grew back");
+        assert_eq!(grown.len(), 1, "the list returns onto the hub's box, not beside it");
         assert_eq!(
-            (grown[1].0, grown[0]),
-            (2, before[0]),
-            "the reopened level takes slot 2; the hub's surface never moved"
+            grown[0], shared_seat,
+            "never re-mapped by depth: one seat keeps one surface"
+        );
+
+        // A window at its OWN frame is a second seat and gets a fresh surface; the shared box
+        // under it stays put on its own entity.
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.push(MenuKind::QuestDetail { log: 1, id: 7 });
+        }
+        app.update();
+        let with_detail = surfaces(&mut app);
+        assert_eq!(with_detail.len(), 2, "the detail draws at its own quest01 frame");
+        assert_eq!(
+            with_detail[0], shared_seat,
+            "the list's box never moved when the detail opened"
+        );
+        assert_eq!(
+            with_detail[1].0, 3,
+            "an arrival on a new seat takes its stack index, as ur/102 allocated it"
+        );
+
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.pop();
+        }
+        app.update();
+        assert_eq!(
+            surfaces(&mut app),
+            [shared_seat],
+            "closing the detail leaves the shared seat exactly where it stands"
         );
     }
 
@@ -19074,14 +19340,14 @@ mod tests {
         sweep(&root, vec![MenuKind::RoomList]);
     }
 
-    /// Debug round 2026-10-23 transition census: settle a chain, then swap the
-    /// whole `InputMode` the way dispatch's `*mode = next` does mid-session and
-    /// print EVERY frame of the handoff - visible boxes (pane / each pool slot /
-    /// detail) with their seats and first rows. A box that shows up at a seat it
-    /// never held, or two boxes painting one window during the swap, is the flash
-    /// the owner captures as "two menus pop".
+    /// ur/139 fence (owner: "two menus pop when you click... find the duplicate menu opening
+    /// code"): settle a chain, swap the whole `InputMode` the way dispatch's `*mode = next` does
+    /// mid-session, and judge EVERY frame of the handoff (each one also prints its boxes, seats
+    /// and first rows as evidence). Law: exactly one box stands on a seat, and a box that survives
+    /// the hand-off draws on every frame between - never a close/open pair, never a hole. Runs on
+    /// the install's real record frames and on the pinned fallbacks (no records loaded).
     #[test]
-    fn transition_frames_expose_any_second_box_painting() {
+    fn no_transition_frame_draws_two_boxes_on_one_seat_or_a_hole() {
         use bevy::ecs::system::RunSystemOnce;
         let Some(root) = ffxi_dat::archive::open_test_install() else {
             eprintln!("no install: transition census skipped");
@@ -19089,7 +19355,13 @@ mod tests {
         };
         let root = std::sync::Arc::new(root);
 
-        fn build_app(root: &std::sync::Arc<ffxi_dat::DatRoot>, chain: &[MenuKind]) -> App {
+        /// `records: false` stands in for the frames before a DAT read lands, when every
+        /// quest/mission window seats on its pinned fallback (ur/139's duplicate condition).
+        fn build_app(
+            root: &std::sync::Arc<ffxi_dat::DatRoot>,
+            chain: &[MenuKind],
+            records: bool,
+        ) -> App {
             let mut app = stack_app(MenuStack::root(), &[]);
             // `stack_app` pre-marks the record table loaded (its fences seed it); undo
             // that so the refresh pass parses the real install like a live front end.
@@ -19098,6 +19370,10 @@ mod tests {
                 rows.loaded = false;
                 rows.frames.clear();
                 rows.frame_extents.clear();
+                if !records {
+                    // Loaded but empty: the pinned-left fallbacks seat everything.
+                    rows.loaded = true;
+                }
             }
             app.insert_resource(crate::dat_root::SharedDatRoot(Some(root.clone())));
             app.init_resource::<crate::hud::item_detail::SortKey>();
@@ -19221,10 +19497,29 @@ mod tests {
                 .collect()
         }
 
+        /// Every visible pooled box, as `(slot, seat)` where the seat is its own left/top.
+        fn pool_boxes(app: &mut App) -> Vec<(usize, String)> {
+            let mut boxes: Vec<(usize, String)> = app
+                .world_mut()
+                .query::<(&MenuStackWindow, &Node)>()
+                .iter(app.world())
+                .filter(|(_, node)| node.display != Display::None)
+                .map(|(window, node)| {
+                    (
+                        window.slot,
+                        format!("l{:?} t{:?}", node.left, node.top),
+                    )
+                })
+                .collect();
+            boxes.sort();
+            boxes
+        }
+
         fn transition(
             root: &std::sync::Arc<ffxi_dat::DatRoot>,
             from: &[MenuKind],
             to: &[MenuKind],
+            records: bool,
         ) {
             println!(
                 "== {} => {}",
@@ -19237,11 +19532,12 @@ mod tests {
                     .collect::<Vec<_>>()
                     .join(">")
             );
-            let mut app = build_app(root, from);
+            let mut app = build_app(root, from, records);
             for _ in 0..3 {
                 app.update();
             }
             println!("  settled: {:?}", frame_line(&mut app));
+            let from_boxes = pool_boxes(&mut app);
             {
                 let rows = app.world().resource::<ConfigDatRows>();
                 for name in ["quest00", "quest01", "miss00", "evitem"] {
@@ -19263,9 +19559,42 @@ mod tests {
                 println!("  layout: {:?}", menu_stack_layout(&stack, rows).windows);
             }
             app.insert_resource(InputMode::Menu(stack));
+            let mut per_frame: Vec<Vec<(usize, String)>> = Vec::new();
             for frame in 0..6 {
                 app.update();
-                println!("  f{frame}: {:?}", frame_line(&mut app));
+                let boxes = pool_boxes(&mut app);
+                println!("  f{frame}: {:?} | boxes {:?}", frame_line(&mut app), boxes);
+                // ur/139 law one: no two pooled surfaces ever stand on ONE seat. Two boxes on an
+                // identical rect is the duplicate draw (and its `>`-flicker, ghost chrome and
+                // stale-word bleed) owners photographed for eleven rounds.
+                let mut seen: Vec<&String> = boxes.iter().map(|(_, seat)| seat).collect();
+                seen.sort();
+                let distinct = {
+                    let mut s = seen.clone();
+                    s.dedup();
+                    s.len()
+                };
+                assert_eq!(
+                    distinct,
+                    seen.len(),
+                    "two boxes stand on one seat while {from:?} => {to:?} (records={records}): {boxes:?}"
+                );
+                per_frame.push(boxes);
+            }
+            // ur/139 law two: a box that survives the hand-off never blinks out. Any seat holding
+            // a box before and after keeps one on every frame between - the hole where nothing
+            // drew was half of the "closes then reopens" fizzle.
+            let final_seats: Vec<&String> = per_frame.last().expect("frames").iter().map(|b| &b.1).collect();
+            for (_, seat) in from_boxes {
+                if !final_seats.contains(&&seat) {
+                    continue;
+                }
+                for (frame, boxes) in per_frame.iter().enumerate() {
+                    assert!(
+                        boxes.iter().any(|(_, s)| *s == seat),
+                        "the box on {seat} blinked out at frame {frame} of {from:?} => {to:?} (records={records})"
+                    );
+                }
             }
         }
 
@@ -19279,33 +19608,49 @@ mod tests {
                 .expect("Currencies is a Status row"),
         )
         .unwrap();
-        transition(&root, &[], &[status]);
         let sd = MenuKind::StatusDetail { entry: cur_entry };
-        transition(&root, &[status], &[status, sd]);
-        transition(
-            &root,
-            &[],
-            &[MenuKind::MissionList],
-        );
-        transition(
-            &root,
-            &[MenuKind::MissionList],
-            &[
-                MenuKind::MissionList,
-                MenuKind::MissionDetail { log: 4, member: 0 },
-            ],
-        );
-        transition(
-            &root,
-            &[MenuKind::QuestMenu],
-            &[
-                MenuKind::QuestMenu,
-                MenuKind::QuestList {
-                    completed: false,
-                    region: 0,
-                },
-            ],
-        );
+        // Every transition runs twice: once on the install's real record frames, once with none
+        // loaded, where quest and mission windows all seat on their pinned fallback.
+        for records in [true, false] {
+            transition(&root, &[], &[status], records);
+            transition(&root, &[status], &[status, sd], records);
+            transition(&root, &[], &[MenuKind::MissionList], records);
+            transition(
+                &root,
+                &[MenuKind::MissionList],
+                &[
+                    MenuKind::MissionList,
+                    MenuKind::MissionDetail { log: 4, member: 0 },
+                ],
+                records,
+            );
+            transition(
+                &root,
+                &[MenuKind::QuestMenu],
+                &[
+                    MenuKind::QuestMenu,
+                    MenuKind::QuestList {
+                        completed: false,
+                        region: 0,
+                    },
+                ],
+                records,
+            );
+            // A hub handing its own box to a list and taking it back is the same-seat case
+            // at its purest, and where the close/open pair used to show.
+            transition(
+                &root,
+                &[
+                    MenuKind::QuestMenu,
+                    MenuKind::QuestList {
+                        completed: false,
+                        region: 0,
+                    },
+                ],
+                &[MenuKind::QuestMenu],
+                records,
+            );
+        }
     }
 
 
@@ -19587,6 +19932,7 @@ mod tests {
             .init_resource::<crate::hud::item_screen::ItemScreenContainer>()
             .init_resource::<MagicSchoolTable>()
             .init_resource::<ConfigDatRows>()
+            .init_resource::<PooledSeats>()
             .init_resource::<CommandSelectorCaptions>()
             .init_resource::<EquipRecords>()
             .init_resource::<crate::keybinds::Bindings>()
@@ -19795,6 +20141,7 @@ mod tests {
             .init_resource::<crate::hud::item_screen::ItemScreenContainer>()
             .init_resource::<MagicSchoolTable>()
             .init_resource::<ConfigDatRows>()
+            .init_resource::<PooledSeats>()
             .init_resource::<CommandSelectorCaptions>()
             .init_resource::<EquipRecords>()
             .init_resource::<crate::keybinds::Bindings>()
@@ -20393,6 +20740,7 @@ mod tests {
                 ..Default::default()
             })
             .init_resource::<ConfigDatRows>()
+            .init_resource::<PooledSeats>()
             .init_resource::<crate::hud::unity_fp::UnityFpDat>()
             .add_systems(Update, settle_opened_windows);
         app.update();
@@ -20441,6 +20789,7 @@ mod tests {
             .init_resource::<crate::hud::item_screen::ItemScreenContainer>()
             .init_resource::<MagicSchoolTable>()
             .init_resource::<ConfigDatRows>()
+            .init_resource::<PooledSeats>()
             .init_resource::<CommandSelectorCaptions>()
             .init_resource::<EquipRecords>()
             .init_resource::<crate::keybinds::Bindings>()
@@ -20619,6 +20968,7 @@ mod tests {
                 ..Default::default()
             })
             .add_message::<MenuRowActivated>()
+            .init_resource::<PooledSeats>()
             .add_systems(Update, (menu_mouse_hover_system, menu_mouse_click_system));
         let row = app
             .world_mut()
@@ -21112,7 +21462,8 @@ mod tests {
             .init_resource::<crate::hud::network_status::NetStatusVisible>()
             .init_resource::<SceneState>()
             .init_resource::<DynamicMenu>()
-            .init_resource::<ConfigDatRows>();
+            .init_resource::<ConfigDatRows>()
+            .init_resource::<PooledSeats>();
         #[cfg(not(target_arch = "wasm32"))]
         app.init_resource::<crate::audio::AudioMuteState>();
         let job_idx = crate::hud::status_panel::STATUS_ENTRIES
@@ -21282,6 +21633,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<DynamicMenu>()
             .init_resource::<ConfigDatRows>()
+            .init_resource::<PooledSeats>()
             .init_resource::<SceneState>();
         {
             let mut scene = app.world_mut().resource_mut::<SceneState>();

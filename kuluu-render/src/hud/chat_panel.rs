@@ -1240,6 +1240,7 @@ mod tests {
             .init_resource::<crate::hud::network_status::NetStatusVisible>()
             .init_resource::<DynamicMenu>()
             .init_resource::<ConfigDatRows>()
+            .init_resource::<crate::hud::menu::PooledSeats>()
             .init_resource::<crate::hud::dock::DockBoard>()
             .add_systems(Startup, spawn_main_menu)
             .add_systems(

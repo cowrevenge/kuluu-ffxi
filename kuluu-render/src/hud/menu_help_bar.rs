@@ -618,29 +618,18 @@ pub struct BarFadeIn {
     painted: Vec<(bevy::ecs::entity::Entity, BarPaint)>,
 }
 
+/// Every painted node under the bar, in tree order - capture and restore then read
+/// those entities through the one paint query (separate read-only twins of it aliased
+/// its `&mut` params: bevy B0001 on the first real launch that built this system).
 fn collect_bar_paint(
     entity: bevy::ecs::entity::Entity,
     children_q: &Query<&Children>,
-    read_q: &Query<(Option<&BackgroundColor>, Option<&TextColor>)>,
-    border_q: &Query<&bevy::ui::BorderColor>,
-    out: &mut Vec<(bevy::ecs::entity::Entity, BarPaint)>,
+    out: &mut Vec<bevy::ecs::entity::Entity>,
 ) {
-    if let Ok((background, text)) = read_q.get(entity) {
-        let border = border_q.get(entity).ok().copied();
-        if background.is_some() || text.is_some() || border.is_some() {
-            out.push((
-                entity,
-                BarPaint {
-                    background: background.map(|c| c.0),
-                    text: text.map(|c| c.0),
-                    border,
-                },
-            ));
-        }
-    }
+    out.push(entity);
     if let Ok(children) = children_q.get(entity) {
         for child in children.iter() {
-            collect_bar_paint(child, children_q, read_q, border_q, out);
+            collect_bar_paint(child, children_q, out);
         }
     }
 }
@@ -652,8 +641,6 @@ fn collect_bar_paint(
 pub fn fade_menu_help_bar_in(
     bar_q: Query<(Entity, &Node), With<MenuHelpBar>>,
     children_q: Query<&Children>,
-    read_q: Query<(Option<&BackgroundColor>, Option<&TextColor>)>,
-    border_read_q: Query<&bevy::ui::BorderColor>,
     mut paint_q: Query<(
         Option<&mut BackgroundColor>,
         Option<&mut TextColor>,
@@ -668,8 +655,24 @@ pub fn fade_menu_help_bar_in(
     let showing = node.display != Display::None;
     if !*shown_before && showing {
         // Appearing frame: take the exact paint of every drawn part; words go transparent with it.
+        let mut parts = Vec::new();
+        collect_bar_paint(bar, &children_q, &mut parts);
         let mut painted = Vec::new();
-        collect_bar_paint(bar, &children_q, &read_q, &border_read_q, &mut painted);
+        for part in parts {
+            if let Ok((background, text, border)) = paint_q.get(part) {
+                let captured = BarPaint {
+                    background: background.map(|c| c.0),
+                    text: text.map(|c| c.0),
+                    border: border.map(|b| *b),
+                };
+                if captured.background.is_some()
+                    || captured.text.is_some()
+                    || captured.border.is_some()
+                {
+                    painted.push((part, captured));
+                }
+            }
+        }
         *fade = Some(BarFadeIn {
             elapsed_frames: 0,
             painted,
@@ -1428,5 +1431,73 @@ mod tests {
                 "Quests"
             );
         }
+    }
+
+    /// First real launch (2026-10-22) caught what no test had ever done: run the fade rider at
+    /// all. Bevy's B0001 fetch asserted when read-only twins of its own `&mut` paint query aliased
+    /// them - one paint query serves capture and restore now, and this fence keeps it fetched.
+    /// The law on screen: words stand at alpha zero while the chrome scales up, then every part
+    /// returns byte-exact when the opaque frame lands.
+    #[test]
+    fn the_fade_rider_fetches_captures_and_restores_without_conflicts() {
+        let mut app = App::new();
+        app.add_systems(Startup, spawn_menu_help_bar);
+        app.add_systems(Update, fade_menu_help_bar_in);
+
+        let title_color = |app: &mut App| -> Color {
+            app.world_mut()
+                .query_filtered::<&TextColor, With<MenuHelpTitle>>()
+                .single(app.world())
+                .expect("the bar owns one title word")
+                .0
+        };
+        let box_paint = |app: &mut App| -> (Color, Color) {
+            let (bg, edge) = app
+                .world_mut()
+                .query_filtered::<(
+                    &BackgroundColor,
+                    &bevy::ui::BorderColor,
+                ), With<MenuHelpTitleBox>>()
+                .single(app.world())
+                .expect("the bar owns one title box");
+            (bg.0, edge.top)
+        };
+
+        // Spawned hidden: the rider must not arm while no bar shows.
+        app.update();
+        let base_title = title_color(&mut app);
+        let (base_bg, _) = box_paint(&mut app);
+
+        let mut bars = app
+            .world_mut()
+            .query_filtered::<&mut Node, With<MenuHelpBar>>();
+        bars.single_mut(app.world_mut()).expect("one bar").display = Display::Flex;
+        app.update(); // the appearing frame: capture + first alpha step
+        assert_eq!(
+            title_color(&mut app).alpha(),
+            0.0,
+            "words are hidden from the very first fade frame"
+        );
+        let mid_bg = box_paint(&mut app).0;
+        assert!(
+            base_bg.alpha() > 0.0 && mid_bg.alpha() < base_bg.alpha(),
+            "chrome scales up from the captured paint, never at full"
+        );
+
+        for _ in 1..crate::hud::menu_anim::MENU_FADE_FRAMES {
+            app.update();
+        }
+        assert_eq!(
+            title_color(&mut app),
+            base_title,
+            "words restore byte-exact"
+        );
+        let (bg, border) = box_paint(&mut app);
+        assert_eq!(bg, base_bg, "background restores byte-exact");
+        assert_eq!(
+            border,
+            theme::FRAME_EDGE,
+            "the frame edge comes back at its captured colour"
+        );
     }
 }

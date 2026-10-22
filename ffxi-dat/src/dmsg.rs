@@ -725,7 +725,7 @@ pub struct DmsgTable {
     id_words: Option<Vec<Option<u32>>>,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum DmsgError {
     #[error("not a d_msg catalog: file too short ({0} bytes)")]
     TooShort(usize),
@@ -740,7 +740,7 @@ pub enum DmsgError {
 }
 
 const DMSG_BANNER: &[u8] = b"d_msg";
-/// Six u32s — (fileSize, tableOffset, tableSize, blockSize, reserved, numStrings) —
+/// Six u32s - (fileSize, tableOffset, tableSize, blockSize, reserved, numStrings) -
 /// sit at +4 from this word offset (vault semantic_resolver.py law).
 const DMSG_HEADER_WORDS_AT: usize = 0x14;
 const DMSG_XOR_MASK: u8 = 0xFF;
@@ -889,10 +889,11 @@ impl DmsgTable {
 /// Where a fixed-block mission-family entry stores its own-index label.
 const FIXED_BLOCK_ID_WORD_AT: usize = 0x1C;
 
-/// Shared header decode for both constructors: validate the banner and six
-/// words, XOR-0xFF the region past `tableOffset`, hand back the decrypted buffer
-/// and layout numbers as `usize` counts.
-fn decode_common(buf: &[u8]) -> Result<(Vec<u8>, usize, u32, usize, usize), DmsgError> {
+/// Shared header decode for both constructors (and the extended key-item
+/// reader in [`crate::key_item`]): validate the banner and six words,
+/// XOR-0xFF the region past `tableOffset`, hand back the decrypted buffer and
+/// layout numbers as `usize` counts.
+pub(crate) fn decode_common(buf: &[u8]) -> Result<(Vec<u8>, usize, u32, usize, usize), DmsgError> {
     if buf.len() < 0x40 {
         return Err(DmsgError::TooShort(buf.len()));
     }
@@ -956,8 +957,10 @@ fn mission_block_strings(b: &[u8], start: usize) -> Vec<String> {
 }
 
 /// Read one string blob: `off` from block start to the marker word, then past
-/// 0x18 metadata bytes to the NUL-terminated latin1 text.
-fn blob_at(b: &[u8], start: usize, off: usize) -> Option<String> {
+/// 0x18 metadata bytes to the NUL-terminated latin1 text. Also shared with the
+/// extended key-item reader ([`crate::key_item`] reads its gen-2 blocks with
+/// the same blob law).
+pub(crate) fn blob_at(b: &[u8], start: usize, off: usize) -> Option<String> {
     let p = start.checked_add(off)?;
     if read_u32(b, p) != Some(DMSG_STRING_MARKER) {
         return None;

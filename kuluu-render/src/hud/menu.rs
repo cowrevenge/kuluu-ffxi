@@ -10213,6 +10213,14 @@ pub(crate) fn squeeze_menu_column(
     >,
     mut fx_column: Local<crate::hud::menu_anim::WindowFx>,
     mut prev_kind: Local<Option<MenuKind>>,
+    // The column's last laid-out box, in style px, captured as a relabel close arms. Its right edge
+    // is the one anchor `place_in_column` keeps, so it is what a grow-in must sit on: centering the
+    // incoming box on the 512-wide design instead of that real seat stood the whole opening box
+    // left of centre on any wider window - chrome only, no words, for five frames, on every
+    // Commands-to-Missions relabel (ur/140: "wtf is that random ass window over there", and every
+    // earlier report of a second menu popping beside the first). A column never laid out yet has no
+    // seat to remember and keeps drawing plain.
+    mut last_seat: Local<Option<crate::hud::menu_anim::FullRect>>,
     mut column_pin: Local<PinState>,
     // Heights this seat's shapes have painted, for frame-one opens (see `remember_height`).
     mut heights: Local<Vec<HeightPin>>,
@@ -10261,6 +10269,7 @@ pub(crate) fn squeeze_menu_column(
             // The capture is the last laid-out frame: `place_in_column` anchors by right edge, so
             // the style fields hold no px seat to center around.
             if let Some(full) = FullRect::from_laid_out_box(computed, transform) {
+                *last_seat = Some(full);
                 cfx = WindowFx::closing(full);
                 animated = cfx.tick();
             }
@@ -10310,8 +10319,13 @@ pub(crate) fn squeeze_menu_column(
         // plain and learns, exactly once.
         if swap_frame {
             if let (Val::Px(px), Val::Px(w)) = (want.height, want.width) {
+                // Same screen right edge the outgoing box stood on, whatever window width that is;
+                // the design width is no seat at all outside a 512-wide screen.
                 cfx = WindowFx::opening(FullRect {
-                    center_x: MENU_DESIGN_WIDTH - MENU_RIGHT_EDGE - w / 2.0,
+                    center_x: last_seat.map_or(
+                        MENU_DESIGN_WIDTH - MENU_RIGHT_EDGE - w / 2.0,
+                        |seat| seat.center_x + seat.width / 2.0 - w / 2.0,
+                    ),
                     center_y: MENU_COLUMN_TOP + px / 2.0,
                     width: w,
                     height: px,
@@ -19781,6 +19795,106 @@ mod tests {
         }
         let landed = landed.expect("the relabel lands right-anchored with words rewritten");
         assert_eq!(landed.height, Val::Px(h_root));
+    }
+
+    /// ur/140 fence (owner: "wtf is that random ass window over there", and two rounds earlier
+    /// "when you click things in the menu TWO menus pop"): a relabel grow-in must stand on the
+    /// screen edge this column was actually laid out at, never on `MENU_DESIGN_WIDTH`. Centering on
+    /// 512 parked a chrome-only box near mid-screen for five frames beside the real menu on every
+    /// Commands-to-Missions Enter - which is what read as the menu opening twice. Stands one fed
+    /// Commands box with its right edge at style x=1592 (a wide window) and demands that every frame
+    /// of the relabel, close and grow alike, stays in that box's own right-hand territory.
+    #[test]
+    fn a_column_relabel_never_stands_its_box_on_the_design_width() {
+        const VIEW_W: f32 = 1600.0;
+        let seat_right = VIEW_W - MENU_RIGHT_EDGE;
+
+        let mut app = root_menu_app(0);
+        app.add_systems(Update, squeeze_menu_column.after(update_main_menu));
+        let pane = app
+            .world_mut()
+            .query_filtered::<bevy::ecs::entity::Entity, With<MainMenuPane>>()
+            .single(app.world())
+            .expect("one selector column");
+        let natural_width = {
+            let node = app
+                .world_mut()
+                .query_filtered::<&Node, With<MainMenuPane>>()
+                .single(app.world())
+                .expect("one selector column")
+                .clone();
+            let Val::Px(w) = node.width else {
+                panic!("Commands sizes its pane in px");
+            };
+            w
+        };
+        let feed_layout = |app: &mut App| {
+            app.world_mut()
+                .get_mut::<ComputedNode>(pane)
+                .expect("the pane carries a computed node")
+                .size = Vec2::new(natural_width, 57.0);
+            *app.world_mut()
+                .get_mut::<UiGlobalTransform>(pane)
+                .expect("spawned UI nodes carry their transforms")
+                .as_mut() = UiGlobalTransform::from_xy(
+                seat_right - natural_width / 2.0,
+                MENU_COLUMN_TOP + 57.0 / 2.0,
+            );
+        };
+        feed_layout(&mut app);
+        for _ in 0..PIN_SETTLE_FRAMES + 1 {
+            app.update();
+        }
+
+        let mut fx_frames = 0;
+        let mut step = |app: &mut App| {
+            feed_layout(app);
+            app.update();
+            let node = app
+                .world_mut()
+                .query_filtered::<&Node, With<MainMenuPane>>()
+                .single(app.world())
+                .expect("one selector column")
+                .clone();
+            if node.right != Val::Auto {
+                return; // At rest on its own anchor: nothing to judge.
+            }
+            let (Val::Px(left), Val::Px(width)) = (node.left, node.width) else {
+                panic!("an animating box keeps pixelled axes");
+            };
+            fx_frames += 1;
+            // The design-width phantom stood this box's right edge at `MENU_DESIGN_WIDTH` - on a
+            // window that wide it is off in the middle of the world, next to no menu at all.
+            assert!(
+                left + width > VIEW_W / 2.0,
+                "frame {fx_frames} of the relabel draws a box at x={left}..{} on a {}-wide screen",
+                left + width,
+                VIEW_W
+            );
+            assert!(
+                left + width <= seat_right + 0.5,
+                "frame {fx_frames} spills past the column's right edge: x={left}..{}",
+                left + width
+            );
+        };
+        // Cycle one learns the incoming shape; cycle two is a relabel with both shapes known, which
+        // is where the grow-in runs (owner saw it "50% of the time" for exactly that reason).
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.push(MenuKind::MissionList);
+        }
+        for _ in 0..2 * crate::hud::menu_anim::MENU_SQUEEZE_FRAMES + 8 {
+            step(&mut app);
+        }
+        if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
+            live.pop();
+        }
+        for _ in 0..2 * crate::hud::menu_anim::MENU_SQUEEZE_FRAMES + 8 {
+            step(&mut app);
+        }
+        assert!(
+            fx_frames >= 2 * usize::from(crate::hud::menu_anim::MENU_SQUEEZE_FRAMES),
+            "two relabels should each have animated, saw {fx_frames} fx frames"
+        );
     }
 
     /// The remembering table keys on the exact shape: same (kind, rows) replaces, anything else

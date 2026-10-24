@@ -124,17 +124,18 @@ impl FullRect {
 
 /// One pooled window surface's fx state. Idle is the resting case: whatever the draw pass decided
 /// (full shape or hidden) stands with no override.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum WindowFx {
+    #[default]
     Idle,
-    Opening { full: FullRect, elapsed_frames: u8 },
-    Closing { full: FullRect, elapsed_frames: u8 },
-}
-
-impl Default for WindowFx {
-    fn default() -> Self {
-        Self::Idle
-    }
+    Opening {
+        full: FullRect,
+        elapsed_frames: u8,
+    },
+    Closing {
+        full: FullRect,
+        elapsed_frames: u8,
+    },
 }
 
 impl WindowFx {

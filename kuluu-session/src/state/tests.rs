@@ -2687,6 +2687,12 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         AgentCommand::AnnounceConfigBfPair { .. } => (),
         AgentCommand::BuyBazaarItem { .. } => (),
         AgentCommand::CloseBazaar { .. } => (),
+        // Our own stall's price menu and comment field, c2s 0x109/0x10A/0x10B plus
+        // 0x0DE INSPECT_MESSAGE (owner captures 2026-10-24).
+        AgentCommand::BazaarPricesEnter => (),
+        AgentCommand::BazaarPriceSet { .. } => (),
+        AgentCommand::BazaarPricesDone => (),
+        AgentCommand::BazaarComment { .. } => (),
         AgentCommand::Heal { .. } => (),
         AgentCommand::Fish { .. } => (),
         AgentCommand::FishingInput { .. } => (),

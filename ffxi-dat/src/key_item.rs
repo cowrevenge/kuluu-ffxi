@@ -161,7 +161,7 @@ fn is_key_item_chunk(c: &chunk::Chunk<'_>) -> bool {
 /// missing/oversized block or one whose strings are all empties and markers.
 fn read_description_block(section: &[u8], off: usize) -> Vec<String> {
     let count = match read_u32_le(section, off) {
-        Some(n) if n >= 1 && n <= DESCRIPTION_BLOCK_MAX_POINTERS => n as usize,
+        Some(n) if (1..=DESCRIPTION_BLOCK_MAX_POINTERS).contains(&n) => n as usize,
         _ => return Vec::new(),
     };
     let mut lines = Vec::new();
@@ -189,10 +189,13 @@ pub fn parse_key_item_names(dat_bytes: &[u8]) -> Result<BTreeMap<u16, String>, K
     parse_key_item_entries(dat_bytes).map(|(names, _)| names)
 }
 
+/// What both tables hand back: retail's own name per key-item id, and the printable description
+/// lines read out of that entry's `{count, ptr}` blocks (empty where it has none). Named once because
+/// the gen-1 era container and the gen-2 fixed-block container are the same answer.
+pub type KeyItemRows = (BTreeMap<u16, String>, BTreeMap<u16, Vec<String>>);
+
 /// Names plus the `{count, ptr}` description blocks behind entry words 3/4.
-pub fn parse_key_item_entries(
-    dat_bytes: &[u8],
-) -> Result<(BTreeMap<u16, String>, BTreeMap<u16, Vec<String>>), KeyItemTableError> {
+pub fn parse_key_item_entries(dat_bytes: &[u8]) -> Result<KeyItemRows, KeyItemTableError> {
     let section = chunk::walk(dat_bytes)
         .filter_map(|r| r.ok())
         .find(is_key_item_chunk)
@@ -268,9 +271,7 @@ const EXTENDED_PAIR_DESCRIPTION: usize = 6;
 /// [`crate::mission_dat`] refuses disagreeing catalogs; duplicate ids do NOT -
 /// retail's own shipping data has three (the Mog Kupon coupon rows) - they are
 /// kept first-row-wins and counted for a one-line summary.
-pub fn parse_extended_key_item_entries(
-    dat_bytes: &[u8],
-) -> Result<(BTreeMap<u16, String>, BTreeMap<u16, Vec<String>>), KeyItemTableError> {
+pub fn parse_extended_key_item_entries(dat_bytes: &[u8]) -> Result<KeyItemRows, KeyItemTableError> {
     let (b, table_offset, table_size, block_size, num_strings) =
         crate::dmsg::decode_common(dat_bytes)?;
     if table_size != 0 {
@@ -923,7 +924,7 @@ mod tests {
             put(&mut body, pair_word, cursor as u32);
             // A blob with no text still occupies marker+metadata+NUL; guard
             // the stride so an oversized fixture fails loudly, not silently.
-            assert!(cursor + 4 + 0x18 + text.len() + 1 <= SYNTH_EXTENDED_BLOCK_SIZE);
+            assert!(cursor + 4 + 0x18 + text.len() < SYNTH_EXTENDED_BLOCK_SIZE);
             put(&mut body, cursor, 1);
             if !text.is_empty() {
                 let at = cursor + 4 + 0x18;
@@ -1160,7 +1161,7 @@ mod tests {
             Some("job gesture: warrior"),
             "LSB id 1738 lives at gen-2 block 1811"
         );
-        assert_eq!(table.lookup(2963).is_some(), true, "geomancer gesture");
+        assert!(table.lookup(2963).is_some(), "geomancer gesture");
         let rune = table
             .description_lines(2964)
             .expect("rune fencer gesture carries retail text");

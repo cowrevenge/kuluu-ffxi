@@ -309,7 +309,7 @@ pub(crate) fn update_macro_pallet_view(
         let (_, _, tile_w, _) = rects.first().copied().unwrap_or((0.0, 0.0, 0.0, 0.0));
         tile_w - 2.0 * TILE_PAD_PX
     };
-    if let Some(mut backdrop) = backdrop_q.single_mut().ok() {
+    if let Ok(mut backdrop) = backdrop_q.single_mut() {
         let right = rects.iter().fold(0.0f32, |acc, r| acc.max(r.0 + r.2));
         let bottom = rects.iter().fold(0.0f32, |acc, r| acc.max(r.1 + r.3));
         backdrop.width = Val::Px(right + TILE_PAD_PX / 2.0);
@@ -362,7 +362,7 @@ pub(crate) fn update_macro_pallet_view(
                     .map(|row| row.label.as_str())
                     .unwrap_or_default();
                 let shown = truncate_to_tile(name, TILE_NAME_PX, name_room);
-                if &**text != shown.as_str() {
+                if **text != shown.as_str() {
                     **text = shown;
                 }
                 color.0 = if slot == cursor {
@@ -375,7 +375,7 @@ pub(crate) fn update_macro_pallet_view(
             }
             TileTextPart::Hotkey(slot) => {
                 let word = hotkey_word(slot);
-                if &**text != word {
+                if **text != word {
                     **text = word.to_string();
                 }
             }

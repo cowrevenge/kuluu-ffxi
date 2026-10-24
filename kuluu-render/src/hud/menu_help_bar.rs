@@ -698,7 +698,7 @@ pub fn fade_menu_help_bar_in(
                 let captured = BarPaint {
                     background: background.map(|c| c.0),
                     text: text.map(|c| c.0),
-                    border: border.map(|b| *b),
+                    border: border.copied(),
                 };
                 if captured.background.is_some()
                     || captured.text.is_some()
@@ -723,7 +723,7 @@ pub fn fade_menu_help_bar_in(
                 let captured = BarPaint {
                     background: background.map(|c| c.0),
                     text: text.map(|c| c.0),
-                    border: border.map(|b| *b),
+                    border: border.copied(),
                 };
                 if captured.background.is_some()
                     || captured.text.is_some()
@@ -815,7 +815,7 @@ fn focused_level(stack: &MenuStack) -> Option<&MenuLevel> {
 /// the screen, not on the window's own border). `None` everywhere else, and also while no title is
 /// known yet, so every other window keeps its own help line.
 fn profile_detail_help(mode: &InputMode, snap: &kuluu_snapshot::SceneSnapshot) -> Option<String> {
-    let stack = match &*mode {
+    let stack = match mode {
         InputMode::Menu(stack) => stack,
         _ => return None,
     };

@@ -1746,7 +1746,7 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // The log window wears its chain's name under the arrows (ur/64 shows `Bastok`);
         // the mission text window mirrors its parent log's caption.
         MenuKind::MissionDetail { log, .. } | MenuKind::MissionText { log, .. } => {
-            return mission_chain_name(log).unwrap_or("Mission Log")
+            mission_chain_name(log).unwrap_or("Mission Log")
         }
         MenuKind::BazaarStalls => "Bazaar",
         // Owner ruling (ur/90 round): the hub's rectangle carries no word on its
@@ -7160,11 +7160,10 @@ pub fn mission_chain_name(log: u8) -> Option<&'static str> {
 }
 
 /// Left/Right (or ◄ ►) on a log window steps ONE ring of every browsable menu:
-/// each selector row's members in selector order, greyed chains skipped (ur/76
-/// + follow-up ruling: "you added arrows but didnt link all the non grey menu
-/// together"). The selector merely chooses the ring position you start at; the
-/// pair links across rows - Rhapsodies steps to Nations and back - wrapping like
-/// Up/Down do.
+/// each selector row's members in selector order, greyed chains skipped (ur/76 and
+/// its follow-up ruling: "you added arrows but didnt link all the non grey menu
+/// together"). The selector merely chooses the ring position you start at; the pair
+/// links across rows - Rhapsodies steps to Nations and back - wrapping like Up/Down do.
 pub fn mission_cycle_member(
     snap: &kuluu_snapshot::SceneSnapshot,
     log: u8,
@@ -7483,7 +7482,7 @@ pub fn macro_pallet_row_step(cursor: usize, down: bool) -> usize {
         return cursor;
     }
     let keytops = MACRO_PALLET_HOTKEYS.len() + MACRO_PALLET_HOTKEYS_ALT.len();
-    let rows = (keytops + columns - 1) / columns;
+    let rows = keytops.div_ceil(columns);
     if rows <= 1 {
         return cursor;
     }
@@ -10642,13 +10641,13 @@ pub(crate) fn update_menu_stack_windows(
             slot_of[i] = Some(at);
         }
     }
-    for i in 0..occupants.len() {
-        if slot_of[i].is_some() {
+    for held in slot_of.iter_mut() {
+        if held.is_some() {
             continue;
         }
         if let Some(at) = used_slot.iter().position(|used| !*used) {
             used_slot[at] = true;
-            slot_of[i] = Some(at);
+            *held = Some(at);
         }
     }
     for (i, occ) in occupants.into_iter().enumerate() {
@@ -12464,15 +12463,11 @@ fn stack_pool_hit(
     // `update_menu_stack_windows` seated there this frame (a shared seat relabels in place, so a
     // surface's level stopped being its slot number). Only rows on that one surface answer; every
     // other pooled surface stays inert as it always was.
-    let Some((focus_index, _seat)) = layout.focused() else {
-        return None;
-    };
+    let (focus_index, _seat) = layout.focused()?;
     if seats.level_at(window) != Some(focus_index) {
         return None;
     }
-    let Some(level) = stack.levels.get(focus_index) else {
-        return None;
-    };
+    let level = stack.levels.get(focus_index)?;
     // The hit is always against the focused level - and its rows are in
     // `dynamic.rows`, never in `stacked_rows` (see the same law in
     // `update_menu_stack_windows`).
@@ -12622,10 +12617,11 @@ pub fn menu_mouse_click_system(
             rows_entry_count(open.kind, &dynamic.rows, settings.dlss_supported),
         );
         let list_idx = viewport_start + row.slot;
-        if list_idx < total && row.slot < visible_window(open.kind, total) {
-            if !open.row_locked(list_idx) {
-                out.write(MenuRowActivated { slot: list_idx });
-            }
+        if list_idx < total
+            && row.slot < visible_window(open.kind, total)
+            && !open.row_locked(list_idx)
+        {
+            out.write(MenuRowActivated { slot: list_idx });
         }
     }
 }
@@ -19422,7 +19418,7 @@ mod tests {
         snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
             port: 0x00D0,
             // Bastok word 2 set through id 17 (two full pages of names).
-            data: [0, 0, u32::MAX, u32::MAX & !(1 << 2), 0, 0, 0, 0],
+            data: [0, 0, u32::MAX, u32::MAX ^ (1 << 2), 0, 0, 0, 0],
         });
         let rows =
             mission_detail_rows(&snap, &MissionTextCatalog::default(), MISSION_LOG_BASTOK, 0);
@@ -20375,7 +20371,6 @@ mod tests {
             let dups: Vec<(&String, &Vec<String>)> = seen
                 .iter()
                 .filter(|(w, owners)| owners.len() > 1 && **w != "0")
-                .map(|(w, o)| (w, o))
                 .collect();
 
             let mut surf: Vec<String> = Vec::new();
@@ -20760,7 +20755,7 @@ mod tests {
                 } else {
                     continue;
                 };
-                let e = boxes.entry(bucket.into()).or_insert((seat.clone(), vec![]));
+                let e = boxes.entry(bucket).or_insert((seat.clone(), vec![]));
                 if !text.as_str().is_empty() && e.1.len() < 4 {
                     e.1.push(text.as_str().to_string());
                 }
@@ -21808,12 +21803,12 @@ mod tests {
             assert!(!rows[index].label.is_empty());
         }
         let snap = kuluu_snapshot::SceneSnapshot::default();
-        for index in 0..rows.len() {
+        for (index, row) in rows.iter().enumerate() {
             assert_eq!(
                 menu_row_disabled(MenuKind::QuestMenu, index, &snap),
                 index == QUEST_MENU_ROV_VANABOUT_ROW,
                 "only the Vana'Bout readout draws grey: {}",
-                rows[index].label
+                row.label
             );
         }
     }
@@ -22968,14 +22963,16 @@ mod tests {
         };
         use crate::snapshot::SceneState;
 
-        let mut snap = kuluu_snapshot::SceneSnapshot::default();
-        snap.stats = Some(kuluu_snapshot::CharStats {
-            title_id: 120,
-            nation: 1,
-            conquest_rank: 3,
-            conquest_rank_bar: 2_000,
+        let snap = kuluu_snapshot::SceneSnapshot {
+            stats: Some(kuluu_snapshot::CharStats {
+                title_id: 120,
+                nation: 1,
+                conquest_rank: 3,
+                conquest_rank_bar: 2_000,
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         let profile_entry = profile_entry_index();
         let rows: Vec<DynamicMenuRow> = status_detail_lines(profile_entry, &snap, &[], &[], None)
             .into_iter()

@@ -134,7 +134,7 @@ mod tests {
         // id words shared between chapter blocks, and are deliberately not
         // claimed by this map.
         for chain in [8u8, 12, 13] {
-            assert!(matches!(chain_catalog_file(chain), None));
+            assert!(chain_catalog_file(chain).is_none());
         }
     }
 

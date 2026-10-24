@@ -235,7 +235,7 @@ impl DigitSpinner {
     /// that were typed can be taken back this way.
     pub fn untype_digit(&mut self) {
         if self.typed_once {
-            self.value = self.value / 10;
+            self.value /= 10;
         }
     }
 

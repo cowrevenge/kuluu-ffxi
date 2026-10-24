@@ -39,6 +39,18 @@ fn main() {
         let caps: Vec<u32> = w.option_row_ids();
         if !caps.is_empty() {
             println!("widgets(caption ids): {caps:?}");
+            for id in &caps {
+                let read = |t: &Option<ffxi_dat::dmsg::DmsgTable>| -> String {
+                    t.as_ref()
+                        .and_then(|c| c.text(*id as usize).map(str::to_string))
+                        .unwrap_or_else(|| format!("id{id}"))
+                };
+                println!(
+                    "  widget {id}: short({}) table14({})",
+                    read(&short),
+                    read(&descs)
+                );
+            }
         }
         for (i, it) in w.items.iter().flatten().enumerate() {
             let cap = |id: Option<i32>, t: &Option<ffxi_dat::dmsg::DmsgTable>| -> String {

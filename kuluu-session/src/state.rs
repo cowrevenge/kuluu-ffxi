@@ -5042,6 +5042,34 @@ pub enum AgentCommand {
         target_index: u16,
     },
 
+    /// Raise our own stall's price menu (c2s 0x10B with AllListClearFlg 0): LSB
+    /// sets `isSettingBazaarPrices` and drops our customer list, so buyers leave the
+    /// stall we are about to reprice
+    /// (vendor/server/src/map/packets/c2s/0x10b_bazaar_close.cpp).
+    BazaarPricesEnter,
+
+    /// Price one LOC_INVENTORY slot of our own stall (c2s 0x10A). LSB clamps the
+    /// range to 0..=BAZAAR_PRICE_MAX, rejects currency and busy items outright, and
+    /// answers ITEM_ATTR + ITEM_SAME for that slot
+    /// (vendor/server/src/map/packets/c2s/0x10a_bazaar_itemset.cpp).
+    BazaarPriceSet {
+        slot: u8,
+        price: u32,
+    },
+
+    /// Leave the price menu (c2s 0x109): LSB clears `isSettingBazaarPrices` and sets
+    /// UPDATE_HP, which is what republishes us as a stall with bazaar flag set
+    /// (vendor/server/src/map/packets/c2s/0x109_bazaar_open.cpp).
+    BazaarPricesDone,
+
+    /// Publish the message buyers read when they check our stall (c2s 0x0DE). LSB stores it
+    /// verbatim in `char_stats.bazaar_message`, answers nothing, and only ever shows it back to
+    /// us as s2c 0x0CA INSPECT_MESSAGE when somebody checks us
+    /// (vendor/server/src/map/packets/c2s/0x0de_inspect_message.cpp).
+    BazaarComment {
+        text: String,
+    },
+
     /// Flip one server-visible option flag (c2s 0x0DC GP_CLI_COMMAND_CONFIG;
     /// vendor/server/src/map/packets/c2s/0x0dc_config.cpp). No optimistic fold:
     /// LSB always answers with a fresh s2c 0x0B4 CONFIG (vault main_menu.md

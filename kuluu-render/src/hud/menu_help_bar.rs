@@ -53,6 +53,10 @@ const PANE_SWITCH_HINT: &str = "- : page";
 // observed on the horizonxi-2023 client.
 const BAZAAR_TITLE: &str = "Bazaar";
 const BAZAAR_HINT: &str = "Purchase merchandise.";
+/// Our own stall's price menu keeps the Command row's caption and carries retail's
+/// instruction line (owner's retail capture 2026-10-24).
+const BAZAAR_PRICES_TITLE: &str = "Set Bazaar";
+const BAZAAR_PRICES_HINT: &str = "Set the going price of merchandise in your bazaar.";
 
 pub const BAR_HEIGHT: f32 = 26.0;
 /// The bar's top-left corner is persona's Status spot, so persona opening over it covers the
@@ -247,7 +251,12 @@ fn entry_help(kind: MenuKind, cursor: usize, dynamic: &DynamicMenu) -> String {
         MenuKind::Items | MenuKind::UsableItems => "Select an item.".to_string(),
         MenuKind::Magic => "Select a spell.".to_string(),
         MenuKind::Abilities => "Select an ability.".to_string(),
-        MenuKind::KeyItems => "Select a key item.".to_string(),
+        MenuKind::KeyItems | MenuKind::KeyItemList { .. } => "Select a key item.".to_string(),
+        // ur/153: the Examine question moved into its window's caption (owner:
+        // "Retail has the question in the box.."), so this box falls to the same
+        // plain line every other Yes/No confirm gets; the description window is
+        // prose and invites Esc, which returns to the list with its cursor.
+        MenuKind::KeyItemText { .. } => "Press Esc to go back.".to_string(),
         MenuKind::Equipment | MenuKind::EquipSlot(_) => "Select equipment.".to_string(),
         // Use / Drop wording per .agents/skills/retail-observe/references/2026-09-11-items-window.md;
         // the move rows have no retail counterpart in that capture's bag layout.
@@ -339,6 +348,16 @@ fn help_bar_title(kind: MenuKind) -> &'static str {
         // Hard-coded, not `menu_title`: the quest rectangles' own captions are
         // blank now (owner ruling, ur/90 round) while this box keeps the word.
         "Quests"
+    } else if matches!(
+        kind,
+        MenuKind::KeyItems
+            | MenuKind::KeyItemList { .. }
+            | MenuKind::KeyItemExamine { .. }
+            | MenuKind::KeyItemText { .. }
+    ) {
+        // ur/150: same law for the Key Items family — the hub's frame stays
+        // plain above its bucket rows, this box carries the word.
+        "Key Items"
     } else {
         menu::menu_title(kind)
     }
@@ -515,14 +534,25 @@ pub fn update_menu_help_bar(
             }),
             false,
         ),
-        InputMode::Bazaar => (
-            Some(BarContent {
-                title: BAZAAR_TITLE.to_string(),
-                counter: String::new(),
-                hint: BAZAAR_HINT.to_string(),
-            }),
-            false,
-        ),
+        InputMode::Bazaar => {
+            let pricing = dynamic.bazaar_prices_active;
+            (
+                Some(BarContent {
+                    title: if pricing {
+                        BAZAAR_PRICES_TITLE.to_string()
+                    } else {
+                        BAZAAR_TITLE.to_string()
+                    },
+                    counter: String::new(),
+                    hint: if pricing {
+                        BAZAAR_PRICES_HINT.to_string()
+                    } else {
+                        BAZAAR_HINT.to_string()
+                    },
+                }),
+                false,
+            )
+        }
         InputMode::Shop => {
             let (title, hint) = crate::hud::shop::help_bar_content(&shop_screen, &scene.snapshot);
             (

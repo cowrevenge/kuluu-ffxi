@@ -25,17 +25,19 @@ pub use codec::{
     build_subpacket_action, build_subpacket_auc_ask_commit, build_subpacket_auc_bid,
     build_subpacket_auc_info, build_subpacket_auc_lot_cancel, build_subpacket_auc_lot_check,
     build_subpacket_auc_lot_in, build_subpacket_auc_work_check, build_subpacket_bazaar_buy,
-    build_subpacket_bazaar_exit, build_subpacket_bazaar_list, build_subpacket_buffcancel,
-    build_subpacket_camp, build_subpacket_currencies, build_subpacket_emote_list_req,
-    build_subpacket_equip_inspect, build_subpacket_equip_set, build_subpacket_fishing,
-    build_subpacket_item_move, build_subpacket_item_stack, build_subpacket_item_use,
-    build_subpacket_motion, build_subpacket_myroom_bankin, build_subpacket_myroom_is,
-    build_subpacket_myroom_job, build_subpacket_myroom_layout, build_subpacket_myroom_layout_done,
-    build_subpacket_myroom_plant_add, build_subpacket_myroom_plant_check,
-    build_subpacket_myroom_plant_crop, build_subpacket_myroom_plant_stop, build_subpacket_pbx,
-    build_subpacket_reqlogout, build_subpacket_reqsubmapnum, build_subpacket_shop_buy,
-    build_subpacket_shop_sell_req, build_subpacket_shop_sell_set, build_subpacket_tracking_end,
-    build_subpacket_tracking_list, build_subpacket_tracking_start, log_action_sent,
+    build_subpacket_bazaar_exit, build_subpacket_bazaar_list, build_subpacket_bazaar_price_set,
+    build_subpacket_bazaar_prices_done, build_subpacket_bazaar_prices_enter,
+    build_subpacket_buffcancel, build_subpacket_camp, build_subpacket_currencies,
+    build_subpacket_emote_list_req, build_subpacket_equip_inspect, build_subpacket_equip_set,
+    build_subpacket_fishing, build_subpacket_item_move, build_subpacket_item_stack,
+    build_subpacket_item_use, build_subpacket_motion, build_subpacket_myroom_bankin,
+    build_subpacket_myroom_is, build_subpacket_myroom_job, build_subpacket_myroom_layout,
+    build_subpacket_myroom_layout_done, build_subpacket_myroom_plant_add,
+    build_subpacket_myroom_plant_check, build_subpacket_myroom_plant_crop,
+    build_subpacket_myroom_plant_stop, build_subpacket_pbx, build_subpacket_reqlogout,
+    build_subpacket_reqsubmapnum, build_subpacket_shop_buy, build_subpacket_shop_sell_req,
+    build_subpacket_shop_sell_set, build_subpacket_tracking_end, build_subpacket_tracking_list,
+    build_subpacket_tracking_start, log_action_sent,
 };
 
 struct NpcNameResolver {
@@ -4356,6 +4358,58 @@ async fn keepalive_loop(
                             tracing::warn!(error = %e, "bazaar_exit send failed");
                         }
                         let _ = event_tx.send(AgentEvent::BazaarClosed);
+                    }
+                    Some(AgentCommand::BazaarPricesEnter) => {
+                        let payload = build_subpacket_bazaar_prices_enter(sub_seq);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "bazaar_prices_enter send failed");
+                        }
+                    }
+                    Some(AgentCommand::BazaarPriceSet { slot, price }) => {
+                        // The client-side gate mirrors LSB's validator so a bad ask never
+                        // costs us a slot re-read (0x10a_bazaar_itemset.cpp validate).
+                        if price > ffxi_proto::decode::BAZAAR_PRICE_MAX {
+                            tracing::warn!(
+                                price,
+                                max = ffxi_proto::decode::BAZAAR_PRICE_MAX,
+                                "bazaar price out of range, dropped"
+                            );
+                            continue;
+                        }
+                        let payload = build_subpacket_bazaar_price_set(sub_seq, slot, price);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "bazaar_itemset send failed");
+                        }
+                    }
+                    Some(AgentCommand::BazaarPricesDone) => {
+                        let payload = build_subpacket_bazaar_prices_done(sub_seq);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "bazaar_prices_done send failed");
+                        }
+                    }
+                    // LSB keeps the message and answers nothing: there is no fresh state to wait
+                    // for, so the commit is fire-and-forget.
+                    Some(AgentCommand::BazaarComment { text }) => {
+                        let payload = build_subpacket_bazaar_comment(sub_seq, &text);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "inspect_message send failed");
+                        }
                     }
                     Some(AgentCommand::AhBrowse { category, sorts }) => {
                         spawn_ah_search(

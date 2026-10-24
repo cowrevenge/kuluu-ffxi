@@ -15,7 +15,7 @@ use kuluu_render::{
 use super::debug_heights::DebugHeightsRequest;
 
 mod check;
-pub use check::bazaar_mode_sync_system;
+pub use check::{bazaar_mode_sync_system, bazaar_price_mode_sync_system};
 use check::{handle_bazaar_key, handle_check_key};
 
 mod auction;
@@ -1370,7 +1370,11 @@ fn sub_target_action_for(
         // Macro edit rows are client-local and handled in confirm before
         // dispatch (bead kuluu-o9qt7.19.3); they never target anything — nor
         // does the run row, whose steps ride the chat pipeline instead
-        // (bead .19.4).
+        // (bead .19.4). A book/set row only raises its options box.
+        | A::MacroBookRow { .. }
+        | A::MacroBookOptionRow { .. }
+        | A::EquipSetRow { .. }
+        | A::EquipSetOptionRow { .. }
         | A::MacroEditLine { .. }
         | A::MacroClearSlot
         | A::MacroUse { .. } => None,
@@ -1398,13 +1402,15 @@ fn sub_target_action_for(
         // Region Info rows change the window's installed mode, never a target.
         A::RegionInfoMode { .. } => None,
         // Mission list/detail rows drill or stay legible; no sub-target step. The
-        // Bazaar stall picker picks up its browse on the plain confirm seam only,
-        // like the mission drills (vault main_menu.md §33).
+        // `bazaar` setup panel's two rows answer on the plain confirm seam only,
+        // like the mission drills.
         A::MissionOpenLog { .. }
         | A::MissionLogRow { .. }
         | A::MissionOpenText { .. }
         | A::MissionTextRow { .. }
-        | A::BazaarStall { .. } => None,
+        // ur/152: the key item description window's lines are inert readout.
+        | A::KeyItemTextRow { .. }
+        | A::BazaarSetupRow { .. } => None,
         // Same law for the quest00/quest01 pair (vault main_menu.md §31), and
         // for the home-view job picks — they commit one c2s 0x100 MYROOM_JOB on
         // the wire, never to a target (handler FFXiMain.dll retail-2026-09
@@ -1416,6 +1422,8 @@ fn sub_target_action_for(
         | A::MogHouseRemodelSelect { .. }
         | A::QuestDetailRow { .. }
         | A::OpenQuestList { .. }
+        // ur/150: Key Items bucket rows push their list in confirm_menu_at_cursor.
+        | A::OpenKeyItemCategory { .. }
         | A::HomeJobRow { .. } => None,
         // Config-family rows drill windows or answer locally (vault main_menu.md
         // §42/§47/§48); they never take a sub-target step. Status detail lines
@@ -2018,6 +2026,11 @@ fn dispatch_dynamic_menu_action(
         // kuluu-o9qt7.19.3) — nothing to send here.
         A::AutomatonSlotRow { .. }
         | A::MacroSlotRow { .. }
+        // Book/set rows drill their option boxes (and a pallet) in confirm; nothing rides the wire.
+        | A::MacroBookRow { .. }
+        | A::MacroBookOptionRow { .. }
+        | A::EquipSetRow { .. }
+        | A::EquipSetOptionRow { .. }
         | A::MacroEditLine { .. }
         | A::MacroClearSlot
         | A::MacroUse { .. } => return,
@@ -2041,14 +2054,19 @@ fn dispatch_dynamic_menu_action(
         A::MissionOpenLog { .. }
         | A::MissionLogRow { .. }
         | A::MissionOpenText { .. }
-        | A::MissionTextRow { .. } => return,
-        // The stall picker answers on the plain confirm seam (vault
-        // main_menu.md §33), never as a sub-target action.
-        A::BazaarStall { .. } => return,
+        | A::MissionTextRow { .. }
+        // ur/152: description lines never reach a sub-target cursor.
+        | A::KeyItemTextRow { .. } => return,
+        // The `bazaar` setup panel's rows answer on the plain confirm seam, never
+        // as a sub-target action.
+        A::BazaarSetupRow { .. } => return,
         // The ur/87 hub's drill rows push their list in confirm_menu_at_cursor.
         A::QuestOpenDetail { .. }
         | A::QuestDetailRow { .. }
-        | A::OpenQuestList { .. } => return,
+        | A::OpenQuestList { .. }
+        // ur/150: the Key Items hub's drill rows push their bucket list in
+        // confirm_menu_at_cursor, never through a sub-target cursor.
+        | A::OpenKeyItemCategory { .. } => return,
         // Config-family drills are pushed in confirm_menu_at_cursor (where the menu stack
         // lives) and leaf option rows answer there until bead kuluu-o9qt7.20.1 wires the
         // option store — no wire from here either way (vault main_menu.md §48: retail's

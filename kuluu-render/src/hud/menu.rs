@@ -36,10 +36,11 @@ pub const ROOT_MAGIC_LIST: &str = "Magic List";
 pub const ROOT_SET_BAZAAR: &str = "Set Bazaar";
 /// Page 1's Map row, whose Mog House variant is `myroom`.
 pub const ROOT_MAP: &str = "Map";
-/// Page-2 row 6 — the caption id resolves to the literal `MacroPalette`; the
-/// earlier kuluu string `Edit Macros` was invented and exists nowhere in the
-/// catalog (same pin).
-pub const ROOT_MACRO_PALETTE: &str = "MacroPalette";
+/// Page-2 row 6. Its short-caption catalog id resolves to the literal
+/// `MacroPalette`; kuluu draws `Macros` there by product ruling, so that
+/// catalog string is only recorded here and in `ROOT_CAPTION_RULINGS`. Every
+/// consumer matches through this constant, so nothing else sees either word.
+pub const ROOT_MACRO_PALETTE: &str = "Macros";
 
 /// Retail's Command menu (windows `menuwind`/`socialme`) shows twelve rows per
 /// page across two pages; kuluu appends a third page of its own entries. "-"
@@ -348,6 +349,32 @@ pub enum DynamicMenuAction {
         index: u8,
     },
 
+    /// One `BookNN` row of the `mcrselec` pager: select raises that book's `mcrselop`
+    /// options window. The five option rows themselves are inert until their arms are
+    /// read, so the store still only changes through the editor/CommitMacros seam.
+    MacroBookRow {
+        book: u8,
+    },
+
+    /// One row of a book's `mcrselop` options window; `option` is that record's block id
+    /// (1 edit, 2 name, 3 copy, 4 paste, 5 delete). The confirm arm opens the book's palette;
+    /// the other arms are unread, so those rows stay inert.
+    MacroBookOptionRow {
+        option: u8,
+    },
+
+    /// One `SetNNN` row of the `mcres20` pager: select raises that set's `mcresmn` options window.
+    EquipSetRow {
+        set: u16,
+    },
+
+    /// One row of a set's `mcresmn` options window; `option` is that record's block id (1 edit,
+    /// 2 name, 3 copy, 4 paste, 5 delete, 6 overwrite, 7 equip, 8 appearance). Every arm there is
+    /// unread, so the rows stay inert.
+    EquipSetOptionRow {
+        option: u8,
+    },
+
     /// Answer an incoming trade request YES — c2s TRADE_RES Kind Start. Retail
     /// answers through the gift window's rows once s2c 0x021 lands (FFXiMain.dll
     /// retail-2026-09 RVA 0x1515E0; vault main_menu.md §25).
@@ -507,12 +534,17 @@ pub enum DynamicMenuAction {
         id: u16,
     },
 
-    /// One stall-picked row of the Bazaar window (the `bazaar` browser is
-    /// data-driven chrome — FFXiMain.dll retail-2026-09 RVA 0x1F6C70; vault
-    /// main_menu.md §33): select browses that seller's stall via c2s 0x105. The
-    /// empty-list hint row carries `char_id: u32::MAX` and never resolves.
-    BazaarStall {
-        char_id: u32,
+    /// A legible-only line of one key item's description window (ur/152), the
+    /// same inert law as [`Self::MissionTextRow`].
+    KeyItemTextRow {
+        id: u16,
+    },
+
+    /// One row of the `bazaar` setup panel (owner's retail capture 2026-10-24):
+    /// `row` is its place in that two-row window, 0 = `Set Prices`, 1 =
+    /// `Edit Comment`. kuluu has no price or comment editor behind either yet.
+    BazaarSetupRow {
+        row: u8,
     },
 
     /// One row of the `quest00` list opening its `quest01` detail (the handler's
@@ -534,6 +566,13 @@ pub enum DynamicMenuAction {
     /// the payload, and select pushes that half of the `quest00` list.
     OpenQuestList {
         completed: bool,
+    },
+
+    /// One bucket row of the Key Items hub (ur/150): selecting it pushes that
+    /// bucket's item list on the same `evitem` seat, so the one box relabels
+    /// in place exactly like the mission log family does.
+    OpenKeyItemCategory {
+        category: u8,
     },
 
     /// One craftable recipe row of the kuluu craft list (the `cmbmenu` row-2 branch opens this
@@ -696,20 +735,14 @@ pub fn item_qty_label(name: &str, quantity: u32) -> String {
     }
 }
 
-/// Unseen ("new") key-item indicator suffix. Retail shows a yellow-bubble
-/// glyph whose exact appearance is unverified (bead kuluu-h7x
-/// retail_unknowns); a text marker stands in until a retail capture.
-pub const KEY_ITEM_UNSEEN_SUFFIX: &str = " (new)";
-
-pub fn key_item_row_label(id: u16, seen: bool) -> String {
-    let name = ffxi_vocab::key_item_names::lookup(id)
+/// ur/152: an unseen key item is marked by a blue bullet in its row's reserved
+/// dot column (the pooled fill pass paints it, quest-hub law of ur/90 with the
+/// shared [`QUEST_MENU_BULLET_BLUE`]), never as `" (new)"` text appended to the
+/// label - the owner asked for dots, and the suffix was double-marking.
+pub fn key_item_row_label(id: u16) -> String {
+    ffxi_vocab::key_item_names::lookup(id)
         .map(str::to_string)
-        .unwrap_or_else(|| format!("Key Item #{id}"));
-    if seen {
-        name
-    } else {
-        format!("{name}{KEY_ITEM_UNSEEN_SUFFIX}")
-    }
+        .unwrap_or_else(|| format!("Key Item #{id}"))
 }
 
 /// The emote window's two-step swap state — retail's `[emote+0x6C]` word: 0 Off, 1 await-first
@@ -744,6 +777,18 @@ pub struct DynamicMenu {
     /// Windows a window's own logic closed this update (a select's answer, an upkeep). Their sound
     /// is whatever that logic queued, so the menu-depth observer adds no cancel sound for them.
     pub closed_by_logic: bool,
+    /// One-shot set when the bazaar panel's `Set Prices` row is confirmed: the price
+    /// menu owns a different surface and its own input mode, so the session-side sync
+    /// system raises it on this frame (see `bazaar_price_mode_sync_system`).
+    pub bazaar_prices_request: bool,
+    /// Whether that price menu currently owns the screen; mirrored from its state by
+    /// the same sync system so the help band can carry retail's caption and
+    /// instruction line without another system param.
+    pub bazaar_prices_active: bool,
+    /// What is typed in the `Edit Comment` field. The server never echoes our own comment back
+    /// (it reaches us only as s2c 0x0CA when somebody checks us), so this draft is also what a
+    /// reopened field starts from.
+    pub bazaar_comment_draft: String,
     /// State the Unity and alter ego point windows keep while they are open.
     pub unity_fp: crate::hud::unity_fp::UnityFpWindows,
     /// State the merit and job point windows keep.
@@ -792,6 +837,10 @@ pub struct DynamicMenu {
     /// The quest-log name/briefing catalogs, read from the install on the first
     /// Quest window [`refresh_dynamic_menu_rows`] sees; see [`QuestTextCatalog`].
     pub quest_texts: QuestTextCatalog,
+    /// The `sc_item_` key-item table of the install, read on the first Key
+    /// Items family window (ur/152): its description blocks are the item text
+    /// retail opens after Examine-Yes. See [`KeyItemTexts`].
+    pub key_item_texts: KeyItemTexts,
     /// Chat lines the client emits locally ride ids into GetText **table 9**
     /// (emitter .text FFXiMain.dll retail-2026-09 `.text 0x129DE0`, vault main_menu.md
     /// §59 addendum 35); this is that catalog, loaded once from DAT on the first
@@ -1262,6 +1311,8 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::TradePick { .. }
             | MenuKind::Items
             | MenuKind::KeyItems
+            | MenuKind::KeyItemList { .. }
+            | MenuKind::KeyItemText { .. }
             | MenuKind::UsableItems
             | MenuKind::ItemAction { .. }
             | MenuKind::EquipSlot(_)
@@ -1279,6 +1330,10 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::QuestDetail { .. }
             | MenuKind::AutomatonEquip
             | MenuKind::MacroSelect
+            | MenuKind::MacroResult
+            | MenuKind::MacroBookOptions { .. }
+            | MenuKind::EquipSetOptions { .. }
+            | MenuKind::MacroPallet { .. }
             | MenuKind::MacroEditor { .. }
             | MenuKind::JobPick { .. }
             | MenuKind::RoomList
@@ -1316,9 +1371,15 @@ pub fn list_page_rows(kind: MenuKind) -> usize {
         // ur/64: a mission log owns its one screen; Left/Right cycle the chain
         // members instead of paging rows.
         MenuKind::MissionDetail { .. } => MISSION_LOG_VISIBLE_ROWS,
-        // ur/51: a Currencies page is exactly the eight visible rows.
+        // ur/51: a Currencies page is exactly the eight visible rows; the Key
+        // Items windows take the same one-page law (ur/150).
         MenuKind::StatusDetail { entry } if is_currency_detail(Some(entry)) => 8,
+        MenuKind::KeyItems | MenuKind::KeyItemList { .. } | MenuKind::KeyItemText { .. } => {
+            MISSION_LOG_VISIBLE_ROWS
+        }
         MenuKind::Items | MenuKind::UsableItems => crate::hud::item_screen::ITEM_LIST_ROWS,
+        // …and the macro/equip-set pagers page their own twenty-row screenful.
+        kind if pager_rows(kind).is_some() => MACRO_PAGER_ROWS,
         _ => crate::hud::unity_fp::unity_fp_page_rows(kind)
             .or_else(|| crate::hud::merit_windows::visible_list_rows(kind))
             .unwrap_or(DYNAMIC_VISIBLE_ROWS),
@@ -1429,7 +1490,10 @@ fn empty_dynamic_hint(kind: MenuKind) -> &'static str {
         MenuKind::Trade => "(not trading)",
         MenuKind::TradePick { .. } => "(nothing to offer)",
         MenuKind::Items => "(bag empty)",
-        MenuKind::KeyItems => "(no key items)",
+        MenuKind::KeyItems | MenuKind::KeyItemList { .. } => "(no key items)",
+        // ur/152: an item whose `sc_item_` block held no printable line; the
+        // neutral empty note, same wording as a mission briefing window.
+        MenuKind::KeyItemText { .. } => "(nothing recorded)",
         MenuKind::UsableItems => "(no usable items)",
         MenuKind::ItemAction { .. } => "(item no longer in this bag)",
         MenuKind::EquipSlot(_) => "(no equippable items for this slot)",
@@ -1475,7 +1539,9 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::TradePick { .. } => &[],
         MenuKind::Search => &[],
         MenuKind::Items => ITEMS_ENTRIES_STUB,
-        MenuKind::KeyItems => &[],
+        // The whole Key Items family is snapshot-built; ur/152's Examine rows
+        // ride `DROP_CONFIRM_ENTRIES` above and its text window builds below.
+        MenuKind::KeyItems | MenuKind::KeyItemList { .. } | MenuKind::KeyItemText { .. } => &[],
         MenuKind::UsableItems => &[],
 
         MenuKind::Equipment => EQUIPMENT_ENTRIES,
@@ -1487,7 +1553,9 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::StatusDetail { .. } => &[],
 
         MenuKind::ItemAction { .. } => &[],
-        MenuKind::ItemDropConfirm { .. } => DROP_CONFIRM_ENTRIES,
+        MenuKind::ItemDropConfirm { .. }
+        // ur/152: the key item Examine answer, on the shared Yes/No rows.
+        | MenuKind::KeyItemExamine { .. } => DROP_CONFIRM_ENTRIES,
         MenuKind::PowerPrompt { .. } => DROP_CONFIRM_ENTRIES,
         // The key-assignment reset prompt answers through the same Yes/No law as
         // every other retail confirm (dialog service FFXiMain.dll retail-2026-09
@@ -1513,6 +1581,8 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         // The myroom home-view ops panel: fourteen captioned widgets read from
         // the DAT chunk (vault main_menu.md §40 as corrected by §53).
         MenuKind::HomeView => HOME_VIEW_ROWS,
+        // `mogcont`'s fifteen storage bags, in its handler's select order (§32).
+        MenuKind::MogContainers => MOG_CONTAINER_ROWS,
         // jobchang's two widgets — catalog tokens 65/66 in DAT record 'jobc'
         // (vault main_menu.md §53); the pick lists are roster-built.
         MenuKind::JobChange => JOB_CHANGE_ROWS,
@@ -1536,6 +1606,9 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::GraphicsDlss => &[],
         // The Map screen renders its own bespoke panes; it has no generic list.
         MenuKind::Map => &[],
+        // Neither does the bazaar comment field: it is one text box, drawn by
+        // `bazaar_comment` over the chat log.
+        MenuKind::BazaarComment => &[],
         // Slot rows come from the server state, never a static table (vault main_menu.md section 27).
         MenuKind::Linkshell => &[],
         // The cmbmenu launcher's two fixed rows: select ids 1-2 of handler FFXiMain.dll
@@ -1545,11 +1618,16 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         // The mcrmenu launcher's two fixed rows (handler FFXiMain.dll
         // retail-2026-09 RVA 0x1A64B0; vault main_menu.md §34).
         MenuKind::MacrosPalette => MACRO_LAUNCHER_ENTRIES,
-        // mcrselec rows arrive from the store (dynamic; macro_select_rows and
-        // vault main_menu.md §41). mcres20 shows run results, of which kuluu
-        // has none until macros execute — the grounded empty display.
+        // Both pagers are dynamic: mcrmenu item 1 ("Edit the user-defined macros in your macro
+        // palettes.") name-opens mcrselec over the book store, item 2 ("Edit equipment sets.")
+        // name-opens mcres20 over the set store. Neither record carries UI strings on its row
+        // blocks - the names come from the store ([`macro_book_rows`] / [`equip_set_rows`]).
         MenuKind::MacroSelect => &[],
         MenuKind::MacroResult => &[],
+        // Built by `macro_book_option_rows`; nothing static stands here.
+        MenuKind::MacroBookOptions { .. } => &[],
+        MenuKind::MacroPallet { .. } => &[],
+        MenuKind::EquipSetOptions { .. } => &[],
         // DAT-driven rows: the ConfigDatRows arms of refresh_dynamic_menu_rows read
         // each window's captioned item blocks (row law vault main_menu.md §59;
         // drill law §42/§47; generations §49/§57); no transcribed row content
@@ -1587,6 +1665,32 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
     }
 }
 
+/// ur/153 owner ruling ("Retail has the question in the box.."): the Examine prompt
+/// wears its question as its own caption inside the window, not in the helper bar.
+/// Every other kind keeps its plain [`menu_title`] there, so this stays the one
+/// place owned-text captions exist.
+pub fn window_caption(kind: MenuKind) -> String {
+    if let MenuKind::KeyItemExamine { id } = kind {
+        return format!(
+            "Examine {}?",
+            ffxi_vocab::key_item_names::lookup(id).unwrap_or("this item")
+        );
+    }
+    // A palette's band carries its book: `Macro Set Book01 (#1)`.
+    if let MenuKind::MacroPallet { book } = kind {
+        return format!("Macro Set Book{:02} (#{})", book + 1, book + 1);
+    }
+    menu_title(kind).to_string()
+}
+
+/// ur/153 owner ruling ("Retail is just a text line. it should not be selectable"):
+/// the key item description window draws prose - no `>` mark, no cursor gold, on no
+/// row; the family's selector law never lands there. Only Esc acts, popping back to
+/// the bucket list with its cursor untouched.
+pub fn window_plain_text(kind: MenuKind) -> bool {
+    matches!(kind, MenuKind::KeyItemText { .. })
+}
+
 pub fn menu_title(kind: MenuKind) -> &'static str {
     match kind {
         MenuKind::Root => "Commands",
@@ -1617,9 +1721,9 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // section 27.5), so kuluu titles its slot window after the Root row, like Party/Trade/Search.
         MenuKind::Linkshell => "Link Shell",
         MenuKind::SynthLauncher => "Synthesis",
-        // DAT `mcrm` carries comwin title token 80 = catalog id 80
-        // `MacroPalette` (vault main_menu.md §34) — the grounded title.
-        MenuKind::MacrosPalette => "MacroPalette",
+        // The window's own band wears retail's short word; the Commands row that name-opens it
+        // keeps the catalog caption (owner 2026-10-24: "its just Macros").
+        MenuKind::MacrosPalette => "Macros",
         // Neither `mcrselec` nor `mcres20` carries a DAT title token (both
         // comwin records read -1; vault main_menu.md §41), so both inherit the
         // parent row's caption like the other token-less windows here.
@@ -1659,7 +1763,20 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // own caption is [I] like the rest of the family (§25).
         MenuKind::TradePick { .. } => "Add Item",
         MenuKind::Items => "Items",
-        MenuKind::KeyItems => "Key Items",
+        // ur/150: like the quest hub before it (ur/90), the Key Items bucket
+        // selector's frame stays plain above its rows; each bucket list wears
+        // its own name where a quest list wears its region. The helper box
+        // keeps the family word (`menu_help_bar::help_bar_title`).
+        MenuKind::KeyItems => "",
+        MenuKind::KeyItemList { category } => KEY_ITEM_CATEGORY_LABELS
+            .get(category as usize)
+            .copied()
+            .unwrap_or(""),
+        // ur/152: the Examine prompt and the description window both wear the
+        // item's own catalog name, where a mission text window wears its chain.
+        MenuKind::KeyItemExamine { id } | MenuKind::KeyItemText { id } => {
+            ffxi_vocab::key_item_names::lookup(id).unwrap_or("Key Items")
+        }
         MenuKind::UsableItems => "Items",
         MenuKind::ItemAction { .. } => "Item",
         MenuKind::ItemDropConfirm { .. } => "Drop",
@@ -1693,6 +1810,9 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // vault main_menu.md §40), so — as with the pupequip variant — kuluu
         // inherits the parent row's caption.
         MenuKind::HomeView => "Map",
+        // `mogcont`'s comwin title token IS the View House row's caption (catalog id 107, same
+        // string on both; §32), so the window wears that caption rather than invented copy.
+        MenuKind::MogContainers => ROOT_VIEW_HOUSE,
         // jobchang's frame carries no title token of its own in DAT record
         // 'jobc' (vault main_menu.md §53); catalog caption 67 grounds both it
         // and the pick lists drilled from its rows.
@@ -1705,12 +1825,20 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // mcrledit's DAT chrome has no title token — it inherits Macros (§41
         // title law).
         MenuKind::MacroEditor { .. } => "Macros",
+        // A palette inherits the family word; its own band names the book (`window_caption`).
+        MenuKind::MacroPallet { .. } => "Macros",
+        // `mcrselop`'s own band reads `Options`; the record carries no UI string for it, so
+        // retail's word is pinned (owner capture 2026-10-24) - same for its equipment-set twin.
+        MenuKind::MacroBookOptions { .. } | MenuKind::EquipSetOptions { .. } => "Options",
         MenuKind::EmoteList => "Emote List",
         // No invented copy: `abisortw` has no DAT title (no window record at all
         // [V-negative]) and never shows as a focused level in kuluu; its only text is
         // the mode caption read from table 0x0E (bead kuluu-o9qt7.34).
         MenuKind::AbilitySort { .. } => "",
         MenuKind::GraphicsDlss => "DLSS Config",
+        // No DAT word for it: the comment field carries its draft and nothing else, so it owns no
+        // title of its own (the generic window is suppressed under it anyway).
+        MenuKind::BazaarComment => "",
         MenuKind::Map => "Map",
         // These windows draw their own DAT text; kuluu-only surfaces name them after the Status
         // row that opens them.
@@ -1981,14 +2109,14 @@ pub const SYNTH_ROW_PICK_MATERIAL: &str = "Synthesize from a bag item";
 pub const SYNTH_ROW_OPEN_LIST: &str = "Open the craft list";
 const SYNTH_LAUNCHER_ENTRIES: &[&str] = &[SYNTH_ROW_PICK_MATERIAL, SYNTH_ROW_OPEN_LIST];
 
-/// The mcrmenu launcher's two rows. DAT `mcrm` carries no captions — the
-/// windowps pair is chrome-only (vault main_menu.md §34) — so these
-/// kuluu-picked labels stand pinned by tests; their order follows select ids
-/// {1,2} of handler FFXiMain.dll retail-2026-09 RVA 0x1A64B0: item 1 opens
-/// `mcrselec`, item 2 opens `mcres20`.
-pub const MACRO_ROW_SELECT_MACRO: &str = "Select Macro";
-pub const MACRO_ROW_MACRO_RESULT: &str = "Macro Result";
-const MACRO_LAUNCHER_ENTRIES: &[&str] = &[MACRO_ROW_SELECT_MACRO, MACRO_ROW_MACRO_RESULT];
+/// The mcrmenu launcher's two rows. DAT `mcrm` carries no captions - the
+/// windowps pair is chrome-only (vault main_menu.md §34) - so these are the words retail
+/// itself draws, read off the live window (owner 2026-10-24). Their order follows select ids
+/// {1,2} of handler FFXiMain.dll retail-2026-09 RVA 0x1A64B0: item 1 opens `mcrselec`,
+/// item 2 opens `mcres20`.
+pub const MACRO_ROW_EDIT_MACRO: &str = "Edit Macro";
+pub const MACRO_ROW_EDIT_EQUIP_SETS: &str = "Edit Equip.Sets";
+const MACRO_LAUNCHER_ENTRIES: &[&str] = &[MACRO_ROW_EDIT_MACRO, MACRO_ROW_EDIT_EQUIP_SETS];
 
 /// The Config family's windows, in kuluu drill order — the shape the DATs cannot
 /// state. Every row label inside these windows lives only in the DATs: rows are
@@ -2073,6 +2201,11 @@ pub struct ConfigDatRows {
     /// two columns of 11 that way); windows with no blocks (`btlskill`, the skill lists) keep
     /// kuluu's flow layout.
     pub row_xyw: std::collections::BTreeMap<String, Vec<(i16, i16, i16)>>,
+    /// Every record's blocks in file order as `(x, y, width, height)` inside its frame, including the
+    /// blocks that carry no UI string. The macro palette needs this copy: `mcr1pall`/`mcr2pall`
+    /// declare their ten keytop blocks per grid window without any caption id at all, and
+    /// `hud::macro_pallet_view` lays its tiles from those rects.
+    pub item_blocks: std::collections::BTreeMap<String, Vec<(i16, i16, i16, i16)>>,
     /// The myroom door row's two visible captions: closed at
     /// [`ffxi_dat::menu_windows::MOGHOUSE_DOOR_CAPTION_CLOSED_ID`] and open at
     /// `.._OPEN_ID`, both from the caption catalog (index 0 = shut, 1 = open). Retail rewrites the
@@ -2129,6 +2262,15 @@ impl ConfigDatRows {
             height: extent.map(|&(height, _)| f32::from(height)),
             anchor: extent.map_or(FRAME_ANCHOR_NONE, |&(_, anchor)| anchor),
         })
+    }
+
+    /// One record's blocks (with their heights, which [`Self::row_xyw`] drops) in file order.
+    /// Windows whose blocks are all captioned read the same rects either way; the palette grids are
+    /// the family that only ever appears here.
+    pub fn item_blocks(&self, name: &str) -> Option<&Vec<(i16, i16, i16, i16)>> {
+        self.item_blocks
+            .get(name)
+            .filter(|blocks| !blocks.is_empty())
     }
 }
 
@@ -2310,6 +2452,7 @@ impl ConfigDatRows {
         let mut frames = std::collections::BTreeMap::new();
         let mut frame_extents = std::collections::BTreeMap::new();
         let mut row_xyw = std::collections::BTreeMap::new();
+        let mut item_blocks = std::collections::BTreeMap::new();
         for (name, window) in &windows {
             if let Some(frame) = &window.frame {
                 frames.insert(name.clone(), (frame.x, frame.y, frame.width));
@@ -2323,10 +2466,20 @@ impl ConfigDatRows {
             if !slots.is_empty() {
                 row_xyw.insert(name.clone(), slots);
             }
+            let blocks: Vec<(i16, i16, i16, i16)> = window
+                .items
+                .iter()
+                .flatten()
+                .map(|item| (item.x, item.y, item.width, item.height))
+                .collect();
+            if !blocks.is_empty() {
+                item_blocks.insert(name.clone(), blocks);
+            }
         }
         self.frames = frames;
         self.frame_extents = frame_extents;
         self.row_xyw = row_xyw;
+        self.item_blocks = item_blocks;
         let labelled_from_text_a: std::collections::BTreeSet<&str> =
             config_window_names().collect();
         let mut row_help = std::collections::BTreeMap::new();
@@ -2449,6 +2602,13 @@ fn display_order(ys: Option<&Vec<i16>>, len: usize) -> Vec<usize> {
     order
 }
 
+/// Root rows whose drawn caption is ruled rather than catalog-read. Page-2 row 6
+/// carries the catalog string `MacroPalette`; kuluu draws it as
+/// [`ROOT_MACRO_PALETTE`]. Indexes address the chained menuwind+socialme label
+/// list that `CommandSelectorCaptions::ensure_loaded` builds, so a catalog shift
+/// in row order moves the ruling with the page length and nothing else.
+const ROOT_CAPTION_RULINGS: [(usize, &str); 1] = [(ROOT_PAGE_1_LEN + 5, ROOT_MACRO_PALETTE)];
+
 /// The retail selector windows' row captions, read from their DAT records at
 /// runtime (bead kuluu-1z9qs): every live item block names its caption through
 /// the short-caption catalog id (loader FFXiMain.dll retail-2026-09 RVA
@@ -2497,6 +2657,11 @@ impl CommandSelectorCaptions {
         };
         if let (Some(first), Some(second)) = (page_labels("menuwind"), page_labels("socialme")) {
             self.labels = first.into_iter().chain(second).collect();
+            for (row, ruling) in ROOT_CAPTION_RULINGS {
+                if let Some(slot) = self.labels.get_mut(row) {
+                    *slot = (*ruling).to_string();
+                }
+            }
         }
         // A failed read is not retried per frame; the pinned static copy serves.
         self.loaded = true;
@@ -4740,6 +4905,8 @@ pub fn menu_row_disabled(
         MenuKind::HomeView => {
             snap.myroom.is_some_and(|room| room.door_open) && home_row_gated_by_door(index)
         }
+        // ur/155: a storage bag the server never granted draws grey (and refuses its select).
+        MenuKind::MogContainers => mog_container_row_disabled(index, snap),
         MenuKind::Arrange(window) => window.row_disabled(index),
         _ => false,
     }
@@ -4763,8 +4930,91 @@ pub fn home_view_row_container(label: &str) -> Option<u8> {
         "Mog Sack" => Some(c::LOC_MOGSACK),
         "M.Ward." => Some(c::LOC_WARDROBE),
         "Safe 2" => Some(c::LOC_MOGSAFE2),
-        _ => None,
+        // The retail box names (`mogcont`'s own labels, incl. wardrobes 2-8) resolve through the
+        // one container-name source rather than a second table.
+        _ => mog_container_row_container(label),
     }
+}
+
+/// Every storage bag `mogcont` lists, in its handler's select-item order (FFXiMain.dll
+/// retail-2026-09 RVA 0x14EC40 answers items 1..0xF with exactly these ids — all LSB containers
+/// except INVENTORY, TEMPITEMS and RECYCLEBIN; vault main_menu.md §32). kuluu-session's
+/// `storage_rows()` emits the same set for the server-side Mog Menu dialog.
+pub fn mog_container_ids() -> [u8; 15] {
+    use ffxi_proto::map::container as c;
+    [
+        c::LOC_MOGSAFE,
+        c::LOC_MOGSAFE2,
+        c::LOC_STORAGE,
+        c::LOC_MOGLOCKER,
+        c::LOC_MOGSATCHEL,
+        c::LOC_MOGSACK,
+        c::LOC_MOGCASE,
+        c::LOC_WARDROBE,
+        c::LOC_WARDROBE2,
+        c::LOC_WARDROBE3,
+        c::LOC_WARDROBE4,
+        c::LOC_WARDROBE5,
+        c::LOC_WARDROBE6,
+        c::LOC_WARDROBE7,
+        c::LOC_WARDROBE8,
+    ]
+}
+
+/// The `mogcont` row labels: each is [`ffxi_proto::map::container::name`] of the id at the same
+/// position in [`mog_container_ids`] (pinned by `mog_container_rows_are_the_container_names_in_order`).
+/// It stands as a const list only because the static-entries law hands out a `'static` slice.
+pub const MOG_CONTAINER_ROWS: &[&str] = &[
+    "Mog Safe",
+    "Mog Safe 2",
+    "Storage",
+    "Mog Locker",
+    "Mog Satchel",
+    "Mog Sack",
+    "Mog Case",
+    "Mog Wardrobe",
+    "Mog Wardrobe 2",
+    "Mog Wardrobe 3",
+    "Mog Wardrobe 4",
+    "Mog Wardrobe 5",
+    "Mog Wardrobe 6",
+    "Mog Wardrobe 7",
+    "Mog Wardrobe 8",
+];
+
+/// The bag a `mogcont` row opens, read off the container-name source so no second label table can
+/// drift from it.
+pub fn mog_container_row_container(label: &str) -> Option<u8> {
+    use ffxi_proto::map::container as c;
+    mog_container_ids()
+        .into_iter()
+        .find(|id| c::name(*id) == Some(label))
+}
+
+/// Which `mogcont` rows the server has not granted: a bag it sized to zero draws dim and refuses
+/// its select (ur/65 "if its grey.. why can i click it" law). kuluu-session folds s2c 0x01C ITEM_MAX
+/// as one frame covering every container id, then drops the zero-capacity ones when projecting the
+/// snapshot (`project_containers`), so once any bag of this set is reported a missing one means a
+/// grant of zero; before that first frame nothing is dimmed (no invented greys).
+///
+/// Still unmapped [I]: retail also dims wardrobe slots the player has not bought, which no packet
+/// kuluu reads yet carries, so those rows stay live until that byte is grounded.
+pub fn mog_container_row_disabled(index: usize, snap: &kuluu_snapshot::SceneSnapshot) -> bool {
+    let Some(id) = mog_container_ids().get(index).copied() else {
+        return true;
+    };
+    match snap.container(id) {
+        // LSB's zero-capacity sentinel (e.g. an expired Mog Locker lease across a zone change).
+        Some(view) => view.capacity == 0,
+        None => mog_container_caps_folded(snap),
+    }
+}
+
+/// True once the server's capacity frame has reached the snapshot for at least one of the bags.
+fn mog_container_caps_folded(snap: &kuluu_snapshot::SceneSnapshot) -> bool {
+    mog_container_ids()
+        .into_iter()
+        .any(|id| snap.container(id).is_some())
 }
 
 /// The two home-view rows that are text commands (select ids 4 and 5 of handler
@@ -4910,7 +5160,10 @@ pub fn renders_bespoke_screen(kind: MenuKind) -> bool {
             | MenuKind::EquipSlot(_)
             | MenuKind::Items
             | MenuKind::UsableItems
+            | MenuKind::BazaarComment
             | MenuKind::Map
+            // The two-rows-of-ten keytop band, drawn by `hud::macro_pallet_view`.
+            | MenuKind::MacroPallet { .. }
     )
 }
 
@@ -5154,6 +5407,16 @@ pub struct MenuStackWindowRow {
     pub slot: usize,
 }
 
+/// ur/152: the blue "you have not read this yet" bullet of one pooled list row
+/// (quest-hub law of ur/90 in pooled form). One glyph per row slot, an absolute
+/// sibling the fill pass rides along the measured row so it can never sit off
+/// from its label.
+#[derive(Component)]
+pub struct MenuStackWindowBullet {
+    pub window: usize,
+    pub slot: usize,
+}
+
 /// ur/76 law for the pooled windows: when a framed mission/quest child draws as
 /// its own surface (ur/94-98) it wears the same caption-band ◄ ► pair there.
 #[derive(Component)]
@@ -5229,10 +5492,11 @@ impl PooledSeats {
     }
 }
 
-/// The mission log's size limit (ur/64: "w/ scroll, has size limit") — retail's
-/// `miss00` frames six rows and hands the rest to the right-edge bar. Pins are
-/// lines counted, not measured.
-pub const MISSION_LOG_VISIBLE_ROWS: usize = 6;
+/// The mission log's size limit (ur/64: "w/ scroll, has size limit") - anything longer
+/// scrolls with the cursor and reports itself on the right-edge bar. Owner ruling
+/// ur/148: one page of Currencies (`CURRENCY_VISIBLE_ROWS`), not six. Pins are lines
+/// counted, not measured.
+pub const MISSION_LOG_VISIBLE_ROWS: usize = 8;
 
 #[derive(Message, Debug, Clone, Copy)]
 pub struct MenuRowActivated {
@@ -5309,6 +5573,11 @@ pub fn record_window_name(kind: MenuKind) -> Option<&'static str> {
         // block N draws at `mcr{N}edit`'s own frame.
         MenuKind::MacroEditor { block: 0, .. } => "mcr1edit",
         MenuKind::MacroEditor { block: 1, .. } => "mcr2edit",
+        // The book options window takes kuluu's right-side column (owner ruling 2026-10-24: "THAT
+        // MENU go on the right"), so its x=0 record is named for identity only and never seated.
+        MenuKind::MacroBookOptions { .. } => "mcrselop",
+        MenuKind::EquipSetOptions { .. } => "mcresmn",
+        MenuKind::MacroPallet { .. } => "mcr1pall",
         kind if crate::hud::unity_fp::is_unity_fp_window(kind) => {
             return crate::hud::unity_fp::unity_fp_window_name(kind);
         }
@@ -5331,6 +5600,9 @@ pub const MOUNT_LIST_WINDOW: &str = "mount";
 pub const EMOTE_LIST_WINDOW: &str = "emote";
 /// The Mog House menu.
 pub const MYROOM_WINDOW: &str = "myroom";
+/// The Mog House storage-box list `menu    mogcont` (§32). kuluu draws it in the command column, so
+/// this name seats its cursor memory only — the record's own frame stays unread [I].
+pub const MOGCONT_WINDOW: &str = "mogcont";
 /// Mog House Change Jobs.
 pub const JOBCHANG_WINDOW: &str = "jobchang";
 
@@ -5349,9 +5621,15 @@ pub fn registry_window(kind: MenuKind) -> Option<&'static str> {
                 .copied()
                 .flatten();
         }
-        MenuKind::KeyItems => "evitem",
+        // ur/152: Examine and the description window are the same `evitem`
+        // seat - one box relabelled down the whole family.
+        MenuKind::KeyItems
+        | MenuKind::KeyItemList { .. }
+        | MenuKind::KeyItemExamine { .. }
+        | MenuKind::KeyItemText { .. } => "evitem",
         MenuKind::UsableItems => "iuse",
         MenuKind::Items => crate::myroom_arrange::INVENTOR_WINDOW,
+        MenuKind::MogContainers => MOGCONT_WINDOW,
         MenuKind::Equipment => "equip",
         MenuKind::AutomatonEquip => "pupequip",
         MenuKind::MpCustomize => "mp_mncst",
@@ -5413,6 +5691,8 @@ pub fn cursor_rule(window: &str) -> Option<OpenCursor> {
         "friend",
         ROOMLIST_DAT_WINDOW,
         "cmbhlst",
+        // A box list the command row opens fresh each time starts at its first bag.
+        MOGCONT_WINDOW,
     ];
     const REMEMBERED: &[&str] = &[
         MAIN_MENU_WINDOW,
@@ -5540,6 +5820,31 @@ pub fn last_item_row(
 /// The frame a kind draws at when its record sits left of the selector column. Selector
 /// records (x=384, pinned to the right edge) draw in kuluu's selector column instead.
 fn side_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<RecordFrame> {
+    // ur/151 (owner capture 60bb1ada): the Key Items windows open LEFT like every
+    // accepted list family - `evitem`'s own DAT seat lands them beside Commands,
+    // which is exactly what the owner ruled out. The pinned-left frame below is
+    // their seat whatever the DAT says.
+    if matches!(
+        kind,
+        MenuKind::KeyItems
+            | MenuKind::KeyItemList { .. }
+            | MenuKind::KeyItemExamine { .. }
+            | MenuKind::KeyItemText { .. }
+            // The macro family are right-side law windows: they take the selector column the way
+            // the other right-side lists do, wherever their own records happen to sit.
+            // …and the two option boxes, whose records sit at x=0: their seat is computed beside
+            // the pager instead (`pinned_option_box_frame`).
+            | MenuKind::MacroBookOptions { .. }
+            | MenuKind::EquipSetOptions { .. }
+            | MenuKind::MacrosPalette
+            | MenuKind::MacroSelect
+            | MenuKind::MacroResult
+            // The palette band lays itself out at its own record (`hud::macro_pallet_view` reads the
+            // `mcr1pall` blocks directly), so it never takes a generic seat of any kind.
+            | MenuKind::MacroPallet { .. }
+    ) {
+        return None;
+    }
     let frame = frames.record_frame(record_window_name(kind)?)?;
     (frame.x < LEFT_HALF_MAX_X).then_some(frame)
 }
@@ -5550,9 +5855,38 @@ fn side_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<RecordFra
 /// them), so the pinned copy keeps the side decided at open time rather than by DAT load
 /// timing — an early-opened quest window landing beside Commands is ur/82 ("the quest window
 /// should open on the LEFT side"); retail anchors its panel there even with nothing loaded.
+/// The two option boxes (`mcrselop`/`mcresmn`) do not get their records' x=0 corner and must not
+/// take the selector column either: the pager they came from keeps that seat flush right (owner
+/// ruling 2026-10-24: "you still need tho show the book list on right"), so each box is pinned to
+/// the slot immediately beside it, at its record's own width.
+pub const OPTION_BOX_GAP_PX: f32 = 8.0;
+
+fn pinned_option_box_frame(kind: MenuKind) -> Option<RecordFrame> {
+    if !matches!(
+        kind,
+        MenuKind::MacroBookOptions { .. } | MenuKind::EquipSetOptions { .. }
+    ) {
+        return None;
+    }
+    let width = option_box_pane_width(kind);
+    Some(RecordFrame {
+        x: MENU_DESIGN_WIDTH - MENU_RIGHT_EDGE - status_pane_width() - width - OPTION_BOX_GAP_PX,
+        y: MENU_COLUMN_TOP,
+        width,
+        height: None,
+        anchor: FRAME_ANCHOR_RIGHT_EDGE,
+    })
+}
+
 fn pinned_left_frame(kind: MenuKind) -> Option<RecordFrame> {
     match kind {
-        MenuKind::QuestMenu
+        // ur/151: the Key Items family joins the left-anchored lists, and by
+        // the guard in `side_record_frame` it is the ONLY seat they can take.
+        MenuKind::KeyItems
+        | MenuKind::KeyItemList { .. }
+        | MenuKind::KeyItemExamine { .. }
+        | MenuKind::KeyItemText { .. }
+        | MenuKind::QuestMenu
         | MenuKind::QuestList { .. }
         | MenuKind::QuestDetail { .. }
         | MenuKind::MissionDetail { .. }
@@ -5590,11 +5924,42 @@ pub fn dock_placement(
 /// menu in the same place AS commands. (commands closes)") : when the missions list focuses,
 /// Commands does not linger beside it as an opener - the list takes its column. Debug joins by the same ruling
 /// (ur/72: "the command window should hide/close" while the Debug window is open).
+/// ur/156 adds the Mog House box list by the same ruling (owner: "WHY IS THE COMMAND MENU STILL
+/// THERE" when View House opens): the Commands template never lingers beside it.
+/// The bazaar setup panel joins by that ruling too (owner 2026-10-24: "there should be no left
+/// panel when bazaar is selected", and its retail capture shows the panel drawn alone where the
+/// Command menu stands): it wears the command column rather than pairing with it. The macro
+/// launcher follows the same law - two right-side windows standing together is ruled out outright
+/// (owner 2026-10-24: "you NEVER have two right side menus like that shit").
 fn covers_main_menu(kind: MenuKind) -> bool {
     matches!(
         kind,
-        MenuKind::Status | MenuKind::RetailConfig | MenuKind::MissionList | MenuKind::Debug
+        MenuKind::Status
+            | MenuKind::RetailConfig
+            | MenuKind::MissionList
+            | MenuKind::Debug
+            | MenuKind::MogContainers
+            | MenuKind::BazaarStalls
+            // The macro drills replace their launcher instead of pairing beside it
+            // (owner 2026-10-24: "you NEVER have two right side menus like that shit").
+            // The option boxes are NOT on that list: their pager has to stay standing in the
+            // column beside them (owner 2026-10-24: "you still need tho show the book list on right").
+            | MenuKind::MacroSelect
+            | MenuKind::MacroResult
+            | MenuKind::MacrosPalette
+            // The palette band is the widest thing in this family and it stands alone: the owner's
+            // capture of 2026-10-24 shows it with no book list, no option box and no Commands.
+            | MenuKind::MacroPallet { .. }
     )
+}
+
+/// Whether a focused kind rules out every older window in the stack, not just the command column. A
+/// framed child normally leaves its opener standing (see `covered_opener`), but the palette band
+/// spans nearly the whole design width and the owner ruled nothing else on screen with it ("why would
+/// you even .. leave th damn book menu on the right side"), so while it holds focus its ancestors
+/// lose their seats too.
+fn focus_excludes_ancestors(kind: MenuKind) -> bool {
+    matches!(kind, MenuKind::MacroPallet { .. })
 }
 
 /// Where one open window of the menu stack draws.
@@ -5774,12 +6139,17 @@ pub fn menu_stack_layout(stack: &MenuStack, frames: &ConfigDatRows) -> MenuStack
     let side = |index: usize| {
         side_record_frame(levels[index].kind, frames)
             .or_else(|| docked_record_frame(levels[index].kind, frames))
+            .or_else(|| pinned_option_box_frame(levels[index].kind))
             .or_else(|| pinned_left_frame(levels[index].kind))
     };
     let focused_frame = side(focused);
-    let records: Vec<(usize, RecordFrame)> = (0..focused)
-        .filter_map(|index| side(index).map(|frame| (index, frame)))
-        .collect();
+    let records: Vec<(usize, RecordFrame)> = if focus_excludes_ancestors(levels[focused].kind) {
+        Vec::new()
+    } else {
+        (0..focused)
+            .filter_map(|index| side(index).map(|frame| (index, frame)))
+            .collect()
+    };
     let mut windows: Vec<(usize, MenuWindowSeat)> = records
         .iter()
         .enumerate()
@@ -5831,8 +6201,24 @@ fn pane_width_for(kind: MenuKind) -> f32 {
         MenuKind::Root => status_pane_width(),
         MenuKind::Status => status_pane_width(),
         // Ur/94 round: the owner re-ruled that law for the Missions selector too
-        // - "fix its wide to same as commands".
-        MenuKind::MissionList => status_pane_width(),
+        // - "fix its wide to same as commands". The Mog House box list joins that size (ur/156:
+        // "same size as all the other right side law menus").
+        // …and the bazaar setup panel, which wears that column exactly like they do
+        // (owner 2026-10-24: "set it same as command window… all those right side windows use it").
+        // …and so does the macro launcher, which stands in that column too (owner 2026-10-24:
+        // "same size as all right side mneu").
+        // …and the macro select/result windows, which take that same column alone.
+        MenuKind::MissionList
+        | MenuKind::MogContainers
+        | MenuKind::BazaarStalls
+        | MenuKind::MacroSelect
+        | MenuKind::MacroResult
+        | MenuKind::MacrosPalette => status_pane_width(),
+        // …while an option box keeps its own narrow width - as wide as its longest row, never wider
+        // than the column - in the slot beside its pager.
+        MenuKind::MacroBookOptions { .. } | MenuKind::EquipSetOptions { .. } => {
+            option_box_pane_width(kind)
+        }
         _ => MENU_PANE_WIDTH,
     }
 }
@@ -5910,8 +6296,19 @@ fn spawn_stacked_window(parent: &mut ChildSpawnerCommands, slot: usize) {
     parent
         .spawn((MenuStackWindow { slot }, node, bg, border))
         .with_children(|w| {
+            // ur/150 ("Title needs move right, its inside the arrow"): the caption
+            // flows at the very padding edge and the ◄ sits on the same line at the
+            // same inset, so the pair overlapped. The word now starts clear of one
+            // arrow advance; retail wears it between its marks for the same reason.
             w.spawn((
                 MenuStackWindowTitle { window: slot },
+                Node {
+                    margin: UiRect::left(Val::Px(crate::ui_font::text_width_px(
+                        "◄ ",
+                        MENU_TITLE_FONT_PX,
+                    ))),
+                    ..default()
+                },
                 Text::new(""),
                 text_nowrap(),
                 style::text_font(MENU_ROW_FONT_PX),
@@ -5934,14 +6331,16 @@ fn spawn_stacked_window(parent: &mut ChildSpawnerCommands, slot: usize) {
                 },
                 BackgroundColor(theme::CELL_BG),
             ));
-            // ur/94-98: the caption pair, hung exactly as the pane wears it -
-            // a framed child drawn in this surface shows them (mission/quest
-            // kinds only) and pressing one steps members like Left/Right.
+            // ur/94-98: the caption pair rides a framed child's own title line (owner
+            // ur/147-148): that word flows one padding-top under the frame, so the arrows
+            // take the same drop and the window's side padding for inset. Pressing one
+            // steps members like Left/Right.
             for forward in [false, true] {
+                let inset = style::WINDOW_PAD_X_PX;
                 let (glyph, left, right) = if forward {
-                    ("►", Val::Auto, Val::Px(MENU_TITLE_MASK_PAD_PX))
+                    ("►", Val::Auto, Val::Px(inset))
                 } else {
-                    ("◄", Val::Px(MENU_TITLE_MASK_PAD_PX), Val::Auto)
+                    ("◄", Val::Px(inset), Val::Auto)
                 };
                 w.spawn((
                     MenuStackWindowArrow {
@@ -5951,10 +6350,7 @@ fn spawn_stacked_window(parent: &mut ChildSpawnerCommands, slot: usize) {
                     Button,
                     Node {
                         position_type: PositionType::Absolute,
-                        top: Val::Px(
-                            -(crate::ui_font::line_height_px(MENU_TITLE_FONT_PX) / 2.0)
-                                - MENU_BORDER_PX / 2.0,
-                        ),
+                        top: Val::Px(style::WINDOW_PAD_Y_PX),
                         left,
                         right,
                         display: Display::None,
@@ -5979,6 +6375,28 @@ fn spawn_stacked_window(parent: &mut ChildSpawnerCommands, slot: usize) {
                 },
                 BackgroundColor(theme::FRAME_EDGE),
             ));
+            // ur/152: each row slot keeps a blue-bullet glyph beside it, hung on
+            // the quest-hub dot column (the two-character prefix keeps columns 0-1);
+            // the fill pass re-seats it on the measured row every time that row moves.
+            let advance = crate::ui_font::text_width_px("x", MENU_ROW_FONT_PX);
+            for row in 0..DYNAMIC_VISIBLE_ROWS {
+                w.spawn((
+                    MenuStackWindowBullet {
+                        window: slot,
+                        slot: row,
+                    },
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(style::WINDOW_PAD_X_PX + 2.0 * advance),
+                        top: Val::Px(style::WINDOW_PAD_Y_PX),
+                        ..default()
+                    },
+                    Text::new(""),
+                    text_nowrap(),
+                    style::text_font(MENU_ROW_FONT_PX),
+                    TextColor(QUEST_MENU_BULLET_BLUE),
+                ));
+            }
             for row in 0..DYNAMIC_VISIBLE_ROWS {
                 w.spawn((
                     MenuStackWindowRow {
@@ -6268,6 +6686,54 @@ impl MissionTextCatalog {
         self.tables
             .get(&log)
             .and_then(|t| ffxi_dat::mission_dat::description(t, u32::from(id)))
+    }
+}
+
+/// The installed client's key-item table (names and description blocks), read
+/// once when a Key Items family window first opens. Law: the `sc_item_` section
+/// IS the text source retail draws Examine from - entry words 3/4 point at
+/// `{count, ptr}` wrapped-line blocks (`ffxi-dat::key_item`); where no install
+/// resolves or a block holds no printable line, callers show the neutral empty
+/// note rather than invented prose (ur/152).
+#[derive(Debug, Clone, Default)]
+pub struct KeyItemTexts {
+    loaded: bool,
+    table: ffxi_dat::KeyItemTable,
+}
+
+impl KeyItemTexts {
+    fn ensure_loaded(&mut self, root: Option<&ffxi_dat::DatRoot>) {
+        if self.loaded {
+            return;
+        }
+        let Some(root) = root else { return };
+        self.table = ffxi_dat::KeyItemTable::open_from_root(root);
+        self.loaded = true;
+    }
+
+    /// The item's description lines as the table wraps them, or `None` while no
+    /// install is loaded / the blocks held nothing printable.
+    pub fn description_lines(&self, key_item_id: u16) -> Option<&[String]> {
+        self.loaded
+            .then(|| self.table.description_lines(key_item_id))
+            .flatten()
+    }
+
+    /// Which key-item page an id belongs to, as the install's own table files it;
+    /// `None` when no install is loaded or that table has no row for the id.
+    pub fn page_of(&self, key_item_id: u16) -> Option<u8> {
+        self.loaded
+            .then(|| self.table.filing().page_of(key_item_id))
+            .flatten()
+    }
+
+    /// The page names in filing order, empty while no install is loaded.
+    pub fn page_labels(&self) -> &[String] {
+        if self.loaded {
+            self.table.filing().labels()
+        } else {
+            &[]
+        }
     }
 }
 
@@ -6864,60 +7330,272 @@ pub fn automaton_equip_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<Dynamic
 pub const MACRO_BLOCKS: usize = 2;
 pub const MACRO_SLOTS_PER_BLOCK: usize = 20;
 
-/// The mcrselec variant's rows: every filled slot of the client-local store in
-/// (block, index) order. Retail renders empty keytops as blank cells; kuluu
-/// lists only filled slots, so a fresh character sees the same nothing the
-/// retail grid shows (vault main_menu.md §41). Selecting is inert [I] until
-/// the macro-use seam lands.
-pub fn macro_select_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
-    let mut slots = snap.macros.clone();
-    slots.sort_by_key(|m| (m.block, m.index));
-    slots
-        .into_iter()
-        .map(|m| DynamicMenuRow {
+/// `mcrselec` and `mcres20` each record exactly twenty selectable row blocks
+/// (ids 1..=20, h=16) with a 15x9 block at x=-16 and another at x=113 - the
+/// screenful plus its ◄ ► pair. Both pagers therefore page whole screens of
+/// twenty; read either record with
+/// `cargo run -p ffxi-dat --example dat-menu-window-print -- mcrselec`.
+pub const MACRO_PAGER_ROWS: usize = 20;
+
+/// The book store behind `mcrselec`: forty books over two pages, drawn as retail
+/// names an unnamed one (`BookNN`, owner capture 2026-10-24 shows Book01..Book20).
+pub const MACRO_BOOK_COUNT: usize = 40;
+
+/// …and the equipment-set store behind `mcres20`: two hundred sets over ten pages
+/// (owner 2026-10-24). The client keeps one set-name file per page (`es0.dat`… in its own
+/// `USER/<id>/` directory, twenty names each) and writes retail's default name into the slot when
+/// the player has not named it - `Set001`, three digits where books use two.
+pub const EQUIP_SET_COUNT: usize = 200;
+
+/// The `mcrselec` pager's rows, twenty to a screen. Each row is the name the client gives that book
+/// in its own title files (see [`crate::hud::client_user_files`]); only a book those files never
+/// named falls back to retail's pattern for an unnamed one (`BookNN`, which is what the owner's
+/// capture of 2026-10-24 shows down the whole page).
+pub fn macro_book_rows(
+    files: &crate::hud::client_user_files::ClientUserFiles,
+) -> Vec<DynamicMenuRow> {
+    (0..MACRO_BOOK_COUNT)
+        .map(|book| DynamicMenuRow {
             tint: None,
-            label: format!("B{}/{}: {}", m.block + 1, m.index + 1, m.text),
-            action: DynamicMenuAction::MacroSlotRow {
-                block: m.block,
-                index: m.index,
+            label: files
+                .book_title(book)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("Book{:02}", book + 1)),
+            action: DynamicMenuAction::MacroBookRow { book: book as u8 },
+        })
+        .collect()
+}
+
+/// The five rows `mcrselop` draws for the selected book, in record order. Its blocks carry only
+/// table-14 descriptions (`Edit macro book.` … `Delete macro book.`) and no UI-string id, so
+/// retail's own words are pinned here - including its spelling of the first one (owner capture
+/// 2026-10-24).
+pub const MACRO_BOOK_OPTION_ROWS: [&str; 5] = ["Confim", "Change Name", "Copy", "Paste", "Delete"];
+
+/// Which of the five blocks each arm sits in, in record order (see [`MACRO_BOOK_OPTION_ROWS`]).
+pub const MACRO_BOOK_OPTION_CONFIRM: u8 = 0;
+pub const MACRO_BOOK_OPTION_CHANGE_NAME: u8 = 1;
+pub const MACRO_BOOK_OPTION_COPY: u8 = 2;
+pub const MACRO_BOOK_OPTION_PASTE: u8 = 3;
+pub const MACRO_BOOK_OPTION_DELETE: u8 = 4;
+
+/// The five rows `mcrselop` draws for the selected book. While its name row is being typed
+/// (`MenuLevel::macro_book_name_edit`) that row wears the draft and a caret instead of the words, so
+/// the field is in place rather than beside it (owner 2026-10-24 law on replacing what an edit edits:
+/// "the price replaces the item description while its open").
+pub fn macro_book_option_rows(name_edit: Option<&str>) -> Vec<DynamicMenuRow> {
+    MACRO_BOOK_OPTION_ROWS
+        .iter()
+        .enumerate()
+        .map(|(option, label)| DynamicMenuRow {
+            tint: None,
+            label: if option as u8 == MACRO_BOOK_OPTION_CHANGE_NAME {
+                name_edit
+                    .map(|draft| format!("{draft}_"))
+                    .unwrap_or_else(|| (*label).to_string())
+            } else {
+                (*label).to_string()
+            },
+            action: DynamicMenuAction::MacroBookOptionRow {
+                option: option as u8,
             },
         })
         .collect()
 }
 
-/// Rows of kuluu's Bazaar stall picker: every PC in the zone whose
-/// `Flags1.BazaarFlag` is set — LSB pushes it on the entity stream as
-/// `hasBazaar()` (`char_update.cpp`; vault main_menu.md §33). Self never
-/// browses its own stall from here. Labels are kuluu pins (the retail window
-/// is chrome-only, §33); selecting sends c2s 0x105 for that seller.
-pub fn bazaar_stall_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
-    let mut rows: Vec<DynamicMenuRow> = snap
-        .entities
-        .iter()
-        .filter(|e| is_bazaar_stall_entity(e, snap.self_char_id))
-        .map(|e| DynamicMenuRow {
-            tint: None,
-            label: format!("{}'s Bazaar", e.name.as_deref().unwrap_or_default()),
-            action: DynamicMenuAction::BazaarStall { char_id: e.id },
-        })
-        .collect();
-    if rows.is_empty() {
-        rows.push(DynamicMenuRow {
-            tint: None,
-            label: "(no player bazaars open nearby)".to_string(),
-            action: DynamicMenuAction::BazaarStall { char_id: u32::MAX },
-        });
+/// The keytops of one book's palette in the order kuluu draws them. The owner ruled the alt row
+/// above the ctrl row (2026-10-24: "alt on top, ctrl on bot"); retail's own two grid windows stack
+/// the other way about (`mcr1pall` then `mcr2pall`). The hotkey words are what a capture of those
+/// blocks shows printed in them.
+pub const MACRO_PALLET_HOTKEYS: [&str; 10] = [
+    "Ctrl1", "Ctrl2", "Ctrl3", "Ctrl4", "Ctrl5", "Ctrl6", "Ctrl7", "Ctrl8", "Ctrl9", "Ctrl0",
+];
+pub const MACRO_PALLET_HOTKEYS_ALT: [&str; 10] = [
+    "Alt1", "Alt2", "Alt3", "Alt4", "Alt5", "Alt6", "Alt7", "Alt8", "Alt9", "Alt0",
+];
+pub const MACRO_PALLET_SLOTS_PER_KEYSET: usize = 10;
+
+/// The twenty keytops of one book's palette, in the order `hud::macro_pallet_view` draws them. Each
+/// label is the display name the player gave that macro, read verbatim out of their own macro file;
+/// a keytop they left empty keeps an empty label, which is what retail's band shows for it too. The
+/// hotkey word belongs to the surface (printed in every block regardless of what fills it), so it is
+/// deliberately not baked into the label.
+///
+/// File order and draw order differ, and both are law: the client stores a book's first ten entries
+/// as the Ctrl+1..0 keytops and its second ten as Alt+1..0, while the owner ruled the alt row on top
+/// (2026-10-24: "alt on top, ctrl on bot"). So `file_slot` keeps each label tied to the entry it came
+/// from while rows stay in band order.
+pub fn macro_pallet_rows(
+    book: usize,
+    files: &crate::hud::client_user_files::ClientUserFiles,
+) -> Vec<DynamicMenuRow> {
+    let mut rows = Vec::with_capacity(MACRO_PALLET_HOTKEYS.len() + MACRO_PALLET_HOTKEYS_ALT.len());
+    for (keyset, hotkeys) in [
+        (1usize, &MACRO_PALLET_HOTKEYS_ALT[..]),
+        (0usize, &MACRO_PALLET_HOTKEYS[..]),
+    ] {
+        for (slot_in_keyset, _hotkey) in hotkeys.iter().enumerate() {
+            let file_slot = keyset * MACRO_PALLET_SLOTS_PER_KEYSET + slot_in_keyset;
+            let label = files
+                .macro_entry(book, file_slot)
+                .map(|entry| entry.name.clone())
+                .unwrap_or_default();
+            rows.push(DynamicMenuRow {
+                tint: None,
+                label,
+                // The keytop addresses the client-local store slot under it, which is what
+                // already drills a slot's editor rows; re-lawing that addressing to forty
+                // books belongs with writing those files back.
+                action: DynamicMenuAction::MacroSlotRow {
+                    block: keyset as u8,
+                    index: slot_in_keyset as u8,
+                },
+            });
+        }
     }
     rows
 }
 
-/// The §33 stall predicate on one entity; the hint-row sentinel id never
-/// matches, so those rows stay inert.
-pub fn is_bazaar_stall_entity(e: &kuluu_snapshot::Entity, self_char_id: Option<u32>) -> bool {
-    e.kind == kuluu_snapshot::EntityKind::Pc
-        && e.char_flags.bazaar
-        && Some(e.id) != self_char_id
-        && (e.id as u64) < u32::MAX as u64
+/// One step along a palette row (Left/Right). Each grid window links its own ten blocks end to end
+/// (`mcr1pall`'s first item keeps `left=Some(10)` and its last `right=Some(1)`), so travel wraps inside
+/// the keytop's own row instead of running over into the next one.
+pub fn macro_pallet_column_step(cursor: usize, right: bool) -> usize {
+    let columns = MACRO_PALLET_SLOTS_PER_KEYSET;
+    if columns == 0 {
+        return cursor;
+    }
+    let row_start = (cursor / columns) * columns;
+    let column = cursor - row_start;
+    row_start
+        + if right {
+            (column + 1) % columns
+        } else {
+            (column + columns - 1) % columns
+        }
+}
+
+/// One step between the palette's two rows (Up/Down): same column, other grid window. The record gives
+/// each block itself for `up`/`down`, leaving vertical travel to the pairing of `mcr1pall` and
+/// `mcr2pall`; with exactly two rows that pairs them both ways so a press never leaves the band.
+pub fn macro_pallet_row_step(cursor: usize, down: bool) -> usize {
+    let columns = MACRO_PALLET_SLOTS_PER_KEYSET;
+    if columns == 0 {
+        return cursor;
+    }
+    let keytops = MACRO_PALLET_HOTKEYS.len() + MACRO_PALLET_HOTKEYS_ALT.len();
+    let rows = (keytops + columns - 1) / columns;
+    if rows <= 1 {
+        return cursor;
+    }
+    let row = cursor / columns;
+    let column = cursor % columns;
+    let next_row = if down {
+        (row + 1) % rows
+    } else {
+        (row + rows - 1) % rows
+    };
+    next_row * columns + column
+}
+
+/// The `mcres20` pager's rows, twenty to a screen: the numbered pattern an unnamed set reads,
+/// until kuluu reads the names out of the client's own set files. A set's own
+/// command family (`mcresmn`: edit / name / copy / paste / delete / overwrite /
+/// equip) is not lawed yet, so the row is display-only.
+pub fn equip_set_rows(
+    files: &crate::hud::client_user_files::ClientUserFiles,
+) -> Vec<DynamicMenuRow> {
+    (0..EQUIP_SET_COUNT)
+        .map(|set| DynamicMenuRow {
+            tint: None,
+            label: files
+                .set_name(set)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("Set{:03}", set + 1)),
+            action: DynamicMenuAction::EquipSetRow { set: set as u16 },
+        })
+        .collect()
+}
+
+/// `mcresmn` (w=112 h=138) keeps its record's width, which is what `mcrselop` measured too before its
+/// own rows outgrew it ([`option_box_pane_width`]). Its eight blocks carry only table-14 descriptions,
+/// and the longest of them runs to 57 characters (`Set appearance of own equipment to that of this item
+/// set.`), which is most of kuluu's 512-wide design at menu type - no frame beside a pager could hold
+/// it. Retail's short words for those blocks are not in the DATs and the owner has not ruled them (the
+/// book options' five short words came off his capture of 2026-10-24), so nothing is invented here
+/// meanwhile, and its rows still run past the border like they have been.
+pub const EQUIP_SET_OPTION_PANE_WIDTH: f32 = 112.0;
+
+/// The width of an option box: as narrow as it can be and never narrower than its own rows need, which
+/// is how the Status selector sizes itself (owner ruling 2026-10-24 that an option window stays small,
+/// plus "this little menu is not big enough, make it bigger, so change name is inside the box").
+/// `mcrselop` measures w=112 h=90 at retail's glyph size; 112 px cannot hold `Change Name` at kuluu's
+/// menu type, which is why its rows ran outside the frame.
+pub fn option_box_pane_width(kind: MenuKind) -> f32 {
+    match kind {
+        MenuKind::MacroBookOptions { .. } => {
+            // `Change Name` is typed into its own row (see [`macro_book_option_rows`]), so the box has to
+            // hold a whole name field from the first press: growing mid-typing, or letting a draft run
+            // past the border, are the same fault as a short box. Measured on `M`s, which no real draft
+            // beats in any face.
+            let book_name_field =
+                "M".repeat(crate::hud::client_user_files::BOOK_TITLE_MAX_BYTES + 1);
+            let mut labels: Vec<&str> = MACRO_BOOK_OPTION_ROWS.to_vec();
+            labels.push(book_name_field.as_str());
+            fit_pane_width(&labels)
+        }
+        MenuKind::EquipSetOptions { .. } => EQUIP_SET_OPTION_PANE_WIDTH,
+        _ => MENU_PANE_WIDTH,
+    }
+}
+
+/// The eight blocks `mcresmn` draws for one equipment set, labelled with the only strings its
+/// record carries (its table-14 descriptions). Retail's short words for them are not in the DATs;
+/// the book options' short words came off a capture, these have not had one yet.
+pub const EQUIP_SET_OPTION_ROWS: [&str; 8] = [
+    "Edit this equipment set.",
+    "Name this equipment set.",
+    "Temporarily copy set.",
+    "Paste copied set.",
+    "Delete set.",
+    "Overwrite this set with the equipment you are currently wearing.",
+    "Equip this set.",
+    "Set appearance of own equipment to that of this item set.",
+];
+
+pub fn equip_set_option_rows() -> Vec<DynamicMenuRow> {
+    EQUIP_SET_OPTION_ROWS
+        .iter()
+        .enumerate()
+        .map(|(option, label)| DynamicMenuRow {
+            tint: None,
+            label: (*label).to_string(),
+            action: DynamicMenuAction::EquipSetOptionRow {
+                option: option as u8,
+            },
+        })
+        .collect()
+}
+
+/// The two DAT pagers page whole screens instead of scrolling a centred window.
+fn pager_rows(kind: MenuKind) -> Option<usize> {
+    matches!(kind, MenuKind::MacroSelect | MenuKind::MacroResult).then_some(MACRO_PAGER_ROWS)
+}
+
+/// Rows of the `bazaar` panel the Command menu's `Set Bazaar` row raises: retail
+/// draws exactly two, `Set Prices` over `Edit Comment`, and drops the Command
+/// list so the panel stands alone (owner's retail capture 2026-10-24). The
+/// stall-from-the-entity-bazaar-flag rows kuluu drew here were invented chrome,
+/// and they go with that reading.
+pub fn bazaar_setup_rows() -> Vec<DynamicMenuRow> {
+    ["Set Prices".to_string(), "Edit Comment".to_string()]
+        .into_iter()
+        .enumerate()
+        .map(|(row, label)| DynamicMenuRow {
+            tint: None,
+            label,
+            action: DynamicMenuAction::BazaarSetupRow { row: row as u8 },
+        })
+        .collect()
 }
 
 /// Retail's `miss00` law (ur/73): the child window is always two sections -
@@ -6947,25 +7625,37 @@ pub fn mission_detail_rows(
     // Draw order as (label, wire id): named lines carry their id so a select
     // name-opens this mission's text window (ur/80); headers and reasons stay
     // inert.
+    // Owner ruling ur/149: every entry hangs indented under its section header;
+    // only the `Current:` / `Completed:` headers sit flush.
+    const MISSION_ENTRY_INDENT: &str = "  ";
     let mut lines: Vec<(String, Option<u16>)> = vec![("Current:".to_string(), None)];
     match current.filter(|&id| !completed.contains(&(id as u16))) {
         Some(id) => {
             if let Some(label) = mission_label(texts, log, id as u16) {
-                lines.push((label, Some(id as u16)));
+                lines.push((format!("{MISSION_ENTRY_INDENT}{label}"), Some(id as u16)));
             }
         }
-        None => lines.push((mission_current_reason(snap, log).to_string(), None)),
+        None => lines.push((
+            format!(
+                "{MISSION_ENTRY_INDENT}{}",
+                mission_current_reason(snap, log)
+            ),
+            None,
+        )),
     }
     let mut named: Vec<(String, Option<u16>)> = Vec::new();
     for id in completed {
         if let Some(label) = mission_label(texts, log, id) {
-            named.push((label, Some(id)));
+            named.push((format!("{MISSION_ENTRY_INDENT}{label}"), Some(id)));
         }
     }
     lines.push(("Completed:".to_string(), None));
     if named.is_empty() {
-        // The capture's exact wording for an empty Completed section (ur/73).
-        lines.push(("No completed missions.".to_string(), None));
+        // The capture's exact wording (ur/73) for an empty Completed section.
+        lines.push((
+            format!("{MISSION_ENTRY_INDENT}No completed missions."),
+            None,
+        ));
     } else {
         lines.append(&mut named);
     }
@@ -7559,6 +8249,20 @@ pub fn refresh_dynamic_menu_rows(
     if mission_open && !dynamic.mission_texts.loaded {
         dynamic.mission_texts.ensure_loaded(dat_for_captions);
     }
+    // ur/152: the Key Items family reads its descriptions from the install's
+    // own `sc_item_` table on first open (owner ruling: DAT text, indexed by
+    // id, never hand-built).
+    let key_items_open = stack.is_some_and(|stack| {
+        stack.levels.iter().any(|level| {
+            matches!(
+                level.kind,
+                MenuKind::KeyItems | MenuKind::KeyItemList { .. } | MenuKind::KeyItemText { .. }
+            )
+        })
+    });
+    if key_items_open && !dynamic.key_item_texts.loaded {
+        dynamic.key_item_texts.ensure_loaded(dat_for_captions);
+    }
     // Quest windows draw from the same install table family: names and
     // briefings come from the DAT catalog indexed by its own id words, with
     // the scraped lattice as no-install fallback.
@@ -7880,8 +8584,8 @@ fn dynamic_rows_for(
             mission_detail_rows(snap, &dynamic.mission_texts, log, member)
         }
         MenuKind::MissionText { log, id } => mission_text_rows(&dynamic.mission_texts, log, id),
-        // The bazaar browser lists the zone's open player stalls (§33 wire law).
-        MenuKind::BazaarStalls => bazaar_stall_rows(snap),
+        // The setup panel retail raises for `Set Bazaar`: two fixed rows.
+        MenuKind::BazaarStalls => bazaar_setup_rows(),
         // ur/87: Quests opens this hub first; its drill rows push the filtered
         // quest00 lists below it.
         MenuKind::QuestMenu => quest_menu_rows(),
@@ -7894,7 +8598,22 @@ fn dynamic_rows_for(
         // The pupequip variant's fourteen automaton slot rows (vault
         // main_menu.md §39).
         MenuKind::AutomatonEquip => automaton_equip_rows(snap),
-        MenuKind::MacroSelect => macro_select_rows(snap),
+        // The two pagers list their whole store; the DAT record's twenty row blocks
+        // cap one screen of it (`pager_rows`).
+        MenuKind::MacroSelect => {
+            macro_book_rows(&crate::hud::client_user_files::client_user_files())
+        }
+        MenuKind::MacroResult => {
+            equip_set_rows(&crate::hud::client_user_files::client_user_files())
+        }
+        MenuKind::MacroBookOptions { .. } => {
+            macro_book_option_rows(level.macro_book_name_edit.as_deref())
+        }
+        MenuKind::MacroPallet { book } => macro_pallet_rows(
+            usize::from(book),
+            &crate::hud::client_user_files::client_user_files(),
+        ),
+        MenuKind::EquipSetOptions { .. } => equip_set_option_rows(),
         // Home-view job pick lists — both sides come from the same roster
         // (vault main_menu.md §53); the sub side renders empty until the
         // packet's sub-job grant arrived, like LSB refusing the row.
@@ -7973,7 +8692,12 @@ fn dynamic_rows_for(
             .unwrap_or_default(),
         MenuKind::Abilities => ability_flat_rows(snap),
         MenuKind::Items => inventory_rows(snap, active_bag.0, sort),
-        MenuKind::KeyItems => key_item_rows(snap),
+        MenuKind::KeyItems => key_items_hub_rows(),
+        MenuKind::KeyItemList { category } => {
+            key_item_page_rows(snap, &dynamic.key_item_texts, category)
+        }
+        // ur/152: the description window draws the install's own text lines.
+        MenuKind::KeyItemText { id } => key_item_text_rows(&dynamic.key_item_texts, id),
         // The retail opener `.text 0x225460` always opens the `abisortw` companion **first**,
         // so the captioned list lands on top and takes the keys (bead kuluu-o9qt7.34); kuluu
         // carries no live cross-pane focus, so the companion's single select item rides as the
@@ -8098,6 +8822,8 @@ fn order_dynamic_rows(
         // nonsense once already.
         MenuKind::ItemAction { .. }
         | MenuKind::KeyItems
+        | MenuKind::KeyItemList { .. }
+        | MenuKind::KeyItemText { .. }
         | MenuKind::EmoteList
         | MenuKind::Arrange(_)
         | MenuKind::StatusDetail { .. }
@@ -8374,15 +9100,102 @@ pub fn equip_row_tint(allows_now: bool, same_id_equipped: bool) -> Option<MenuRo
 }
 
 /// One row per owned key item, ascending global id, name from the scraped LSB
-/// table, unseen ids suffixed with [`KEY_ITEM_UNSEEN_SUFFIX`].
+/// table, unseen ids suffixed with [`KEY_ITEM_UNSEEN_SUFFIX`]. The windows show
+/// these through [`key_item_page_rows`]; this flat builder
+/// stays as one source of the row shape.
 pub fn key_item_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
     let mut ids: Vec<u16> = snap.key_items.clone();
     ids.sort_unstable();
     ids.into_iter()
         .map(|id| DynamicMenuRow {
             tint: None,
-            label: key_item_row_label(id, snap.key_items_seen.binary_search(&id).is_ok()),
+            label: key_item_row_label(id),
             action: DynamicMenuAction::KeyItem { id },
+        })
+        .collect()
+}
+
+/// ur/150 (owner capture of the retail window): the modern Key Item menu is a
+/// hub of pages listed before any item, quoted from the install's own key-item
+/// table: that table files each page under its own label row
+/// (`ffxi_dat::key_item::parse_key_item_filing`), and this list is pinned against
+/// it by `installed_page_labels_match_the_hub`.
+pub const KEY_ITEM_CATEGORY_LABELS: [&str; 10] = [
+    "Temporary Key Items",
+    "Permanent Key Items",
+    "Abyssea",
+    "Voidwatch",
+    "Geas Fete",
+    "Mounts",
+    "Mog Garden",
+    "Magical Maps",
+    "Claim Slips",
+    "Active Effects",
+];
+
+/// The Key Items hub: one row per key-item page, in the order retail's own table
+/// files them.
+pub fn key_items_hub_rows() -> Vec<DynamicMenuRow> {
+    KEY_ITEM_CATEGORY_LABELS
+        .iter()
+        .enumerate()
+        .map(|(category, label)| DynamicMenuRow {
+            tint: None,
+            label: (*label).to_string(),
+            action: DynamicMenuAction::OpenKeyItemCategory {
+                category: category as u8,
+            },
+        })
+        .collect()
+}
+
+/// One page's owned items, ascending id. Which page an id sits on is the
+/// install's answer: `ffxi_dat::key_item` reads retail's filing straight out of
+/// the key-item table (label rows closing runs of item rows), so nothing here
+/// classifies by name. An id with no row in that table has nowhere else to go and
+/// rides on the first page. Each row keeps the `KeyItem` select so a cursor-marked
+/// item marks seen.
+pub fn key_item_page_rows(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    texts: &KeyItemTexts,
+    category: u8,
+) -> Vec<DynamicMenuRow> {
+    let mut ids: Vec<u16> = snap.key_items.clone();
+    ids.sort_unstable();
+    ids.into_iter()
+        .filter(|&id| texts.page_of(id).unwrap_or(0) == category)
+        .map(|id| DynamicMenuRow {
+            tint: None,
+            label: key_item_row_label(id),
+            action: DynamicMenuAction::KeyItem { id },
+        })
+        .collect()
+}
+
+/// ur/152 ("missing item description then opens"): one row per line of the
+/// install's own `sc_item_` block for this item - retail's wrapping arrives as
+/// the table stored it, no re-wrapping; an item whose blocks held no printable
+/// line gets the neutral empty note instead of invented prose.
+pub fn key_item_text_rows(texts: &KeyItemTexts, id: u16) -> Vec<DynamicMenuRow> {
+    let mut labels: Vec<String> = texts
+        .description_lines(id)
+        .map(|lines| {
+            lines
+                .iter()
+                .map(|line| line.trim_end().to_string())
+                .filter(|line| !line.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if labels.is_empty() {
+        labels.push("(nothing recorded)".to_string());
+    }
+    labels
+        .into_iter()
+        .map(|label| DynamicMenuRow {
+            tint: None,
+            label,
+            action: DynamicMenuAction::KeyItemTextRow { id },
         })
         .collect()
 }
@@ -8667,9 +9480,19 @@ pub fn item_action_rows(
         item_no != ffxi_proto::map::GIL_ITEM_NO && !slot.locked && container != c::LOC_TEMPITEMS;
     if movable {
         let equipable = ffxi_vocab::equip_info::lookup(item_no).is_some();
-        for dest in crate::hud::item_screen::accessible_containers(snap) {
+        for dest in crate::hud::item_screen::openable_containers(snap) {
             if dest == container || dest == c::LOC_TEMPITEMS || (c::is_wardrobe(dest) && !equipable)
             {
+                continue;
+            }
+            // A destination without a free slot answers the move with a
+            // refusal re-push instead of carrying the item, so a full bag is
+            // never offered as a row (vendor/server/src/map/packets/
+            // c2s/0x029_item_move.cpp).
+            let dest_full = snap
+                .container(dest)
+                .is_some_and(|d| d.items.len() >= d.capacity as usize);
+            if dest_full {
                 continue;
             }
             // 0x029 item-move: recycle-bin items only come back out to the
@@ -9017,7 +9840,7 @@ pub fn update_main_menu(
     for (_, comp, mut text) in title_q.iter_mut() {
         let want = if comp.is_some() {
             parent_view
-                .map(|p| menu_title(p.kind).to_string())
+                .map(|p| window_caption(p.kind))
                 .unwrap_or_default()
         } else {
             root_aware_title(&view)
@@ -9031,10 +9854,11 @@ pub fn update_main_menu(
     // ur/76: a mission log window wears its ◄ ► on the caption band; no other
     // window showed them until ur/91's ruling gave the same pair to the quest
     // lists, which step regions Left/Right under it.
+    // …and the two pagers, whose records carry their own ◄ ► blocks beside the caption band.
     let arrows_wanted = matches!(
         surface.kind,
         MenuKind::MissionDetail { .. } | MenuKind::QuestList { .. }
-    );
+    ) || pager_rows(surface.kind).is_some();
     for (_, arrow, mut node, _) in decor_q.iter_mut() {
         if arrow.is_none() {
             continue;
@@ -9109,7 +9933,7 @@ pub fn update_main_menu(
                 label,
                 gated,
                 tint,
-                parent.cursor == list_idx,
+                !window_plain_text(parent.kind) && parent.cursor == list_idx,
                 /* focused */ false,
                 /* bullet_col */ false,
             );
@@ -9166,7 +9990,8 @@ pub fn update_main_menu(
             &scene.snapshot,
         );
 
-        let is_cursor = view.cursor == list_idx;
+        // ur/153: a plain-text window shows no cursor at all (see `window_plain_text`).
+        let is_cursor = !window_plain_text(view.kind) && view.cursor == list_idx;
         // A `statcom2` row the client will not answer draws grey with the cursor
         // still on it: retail disables ids 3/4/5/12/13 when the list opens
         // (FFXiMain.dll retail-2026-09 `.text 0x148B50`), and its dim is exactly half
@@ -9545,6 +10370,19 @@ fn learned_height(table: &[HeightPin], kind: MenuKind, rows: usize) -> Option<f3
         .map(|held| held.px)
 }
 
+/// ur/144 test switch (Shane). Verdict in: the hidden child flashed exactly like the drawn one,
+/// so drawing is NOT the culprit - OFF by default now, windows draw normally. Re-arm the test
+/// with `KULUU_HIDE_NEW_LEFT_WINDOW=1/on`. Inert under `cargo test`.
+fn hide_new_left_window_test() -> bool {
+    if cfg!(test) {
+        return false;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("KULUU_HIDE_NEW_LEFT_WINDOW"), Ok(v) if v == "1" || v.eq_ignore_ascii_case("on"))
+    })
+}
+
 /// Draws the open windows under the focused one that sit at their own record frames, each with
 /// its own rows and cursor, newer ones on top
 /// (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md).
@@ -9558,9 +10396,25 @@ pub(crate) fn update_menu_stack_windows(
     dock: Option<Res<crate::hud::dock::DockBoard>>,
     // Which level stands on which pooled surface (ur/139); click routing reads the same table.
     mut seats: ResMut<PooledSeats>,
+    // ur/152: the `&GlobalTransform` here and in `row_q` below feed the unseen-key-item
+    // dots' re-seat; they ride existing queries to keep this system under the
+    // engine's parameter ceiling.
     #[allow(clippy::type_complexity)] mut window_q: Query<
-        (&MenuStackWindow, &mut Node, &mut ZIndex, &ComputedNode),
-        (Without<MenuStackWindowArrow>, Without<MainMenuPane>),
+        (
+            &MenuStackWindow,
+            &mut Node,
+            &mut ZIndex,
+            &ComputedNode,
+            // Optional: a surface never laid out (a harness without relayout systems) has no
+            // transform, and requiring one would hide the window itself.
+            Option<&GlobalTransform>,
+        ),
+        (
+            Without<MenuStackWindowArrow>,
+            Without<MainMenuPane>,
+            // ur/152: dot nodes carry their own `&mut Node`; keep the sets provably disjoint.
+            Without<MenuStackWindowBullet>,
+        ),
     >,
     // One query for both scrollbar nodes (they are disjoint entities), so no
     // `&mut Node` overlap with the frames or rows above.
@@ -9575,22 +10429,48 @@ pub(crate) fn update_menu_stack_windows(
             Without<MenuStackWindow>,
             Without<MenuStackWindowArrow>,
             Without<MainMenuPane>,
+            // ur/152: the blue dot nodes are filled by `bullet_q` below.
+            Without<MenuStackWindowBullet>,
         ),
     >,
     // ur/94-98: the pooled caption pairs ride with their window's kind law.
     #[allow(clippy::type_complexity)] mut title_q: Query<
         (&MenuStackWindowTitle, &mut Text),
-        (Without<MenuStackWindowRow>, Without<MenuStackWindowArrow>),
+        (
+            Without<MenuStackWindowRow>,
+            Without<MenuStackWindowArrow>,
+            // ur/152: dot glyphs are `bullet_q`'s alone.
+            Without<MenuStackWindowBullet>,
+        ),
     >,
-    mut row_q: Query<
-        (&MenuStackWindowRow, &mut Node, &mut Text, &mut TextColor),
+    #[allow(clippy::type_complexity)] mut row_q: Query<
+        (
+            &MenuStackWindowRow,
+            &mut Node,
+            &mut Text,
+            &mut TextColor,
+            Option<&GlobalTransform>,
+        ),
         (
             Without<MenuStackWindow>,
             Without<MenuStackWindowArrow>,
             Without<MainMenuPane>,
+            Without<MenuStackWindowBullet>,
         ),
     >,
     mut arrow_q: Query<(&MenuStackWindowArrow, &mut Node), Without<MainMenuPane>>,
+    // ur/152: the blue bullets of unseen key items, re-seated on their measured rows below.
+    #[allow(clippy::type_complexity)] mut bullet_q: Query<
+        (&MenuStackWindowBullet, &mut Node, &mut Text),
+        (
+            Without<MenuStackWindowRow>,
+            Without<MenuStackWindowTitle>,
+            Without<MenuStackWindowArrow>,
+            Without<MenuStackWindowScrollTrack>,
+            Without<MenuStackWindowScrollThumb>,
+            Without<MainMenuPane>,
+        ),
+    >,
     // One pin state per pooled surface (see `PinState`). The selector-column surface is pinned by
     // `squeeze_menu_column` next door, never here.
     mut pins: Local<Vec<PinState>>,
@@ -9648,6 +10528,17 @@ pub(crate) fn update_menu_stack_windows(
             });
             let mut ordered: Vec<Shown> = Vec::new();
             for &(stack_index, frame) in &records {
+                // ur/144 TEST EVENT (Shane's isolation experiment): the open runs fully - the
+                // level pushes, rows build, help text updates, the selector drops its mark by
+                // law - but the NEW framed child is never drawn. If the right side still
+                // disturbs with the window invisible, the fault is in the state change, not
+                // the draw. Reverse without rebuild: `KULUU_HIDE_NEW_LEFT_WINDOW=0`.
+                if hide_new_left_window_test()
+                    && layout.covered_child()
+                    && Some(stack_index) == focus_index
+                {
+                    continue;
+                }
                 // The deepest chain ever drawn is ~5 levels against
                 // MAX_STACKED_WINDOWS=8 surfaces; a level past the pool simply stays
                 // undrawn until the pool grows with it.
@@ -9780,7 +10671,7 @@ pub(crate) fn update_menu_stack_windows(
         fxs.resize(MAX_STACKED_WINDOWS, WindowFx::default());
     }
 
-    for (window, mut node, mut z_index, computed) in window_q.iter_mut() {
+    for (window, mut node, mut z_index, computed, _tf) in window_q.iter_mut() {
         let mut want = node.clone();
         let shown_before = node.display != Display::None;
         let open = open_of(window.slot);
@@ -9968,9 +10859,8 @@ pub(crate) fn update_menu_stack_windows(
     // still being built (ur/139). The words on it belong to the window that just left, so they are
     // blanked for those frames - never frozen, which is exactly what looked like another menu's
     // labels being written into this box. Same law as the chrome-only grow-in above.
-    let relabel_holding_words = |slot: usize| {
-        !fresh && relabelled.get(slot).copied().unwrap_or(false)
-    };
+    let relabel_holding_words =
+        |slot: usize| !fresh && relabelled.get(slot).copied().unwrap_or(false);
 
     for (title, mut text) in title_q.iter_mut() {
         let Some(open) = open_of(title.window) else {
@@ -9991,13 +10881,14 @@ pub(crate) fn update_menu_stack_windows(
         // During the grow-in the caption stays blank - whatever word sat here was cleared while
         // the surface was free, and it lands with the rows on the frame full size arrives.
         if fresh && !growing(title.window) {
-            let want = menu_title(open.level.kind);
-            if **text != *want {
-                **text = want.to_string();
+            // ur/153: caption law - the Examine prompt wears its question here.
+            let want = window_caption(open.level.kind);
+            if **text != want.as_str() {
+                **text = want;
             }
         }
     }
-    for (row, mut node, mut text, mut color) in row_q.iter_mut() {
+    for (row, mut node, mut text, mut color, _tf) in row_q.iter_mut() {
         let Some(open) = open_of(row.window) else {
             // The window surface hides as one node but the rows are separate entities —
             // code them hidden too (C85-95 law). Skipping here is what left stale
@@ -10051,7 +10942,8 @@ pub(crate) fn update_menu_stack_windows(
             label,
             gated,
             tint,
-            open.level.cursor == idx,
+            // ur/153: prose windows never take the mark or its gold.
+            !window_plain_text(kind) && open.level.cursor == idx,
             open.focused,
             /* bullet_col */ false,
         );
@@ -10060,6 +10952,68 @@ pub(crate) fn update_menu_stack_windows(
         }
         if color.0 != want_color {
             color.0 = want_color;
+        }
+    }
+
+    // ur/152 ("blue dots to say if you read it/new"): unseen key items in the
+    // bucket lists wear the quest hub's blue bullet (`QUEST_MENU_BULLET_BLUE`,
+    // ur/90) - a glyph sibling per row slot, re-seated on the row node measured
+    // this pass so a dot can never sit off from its label. Blanking runs always;
+    // glyphs wait for the shared `fresh` law and hide through grow-in/relabel,
+    // exactly like every other fill here. Only rows carrying a `KeyItem` action
+    // take dots - hub categories, Examine answers and description lines never.
+    let dot_advance = crate::ui_font::text_width_px("x", MENU_ROW_FONT_PX);
+    let window_origins: Vec<(usize, f32, f32)> = window_q
+        .iter()
+        .filter_map(|(win, _, _, _, tf)| {
+            let p = tf?.translation();
+            Some((win.slot, p.x, p.y))
+        })
+        .collect();
+    let row_boxes: Vec<(usize, usize, f32, f32)> = row_q
+        .iter()
+        .filter_map(|(row, _, _, _, tf)| {
+            let p = tf?.translation();
+            Some((row.window, row.slot, p.x, p.y))
+        })
+        .collect();
+    for (bullet, mut node, mut span) in bullet_q.iter_mut() {
+        // The dot glyph this slot wants; blanking always runs, glyphs wait for
+        // `fresh` and a measured row exactly like every other fill here.
+        let mut want = "";
+        if fresh && !growing(bullet.window) && !relabel_holding_words(bullet.window) {
+            if let Some(open) = open_of(bullet.window) {
+                let idx = open.start + bullet.slot;
+                let unseen_key_item = bullet.slot < open.visible
+                    && idx < open.total
+                    && matches!(open.level.kind, MenuKind::KeyItemList { .. })
+                    && open.rows.get(idx).is_some_and(|row| {
+                        matches!(row.action, DynamicMenuAction::KeyItem { id }
+                            if scene.snapshot.key_items_seen.binary_search(&id).is_err())
+                    });
+                // A dot never shows before its row has been measured to sit
+                // where the glyph will go - no seat, no dot.
+                if unseen_key_item {
+                    let win_origin = window_origins.iter().find(|(w, _, _)| *w == bullet.window);
+                    let row_box = row_boxes
+                        .iter()
+                        .find(|(w, s, _, _)| *w == bullet.window && *s == bullet.slot);
+                    if let (Some((_, wx, wy)), Some((_, _, rx, ry))) = (win_origin, row_box) {
+                        let left = Val::Px(rx - wx + 2.0 * dot_advance);
+                        let top = Val::Px(ry - wy);
+                        if node.left != left {
+                            node.left = left;
+                        }
+                        if node.top != top {
+                            node.top = top;
+                        }
+                        want = "●";
+                    }
+                }
+            }
+        }
+        if span.as_str() != want {
+            **span = want.to_string();
         }
     }
 
@@ -10155,12 +11109,12 @@ pub(crate) fn update_menu_stack_windows(
     }
 }
 
-/// The selector-column relabel law (owner ruling 2026-10-22): when that one surface takes a
-/// different menu kind - Commands to Missions, or yielding to and returning from a bespoke screen -
-/// it plays its close-out then grow-in through the same center-hold squeeze function as the
-/// record-framed windows instead of swapping words under a static frame. Words are hidden for every
-/// animating frame (`update_main_menu` fills them underneath all along) and show again once the box
-/// is full; a cycle whose new shape was never measured grows in plain once and learns.
+/// ur/142 (owner ruling, in-game at 60 fps: "the box drops to 1 height, then grows (about 1-2
+/// frames). This is BAD behavior.. when all its supposed todo is remove the >"): the selector
+/// column NEVER animates a menu-kind swap. A relabel lands instantly on its own frame and
+/// `update_main_menu` writes the new rows live that same frame - retail swaps in place, only the
+/// cursor marker moves (ur/77). ur/105's close-out/grow-in cycle is revoked: per-window squeeze fx
+/// belongs to pooled record-framed windows and the dismissal umbrella below, not this seat.
 ///
 /// The column's height pin rides here (the same law as the pooled pass): `update_main_menu`'s
 /// signature stands at bevy's arity ceiling, and with relabel fx it could not sit there either.
@@ -10199,6 +11153,7 @@ pub(crate) fn squeeze_menu_column(
             Without<MainMenu>,
         ),
     >,
+
     // The menu root stays painted through a dismissal so the squeeze law is actually seen:
     // `update_main_menu` hides it (and with it every child surface) the instant `InputMode`
     // leaves Menu. During the held frames this pass owns that visibility, frame-exact.
@@ -10213,14 +11168,6 @@ pub(crate) fn squeeze_menu_column(
     >,
     mut fx_column: Local<crate::hud::menu_anim::WindowFx>,
     mut prev_kind: Local<Option<MenuKind>>,
-    // The column's last laid-out box, in style px, captured as a relabel close arms. Its right edge
-    // is the one anchor `place_in_column` keeps, so it is what a grow-in must sit on: centering the
-    // incoming box on the 512-wide design instead of that real seat stood the whole opening box
-    // left of centre on any wider window - chrome only, no words, for five frames, on every
-    // Commands-to-Missions relabel (ur/140: "wtf is that random ass window over there", and every
-    // earlier report of a second menu popping beside the first). A column never laid out yet has no
-    // seat to remember and keeps drawing plain.
-    mut last_seat: Local<Option<crate::hud::menu_anim::FullRect>>,
     mut column_pin: Local<PinState>,
     // Heights this seat's shapes have painted, for frame-one opens (see `remember_height`).
     mut heights: Local<Vec<HeightPin>>,
@@ -10231,6 +11178,23 @@ pub(crate) fn squeeze_menu_column(
     mut ui_up_last: Local<bool>,
 ) {
     use crate::hud::menu_anim::{FullRect, WindowFx};
+    // The dismissal umbrella (owner 2026-10-22: "work if i hit esc to close the whole thing"):
+    // when `InputMode` leaves Menu while surfaces stand, this column squeezes out together with
+    // every pooled window. ur/142 revoked only the relabel cycle - this whole-menu close stays.
+    let menu_now = matches!(&*mode, InputMode::Menu(_));
+    if menu_now {
+        *dismiss_timer = 0;
+    } else if *ui_up_last && *dismiss_timer == 0 {
+        // Armed once on the takeover frame; counting down is what bounds the hold.
+        *dismiss_timer = crate::hud::menu_anim::MENU_SQUEEZE_FRAMES;
+    }
+    let mut cfx = *fx_column;
+    let mut animated = if matches!(cfx, WindowFx::Idle) {
+        None
+    } else {
+        cfx.tick()
+    };
+    let dismiss_armed = !menu_now && *ui_up_last && matches!(*fx_column, WindowFx::Idle);
     let fresh = match &*mode {
         InputMode::Menu(stack) => rows_built_for(&dynamic, &stack.levels),
         _ => true,
@@ -10252,42 +11216,27 @@ pub(crate) fn squeeze_menu_column(
         _ => None,
     };
 
-    let mut cfx = *fx_column;
-    let rested = matches!(cfx, WindowFx::Idle);
-    let was_closing = matches!(cfx, WindowFx::Closing { .. });
-    let mut animated = if rested { None } else { cfx.tick() };
-    // A relabel is one menu kind replacing another on this seat (or the column yielding while a
-    // kind stood here); a first stand or a return after an absent stretch draws plain.
-    let relabel = match (*prev_kind, column_shape) {
-        (Some(prev), Some((kind, _))) => kind != prev,
-        (Some(_), None) => true,
-        (None, _) => false,
-    };
-
     for (mut pane_node, computed, transform) in pane_q.iter_mut() {
-        if rested && relabel {
+        if dismiss_armed {
             // The capture is the last laid-out frame: `place_in_column` anchors by right edge, so
             // the style fields hold no px seat to center around.
             if let Some(full) = FullRect::from_laid_out_box(computed, transform) {
-                *last_seat = Some(full);
                 cfx = WindowFx::closing(full);
                 animated = cfx.tick();
             }
         }
         let mut want = pane_node.clone();
-        // The swap frame releases whatever pin the outgoing kind held: a seat moving between two
-        // menu kinds re-adopts for the incoming one (or starts learning it), never keeps measuring
-        // through an old shape's px.
-        let swap_frame = was_closing && matches!(cfx, WindowFx::Idle);
-        if swap_frame {
-            *column_pin = PinState::default();
-        }
         match column_shape {
-            Some((kind, rows)) if matches!(cfx, WindowFx::Idle) => {
+            Some((kind, rows)) => {
+                // A kind change drops the outgoing shape's px right away; an fx landing used to do
+                // this on its final frame (ur/142: there is no fx on this seat any more).
+                if prev_kind.is_some_and(|prev| prev != kind) {
+                    *column_pin = PinState::default();
+                }
                 let live = crate::hud::dock::drawn_height(computed);
                 if let Some(px) = column_pin.adopt(&heights, kind, rows) {
-                    // Written explicitly: an fx just ended may have left the field at an old
-                    // fraction (same fix the pooled pass carries).
+                    // Written explicitly: the field may still hold an old fraction (same fix the
+                    // pooled pass carries).
                     want.height = Val::Px(px);
                 } else {
                     match column_pin.step(kind, rows, live) {
@@ -10310,27 +11259,6 @@ pub(crate) fn squeeze_menu_column(
                 if pane_node.height != Val::Auto {
                     want.height = Val::Auto;
                 }
-            }
-            // An fx frame owns the box; no pin observation off intermediate measurements.
-            _ => {}
-        }
-        // Grow into the full box the pass just stood, at the natural right-anchored seat
-        // `update_main_menu` writes this frame. Unknown shape (no px after re-adoption) draws
-        // plain and learns, exactly once.
-        if swap_frame {
-            if let (Val::Px(px), Val::Px(w)) = (want.height, want.width) {
-                // Same screen right edge the outgoing box stood on, whatever window width that is;
-                // the design width is no seat at all outside a 512-wide screen.
-                cfx = WindowFx::opening(FullRect {
-                    center_x: last_seat.map_or(
-                        MENU_DESIGN_WIDTH - MENU_RIGHT_EDGE - w / 2.0,
-                        |seat| seat.center_x + seat.width / 2.0 - w / 2.0,
-                    ),
-                    center_y: MENU_COLUMN_TOP + px / 2.0,
-                    width: w,
-                    height: px,
-                });
-                animated = cfx.tick();
             }
         }
         if let Some((width, height)) = animated {
@@ -10359,13 +11287,6 @@ pub(crate) fn squeeze_menu_column(
     // they all land on the same frame. The closing frame restores the column to its natural seat
     // (height Auto, pin released; the remembering table re-adopts px on the next open) and hides
     // the whole tree together - never a shrunken shell stranded mid-air.
-    let menu_now = matches!(&*mode, InputMode::Menu(_));
-    if menu_now {
-        *dismiss_timer = 0;
-    } else if *ui_up_last && *dismiss_timer == 0 {
-        // Armed once on the takeover frame; counting down is what bounds the hold.
-        *dismiss_timer = crate::hud::menu_anim::MENU_SQUEEZE_FRAMES;
-    }
     if *dismiss_timer > 0 && !menu_now {
         let last_frame = *dismiss_timer == 1;
         if let Ok(mut root) = root_q.single_mut() {
@@ -10399,8 +11320,9 @@ pub(crate) fn squeeze_menu_column(
         *ui_up_last = root.display != Display::None;
     }
 
-    // Chrome-only while the cycle runs: hide this column's words (title band fill and chrome stay -
-    // only text nodes leave). `update_main_menu` shows and fills them again on the landing frame.
+    // Chrome-only while the dismissal cycle runs: hide this column's words (title band fill and
+    // chrome stay - only text nodes leave). `update_main_menu` shows and fills them again on the
+    // landing frame.
     if !matches!(cfx, WindowFx::Idle) {
         for mut node in row_q.iter_mut() {
             if node.display != Display::None {
@@ -11476,6 +12398,14 @@ fn visible_window(kind: MenuKind, total: usize) -> usize {
 fn mission_log_rows_cap(kind: MenuKind) -> usize {
     match kind {
         MenuKind::MissionDetail { .. } => MISSION_LOG_VISIBLE_ROWS,
+        // ur/150: both Key Items windows take one Currencies page (ur/148's 8);
+        // the hub is exactly that tall, so it draws no scrollbar. ur/152 adds
+        // the description window to the family.
+        MenuKind::KeyItems | MenuKind::KeyItemList { .. } | MenuKind::KeyItemText { .. } => {
+            MISSION_LOG_VISIBLE_ROWS
+        }
+        // The mcrselec/mcres20 pagers draw one record screenful: their own twenty rows.
+        kind if pager_rows(kind).is_some() => MACRO_PAGER_ROWS,
         _ => DYNAMIC_VISIBLE_ROWS,
     }
 }
@@ -11496,6 +12426,12 @@ fn viewport_over(kind: MenuKind, cursor: usize, total: usize) -> (usize, usize) 
         return (end, start);
     }
     let window_rows = mission_log_rows_cap(kind);
+    // A pager keeps its screenfuls aligned: rows [page*20, page*20+20) where the
+    // cursor sits, never a centred scroll of a store it cannot fully draw.
+    if let Some(page_rows) = pager_rows(kind) {
+        let start = (cursor / page_rows).min(total.saturating_sub(1) / page_rows) * page_rows;
+        return (total, start);
+    }
     if total <= window_rows {
         return (total, 0);
     }
@@ -13622,6 +14558,31 @@ mod tests {
             vec![(1, MenuWindowSeat::Column)],
             "Commands closes; the Debug window wears its place"
         );
+
+        // The bazaar setup panel wears the command column exactly the same way (owner
+        // 2026-10-24: no left panel beside it, and retail draws it where Commands stand).
+        let mut bazaar = MenuStack::root();
+        bazaar.push(MenuKind::BazaarStalls);
+        assert_eq!(
+            menu_stack_layout(&bazaar, &frames).windows,
+            vec![(1, MenuWindowSeat::Column)],
+            "Commands closes; the bazaar panel wears its place"
+        );
+
+        // ur/156 ("WHY IS THE COMMAND MENU STILL THERE" next to the View House list): the Mog
+        // House box list obeys the same template law, at the Status/Commands pane width.
+        let mut boxes = MenuStack::root();
+        boxes.push(MenuKind::MogContainers);
+        assert_eq!(
+            menu_stack_layout(&boxes, &frames).windows,
+            vec![(1, MenuWindowSeat::Column)],
+            "Commands closes; the Mog House box list wears its place"
+        );
+        assert_eq!(
+            pane_width_for(MenuKind::MogContainers),
+            status_pane_width(),
+            "the box list is as wide as every other selector-column window"
+        );
     }
 
     /// ur/82 ("the quest window should open on the LEFT side", while Commands stays
@@ -13861,7 +14822,13 @@ mod tests {
             crate::hud::item_screen::ITEM_LIST_ROWS
         );
         assert_eq!(list_page_rows(MenuKind::Magic), DYNAMIC_VISIBLE_ROWS);
-        assert_eq!(list_page_rows(MenuKind::KeyItems), DYNAMIC_VISIBLE_ROWS);
+        // ur/150: both Key Items windows page at the mission-log one-screen, so
+        // a bucket list scrolls exactly like an accepted Currencies page.
+        assert_eq!(list_page_rows(MenuKind::KeyItems), MISSION_LOG_VISIBLE_ROWS);
+        assert_eq!(
+            list_page_rows(MenuKind::KeyItemList { category: 0 }),
+            MISSION_LOG_VISIBLE_ROWS
+        );
     }
 
     #[test]
@@ -14055,6 +15022,45 @@ mod tests {
         );
         // 4509 (Distilled Water) is not equipment, so no wardrobe row.
         assert!(!rows.iter().any(|r| r.label.contains("Wardrobe")));
+    }
+
+    /// A destination that has filled its server-sized capacity is never
+    /// offered: LSB answers a move there with the refusal re-push instead of
+    /// carrying the item (vendor/server/src/map/packets/c2s/0x029_item_move.cpp).
+    #[test]
+    fn a_full_destination_bag_is_not_offered() {
+        use ffxi_proto::map::container as c;
+        let mut snap = mh_snapshot();
+        let storage = snap
+            .containers
+            .iter_mut()
+            .find(|b| b.id == c::LOC_STORAGE)
+            .expect("the house snapshot sizes Storage");
+        storage.items = (1..=storage.capacity as u32)
+            .map(|index| kuluu_snapshot::InventoryItem {
+                container: c::LOC_STORAGE,
+                index: index as u8,
+                item_no: 4212,
+                quantity: 1,
+                locked: false,
+                unselectable: false,
+                charges_remaining: None,
+                next_use_vana_ts: None,
+                use_delay_end_vana_ts: None,
+                ready: None,
+                extdata: None,
+            })
+            .collect();
+        assert_eq!(storage.items.len(), storage.capacity as usize);
+        let rows = item_action_rows(&snap, c::LOC_INVENTORY, 1, 4509);
+        assert!(
+            !rows.iter().any(|r| r.label == "Put in Storage"),
+            "a full bag is not a move destination: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.label == "Put in Mog Safe"),
+            "the free safe stays offered beside it: {rows:?}"
+        );
     }
 
     /// Gil and Temporary items never move (LSB 0x029 isValidMovement /
@@ -14315,22 +15321,17 @@ mod tests {
     }
 
     #[test]
-    fn key_item_rows_sorted_by_id_with_unseen_suffix() {
+    fn key_item_rows_sorted_by_id_with_plain_labels() {
         // Key items 1/8 = Zeruhn Report / Airship Pass
-        // (vendor/server/scripts/enum/key_item.lua).
+        // (vendor/server/scripts/enum/key_item.lua). ur/152: unseen items carry
+        // no `" (new)"` text at all - the blue dot column paints that state.
         let snap = kuluu_snapshot::SceneSnapshot {
             key_items: vec![8, 1],
             key_items_seen: vec![8],
             ..Default::default()
         };
         let rows = key_item_rows(&snap);
-        assert_eq!(
-            labels(&rows),
-            [
-                format!("Zeruhn Report{KEY_ITEM_UNSEEN_SUFFIX}").as_str(),
-                "Airship Pass"
-            ]
-        );
+        assert_eq!(labels(&rows), ["Zeruhn Report", "Airship Pass"]);
         assert_eq!(rows[0].action, DynamicMenuAction::KeyItem { id: 1 });
 
         let mut rows = rows;
@@ -15819,17 +16820,16 @@ mod tests {
         );
     }
 
-    /// The mcrmenu launcher law (vault main_menu.md §34): two rows in
-    /// select-id order, the DAT-derived MacroPalette title (comwin token 80 =
-    /// ROM/165/76.DAT catalog index 80), and the Root `Edit Macros` row
-    /// drilling it directly. Row captions stay [I] (§34 chrome-only law).
+    /// The mcrmenu launcher law (vault main_menu.md §34): two rows in select-id order carrying
+    /// retail's own captions, the short title on its band, and the Root `Edit Macros` row drilling
+    /// it directly.
     #[test]
     fn macros_palette_launcher_rows_and_title_track_the_mcrmenu_law() {
         assert_eq!(
             entries_for(MenuKind::MacrosPalette, false),
-            &[MACRO_ROW_SELECT_MACRO, MACRO_ROW_MACRO_RESULT]
+            &[MACRO_ROW_EDIT_MACRO, MACRO_ROW_EDIT_EQUIP_SETS]
         );
-        assert_eq!(menu_title(MenuKind::MacrosPalette), "MacroPalette");
+        assert_eq!(menu_title(MenuKind::MacrosPalette), "Macros");
         assert_eq!(
             root_child_kind(ROOT_MACRO_PALETTE, false, false),
             Some(MenuKind::MacrosPalette)
@@ -17443,6 +18443,98 @@ mod tests {
         assert_eq!(menu_title(MenuKind::HomeView), "Map");
     }
 
+    /// ur/155 owner capture of `View House` standing outside: the window is retail's `mogcont`, and
+    /// its rows are exactly the fifteen storage bags LSB names, in the order handler FFXiMain.dll
+    /// retail-2026-09 RVA 0x14EC40 answers select items 1..0xF. No label may drift from the
+    /// container-name source, and kuluu's server-side Mog Menu list must stay the same set.
+    #[test]
+    fn mog_container_rows_are_the_container_names_in_handler_order() {
+        use ffxi_proto::map::container as c;
+        let ids = mog_container_ids();
+        assert_eq!(ids.len(), MOG_CONTAINER_ROWS.len());
+        assert_eq!(
+            entries_for(MenuKind::MogContainers, false),
+            MOG_CONTAINER_ROWS.to_vec()
+        );
+        for (index, id) in ids.iter().enumerate() {
+            let label = MOG_CONTAINER_ROWS[index];
+            assert_eq!(
+                c::name(*id),
+                Some(label),
+                "mogcont row {index} names its bag"
+            );
+            assert_eq!(
+                mog_container_row_container(label),
+                Some(*id),
+                "{label} resolves back to container {id}"
+            );
+        }
+        assert_eq!(
+            MOG_CONTAINER_ROWS.to_vec(),
+            kuluu_session::local_menu::storage_rows()
+                .iter()
+                .map(|(label, _)| *label)
+                .collect::<Vec<_>>(),
+            "the client list and the server-side Mog Menu submenu name the same bags in order"
+        );
+        assert_eq!(menu_title(MenuKind::MogContainers), ROOT_VIEW_HOUSE);
+        assert_eq!(
+            registry_window(MenuKind::MogContainers),
+            Some(MOGCONT_WINDOW)
+        );
+    }
+
+    /// A bag the server sized to zero draws dim; one it never reported dims only once some other
+    /// bag of this set has been reported (s2c 0x01C ITEM_MAX folds every id in one frame, and
+    /// projection drops the zero-capacity ones), so a world with no capacity data yet greys nothing.
+    #[test]
+    fn mog_container_grey_law_reads_the_server_capacity_frame() {
+        use ffxi_proto::map::container as c;
+        let bag = |id: u8, capacity: u16| kuluu_snapshot::ContainerView {
+            id,
+            capacity,
+            items: Vec::new(),
+        };
+
+        let no_report = kuluu_snapshot::SceneSnapshot::default();
+        for index in 0..MOG_CONTAINER_ROWS.len() {
+            assert!(
+                !menu_row_disabled(MenuKind::MogContainers, index, &no_report),
+                "row {index} stays live before any capacity frame"
+            );
+        }
+
+        let partial = kuluu_snapshot::SceneSnapshot {
+            containers: vec![bag(c::LOC_MOGSAFE, 30), bag(c::LOC_STORAGE, 80)],
+            ..Default::default()
+        };
+        assert!(!menu_row_disabled(MenuKind::MogContainers, 0, &partial));
+        assert!(
+            menu_row_disabled(MenuKind::MogContainers, 3, &partial),
+            "an unreported Mog Locker reads as the zero-capacity sentinel"
+        );
+
+        let expired_lease = kuluu_snapshot::SceneSnapshot {
+            containers: vec![bag(c::LOC_MOGSAFE, 30), bag(c::LOC_MOGLOCKER, 0)],
+            ..Default::default()
+        };
+        assert!(menu_row_disabled(
+            MenuKind::MogContainers,
+            3,
+            &expired_lease
+        ));
+
+        // The retail box labels resolve to their bags through the shared home-view mapping too.
+        assert_eq!(
+            mog_container_row_container("Mog Wardrobe 8"),
+            Some(c::LOC_WARDROBE8)
+        );
+        assert_eq!(
+            home_view_row_container("Mog Wardrobe 2"),
+            Some(c::LOC_WARDROBE2)
+        );
+    }
+
     /// Container rows name their LSB bags (vendor/server/src/map/item_container.h)
     /// and the Gardening/Layout rows their literals — id 4 = "/garden", id 5 =
     /// "/layout" per the corrected arms of handler FFXiMain.dll retail-2026-09
@@ -17646,43 +18738,208 @@ mod tests {
         assert_eq!(menu_title(MenuKind::AutomatonEquip), "Equipment");
     }
 
-    /// The §41 macro law: DAT grids 'mcrs'/'mcr7' hold 20 keytops each under
-    /// two palette windows, so capacity is 2 x 20; mcrselec lists filled store
-    /// slots in (block, index) order with pinned labels, and both sub-windows
-    /// inherit `Macros` because their comwin tokens read -1.
+    /// The pager law both `mcrmenu` drills obey (owner ruling 2026-10-24): mcrselec
+    /// lists forty macro books and mcres20 two hundred equipment sets, each window
+    /// drawing the twenty row blocks its own record holds and stepping whole pages.
     #[test]
-    fn macro_windows_track_the_dat_grid_capacity_law() {
-        assert_eq!(MACRO_BLOCKS * MACRO_SLOTS_PER_BLOCK, 40);
+    fn macro_and_equip_set_pagers_page_in_record_screenfuls() {
+        assert_eq!(MACRO_BLOCKS * MACRO_SLOTS_PER_BLOCK, MACRO_BOOK_COUNT);
         assert!(is_dynamic(MenuKind::MacroSelect));
+        assert!(is_dynamic(MenuKind::MacroResult));
         assert_eq!(menu_title(MenuKind::MacroSelect), "Macros");
         assert_eq!(menu_title(MenuKind::MacroResult), "Macros");
-        // A fresh character: retail's keytop cells are blank, kuluu lists
-        // nothing.
-        let fresh = kuluu_snapshot::SceneSnapshot::default();
-        assert!(macro_select_rows(&fresh).is_empty());
 
-        let seeded = kuluu_snapshot::SceneSnapshot {
-            macros: vec![
-                kuluu_snapshot::MacroSlot {
-                    block: 1,
-                    index: 0,
-                    text: "/lastshout".to_string(),
-                },
-                kuluu_snapshot::MacroSlot {
-                    block: 0,
-                    index: 4,
-                    text: "/ra".to_string(),
-                },
-            ],
-            ..Default::default()
-        };
-        let rows = macro_select_rows(&seeded);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].label, "B1/5: /ra");
-        assert_eq!(rows[1].label, "B2/1: /lastshout");
+        // The pagers name their rows from the client's own files; an empty store must still page out
+        // retail's pattern for everything unnamed, so this holds whatever machine runs it.
+        let files = crate::hud::client_user_files::ClientUserFiles::empty();
+        let books = macro_book_rows(&files);
+        assert_eq!(books.len(), MACRO_BOOK_COUNT);
+        assert_eq!(MACRO_BOOK_COUNT / MACRO_PAGER_ROWS, 2);
+        assert_eq!(books[0].label, "Book01");
+        assert_eq!(books[MACRO_PAGER_ROWS - 1].label, "Book20");
         assert_eq!(
-            rows[0].action,
-            DynamicMenuAction::MacroSlotRow { block: 0, index: 4 }
+            books[MACRO_PAGER_ROWS].action,
+            DynamicMenuAction::MacroBookRow { book: 20 }
+        );
+
+        let sets = equip_set_rows(&files);
+        assert_eq!(sets.len(), EQUIP_SET_COUNT);
+        assert_eq!(EQUIP_SET_COUNT / MACRO_PAGER_ROWS, 10);
+        assert_eq!(sets[0].label, "Set001");
+        assert_eq!(sets[EQUIP_SET_COUNT - 1].label, "Set200");
+
+        // A screenful is aligned to the page the cursor sits on, and never more of
+        // the store than one record screen holds.
+        let (_total, second_page) =
+            viewport_over(MenuKind::MacroResult, MACRO_PAGER_ROWS, sets.len());
+        assert_eq!(second_page, MACRO_PAGER_ROWS);
+        let (_total, last_books_page) =
+            viewport_over(MenuKind::MacroSelect, books.len() - 1, books.len());
+        assert_eq!(last_books_page, MACRO_PAGER_ROWS);
+        assert_eq!(
+            visible_window(MenuKind::MacroResult, sets.len()),
+            MACRO_PAGER_ROWS
+        );
+        assert_eq!(list_page_rows(MenuKind::MacroSelect), MACRO_PAGER_ROWS);
+    }
+
+    /// Owner ruling 2026-10-24 on `mcrselop` ("this little menu is not big enough, make it bigger, so
+    /// change name is inside the box"): an option box stays narrow, but every row has to be drawn inside
+    /// its frame. Measured with the metrics the rows draw at, cursor and window padding included - a
+    /// whole book-name field typed into `Change Name` among them.
+    #[test]
+    fn an_option_box_is_wide_enough_for_every_row_it_draws() {
+        let chrome =
+            crate::ui_font::text_width_px("> ", MENU_ROW_FONT_PX) + 2.0 * style::WINDOW_PAD_X_PX;
+        for book in [0, MACRO_BOOK_COUNT - 1] {
+            let kind = MenuKind::MacroBookOptions { book: book as u8 };
+            let width = option_box_pane_width(kind);
+            for label in MACRO_BOOK_OPTION_ROWS {
+                assert!(
+                    crate::ui_font::text_width_px(label, MENU_ROW_FONT_PX) + chrome <= width,
+                    "book {book} box of {width} px cannot hold {label:?}"
+                );
+            }
+            let frame = pinned_option_box_frame(kind).expect("option boxes are pinned");
+            assert_eq!(frame.width, width);
+            // …and widening it never pushes the box off the left of the design width, wherever the
+            // pager's own column stands (the option box sits beside that flush-right).
+            let pager_left = MENU_DESIGN_WIDTH - MENU_RIGHT_EDGE - status_pane_width();
+            assert!(frame.x >= 0.0 && frame.x + frame.width <= pager_left);
+        }
+        // A name draft fills the client's whole field: fifteen characters plus the caret kuluu draws at
+        // its end must still sit inside the border, so the box never grows mid-typing.
+        let kind = MenuKind::MacroBookOptions { book: 0 };
+        let full_name = "M".repeat(crate::hud::client_user_files::BOOK_TITLE_MAX_BYTES);
+        assert!(
+            crate::ui_font::text_width_px(&format!("{full_name}_"), MENU_ROW_FONT_PX) + chrome
+                <= option_box_pane_width(kind)
+        );
+        // The equipment-set box keeps its record's 112 px for now (`EQUIP_SET_OPTION_PANE_WIDTH`'s
+        // note): holding that law needs words to measure, and retail's short words for those eight
+        // blocks are still the owner's to rule.
+        assert_eq!(
+            option_box_pane_width(MenuKind::EquipSetOptions { set: 0 }),
+            EQUIP_SET_OPTION_PANE_WIDTH
+        );
+    }
+
+    /// `Change Name` is a field in its own row rather than another window: while it holds a draft that
+    /// row wears the draft and caret (the same in-place law the owner ruled for setting a price), and the
+    /// other four blocks keep their words.
+    #[test]
+    fn typing_a_book_name_replaces_only_its_own_option_row() {
+        let rows = macro_book_option_rows(None);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            MACRO_BOOK_OPTION_ROWS
+        );
+        let typing = macro_book_option_rows(Some("Fish"));
+        assert_eq!(
+            typing[MACRO_BOOK_OPTION_CHANGE_NAME as usize].label,
+            "Fish_"
+        );
+        for option in [
+            MACRO_BOOK_OPTION_CONFIRM,
+            MACRO_BOOK_OPTION_COPY,
+            MACRO_BOOK_OPTION_PASTE,
+            MACRO_BOOK_OPTION_DELETE,
+        ] {
+            assert_eq!(
+                typing[option as usize].label,
+                MACRO_BOOK_OPTION_ROWS[option as usize]
+            );
+            assert_eq!(
+                typing[option as usize].action,
+                DynamicMenuAction::MacroBookOptionRow { option }
+            );
+        }
+    }
+
+    /// What the client's own files do to those rows: a named book or set reads its own words, an
+    /// unnamed one keeps retail's pattern, and every palette label has to come from the entry that
+    /// actually fires on that keytop - file order runs Ctrl+1..0 then Alt+1..0 while the band draws the
+    /// alt row first (owner ruling 2026-10-24).
+    #[test]
+    fn palette_rows_read_their_names_from_the_book_files_in_keytop_order() {
+        use crate::hud::client_user_files::{ClientUserFiles, MacroEntry, MACRO_BOOK_SLOTS};
+
+        let mut files = ClientUserFiles::empty();
+        files.book_titles = vec![None; MACRO_BOOK_COUNT];
+        files.book_titles[1] = Some("Fish".to_string());
+        files.set_names = vec![None; EQUIP_SET_COUNT];
+        files.set_names[0] = Some("Pulled".to_string());
+        // Book 2, filled in the client's own order: slot 3 on Ctrl+4, slot 14 on Alt+5.
+        let mut entries: Vec<MacroEntry> =
+            std::iter::repeat_n(MacroEntry::default(), MACRO_BOOK_SLOTS).collect();
+        entries[3] = MacroEntry {
+            name: "NameSW".to_string(),
+            body: "/names".to_string(),
+        };
+        entries[14] = MacroEntry {
+            name: "JoinPT".to_string(),
+            body: "/join".to_string(),
+        };
+        files.macro_books = vec![Vec::new(), entries];
+
+        assert_eq!(
+            macro_book_rows(&files)[1].label,
+            "Fish",
+            "a named book reads its own title"
+        );
+        assert_eq!(macro_book_rows(&files)[2].label, "Book03");
+        assert_eq!(equip_set_rows(&files)[0].label, "Pulled");
+        assert_eq!(equip_set_rows(&files)[1].label, "Set002");
+
+        let band = macro_pallet_rows(1, &files);
+        assert_eq!(band.len(), MACRO_BOOK_SLOTS);
+        // Rows 0..=9 are the alt row drawn on top: file slot 14 (Alt+5) lands on row 4.
+        assert_eq!(band[4].label, "JoinPT");
+        assert_eq!(
+            band[4].action,
+            DynamicMenuAction::MacroSlotRow { block: 1, index: 4 }
+        );
+        // Rows 10..=19 are the ctrl row beneath it: file slot 3 (Ctrl+4) lands on row 13.
+        assert_eq!(band[13].label, "NameSW");
+        assert_eq!(
+            band[13].action,
+            DynamicMenuAction::MacroSlotRow { block: 0, index: 3 }
+        );
+        // A keytop the player left empty labels nothing.
+        assert_eq!(band[0].label, "");
+        // A book with no file at all reads twenty empty blocks rather than another book's names.
+        assert!(macro_pallet_rows(3, &files)
+            .iter()
+            .all(|row| row.label.is_empty()));
+    }
+
+    /// The band is a grid, so its cursor steps on the grid: along a keytop row with the wrap its own
+    /// record links, and between the two rows in the same column.
+    #[test]
+    fn palette_cursor_steps_on_the_band_grid_not_through_the_row_list() {
+        // Along the alt row (band slots 0..=9), wrapping at both ends as `mcr1pall` links its blocks.
+        assert_eq!(macro_pallet_column_step(0, true), 1);
+        assert_eq!(macro_pallet_column_step(8, true), 9);
+        assert_eq!(macro_pallet_column_step(9, true), 0);
+        assert_eq!(macro_pallet_column_step(0, false), 9);
+        // Travel never crosses into the ctrl row below: every step from an alt-row slot stays in it.
+        for column in 0..MACRO_PALLET_SLOTS_PER_KEYSET {
+            assert!(macro_pallet_column_step(column, true) < MACRO_PALLET_SLOTS_PER_KEYSET);
+            assert!(
+                macro_pallet_column_step(MACRO_PALLET_SLOTS_PER_KEYSET + column, false)
+                    >= MACRO_PALLET_SLOTS_PER_KEYSET
+            );
+        }
+        // Between rows: same column, other keyset, wrapping over the two of them.
+        assert_eq!(macro_pallet_row_step(5, true), 15);
+        assert_eq!(macro_pallet_row_step(15, false), 5);
+        assert_eq!(macro_pallet_row_step(15, true), 5);
+        assert_eq!(
+            macro_pallet_row_step(MACRO_PALLET_SLOTS_PER_KEYSET - 1, true)
+                % MACRO_PALLET_SLOTS_PER_KEYSET,
+            MACRO_PALLET_SLOTS_PER_KEYSET - 1
         );
     }
 
@@ -17972,14 +19229,14 @@ mod tests {
             labels(&detail),
             [
                 "Current:",
-                "No current mission.",
+                "  No current mission.",
                 "Completed:",
-                "The Zeruhn Report",
-                "Geological Survey",
-                "Fetichism",
-                "The Crystal Line",
-                "Wading Beasts",
-                "The Emissary"
+                "  The Zeruhn Report",
+                "  Geological Survey",
+                "  Fetichism",
+                "  The Crystal Line",
+                "  Wading Beasts",
+                "  The Emissary"
             ]
         );
     }
@@ -18014,14 +19271,14 @@ mod tests {
             labels(&rows),
             [
                 "Current:",
-                "Not allowed under current allegiance.",
+                "  Not allowed under current allegiance.",
                 "Completed:",
-                "The Zeruhn Report",
-                "Geological Survey",
-                "Fetichism",
-                "The Crystal Line",
-                "Wading Beasts",
-                "The Emissary"
+                "  The Zeruhn Report",
+                "  Geological Survey",
+                "  Fetichism",
+                "  The Crystal Line",
+                "  Wading Beasts",
+                "  The Emissary"
             ]
         );
 
@@ -18040,7 +19297,7 @@ mod tests {
         );
         assert_eq!(
             labels(&rows)[..2],
-            ["Current:", "The Davoi Report"],
+            ["Current:", "  The Davoi Report"],
             "main-port current names itself"
         );
 
@@ -18050,9 +19307,9 @@ mod tests {
             labels(&rows),
             [
                 "Current:",
-                "No current mission.",
+                "  No current mission.",
                 "Completed:",
-                "No completed missions."
+                "  No completed missions."
             ]
         );
     }
@@ -18112,9 +19369,9 @@ mod tests {
             labels(&rows),
             [
                 "Current:",
-                "Confessions of Royalty",
+                "  Confessions of Royalty",
                 "Completed:",
-                "No completed missions."
+                "  No completed missions."
             ]
         );
     }
@@ -18182,7 +19439,7 @@ mod tests {
         assert_eq!(
             start + MISSION_LOG_VISIBLE_ROWS,
             rows.len(),
-            "the last cursor parks the bottom row inside the six-line frame"
+            "the last cursor parks the bottom row inside the capped frame"
         );
     }
 
@@ -18308,7 +19565,11 @@ mod tests {
         }
         app.update();
         let after = surfaces(&mut app);
-        assert_eq!(after.len(), 1, "the hub keeps that one box when its list closes");
+        assert_eq!(
+            after.len(),
+            1,
+            "the hub keeps that one box when its list closes"
+        );
         assert_eq!(
             after[0], shared_seat,
             "same slot, same entity - the seat is handed back in place, never reopened"
@@ -18322,7 +19583,11 @@ mod tests {
         }
         app.update();
         let grown = surfaces(&mut app);
-        assert_eq!(grown.len(), 1, "the list returns onto the hub's box, not beside it");
+        assert_eq!(
+            grown.len(),
+            1,
+            "the list returns onto the hub's box, not beside it"
+        );
         assert_eq!(
             grown[0], shared_seat,
             "never re-mapped by depth: one seat keeps one surface"
@@ -18335,7 +19600,11 @@ mod tests {
         }
         app.update();
         let with_detail = surfaces(&mut app);
-        assert_eq!(with_detail.len(), 2, "the detail draws at its own quest01 frame");
+        assert_eq!(
+            with_detail.len(),
+            2,
+            "the detail draws at its own quest01 frame"
+        );
         assert_eq!(
             with_detail[0], shared_seat,
             "the list's box never moved when the detail opened"
@@ -19005,7 +20274,9 @@ mod tests {
             rows.frames.clear();
             rows.frame_extents.clear();
         }
-        app.insert_resource(crate::dat_root::SharedDatRoot(Some(std::sync::Arc::new(root))));
+        app.insert_resource(crate::dat_root::SharedDatRoot(Some(std::sync::Arc::new(
+            root,
+        ))));
         app.init_resource::<crate::hud::item_detail::SortKey>();
         app.insert_resource(crate::hud::item_detail::SortOptions {
             auto: true,
@@ -19046,9 +20317,7 @@ mod tests {
         let entry = u8::try_from(
             crate::hud::status_panel::STATUS_ENTRIES
                 .iter()
-                .position(|e| {
-                    e.kind == crate::hud::status_panel::StatusEntryKind::Currencies
-                })
+                .position(|e| e.kind == crate::hud::status_panel::StatusEntryKind::Currencies)
                 .expect("Currencies is a Status row"),
         )
         .unwrap();
@@ -19169,10 +20438,7 @@ mod tests {
             return;
         };
         let root = std::sync::Arc::new(root);
-        fn build_app(
-            root: &std::sync::Arc<ffxi_dat::DatRoot>,
-            chain: Vec<MenuKind>,
-        ) -> App {
+        fn build_app(root: &std::sync::Arc<ffxi_dat::DatRoot>, chain: Vec<MenuKind>) -> App {
             let mut app = stack_app(MenuStack::root(), &[]);
             // Parse the real install records, not `stack_app`'s seeded empty table.
             {
@@ -19331,10 +20597,7 @@ mod tests {
         );
         sweep(
             &root,
-            vec![
-                MenuKind::QuestMenu,
-                MenuKind::QuestDetail { log: 0, id: 1 },
-            ],
+            vec![MenuKind::QuestMenu, MenuKind::QuestDetail { log: 0, id: 1 }],
         );
         sweep(&root, vec![MenuKind::RetailConfig]);
         sweep(
@@ -19346,10 +20609,7 @@ mod tests {
             ],
         );
         sweep(&root, vec![MenuKind::MagicGroups]);
-        sweep(
-            &root,
-            vec![MenuKind::MagicGroups, MenuKind::MagicGroup(1)],
-        );
+        sweep(&root, vec![MenuKind::MagicGroups, MenuKind::MagicGroup(1)]);
         sweep(&root, vec![MenuKind::KeyItems]);
         sweep(&root, vec![MenuKind::RoomList]);
     }
@@ -19518,12 +20778,7 @@ mod tests {
                 .query::<(&MenuStackWindow, &Node)>()
                 .iter(app.world())
                 .filter(|(_, node)| node.display != Display::None)
-                .map(|(window, node)| {
-                    (
-                        window.slot,
-                        format!("l{:?} t{:?}", node.left, node.top),
-                    )
-                })
+                .map(|(window, node)| (window.slot, format!("l{:?} t{:?}", node.left, node.top)))
                 .collect();
             boxes.sort();
             boxes
@@ -19598,7 +20853,12 @@ mod tests {
             // ur/139 law two: a box that survives the hand-off never blinks out. Any seat holding
             // a box before and after keeps one on every frame between - the hole where nothing
             // drew was half of the "closes then reopens" fizzle.
-            let final_seats: Vec<&String> = per_frame.last().expect("frames").iter().map(|b| &b.1).collect();
+            let final_seats: Vec<&String> = per_frame
+                .last()
+                .expect("frames")
+                .iter()
+                .map(|b| &b.1)
+                .collect();
             for (_, seat) in from_boxes {
                 if !final_seats.contains(&&seat) {
                     continue;
@@ -19616,9 +20876,7 @@ mod tests {
         let cur_entry = u8::try_from(
             crate::hud::status_panel::STATUS_ENTRIES
                 .iter()
-                .position(|e| {
-                    e.kind == crate::hud::status_panel::StatusEntryKind::Currencies
-                })
+                .position(|e| e.kind == crate::hud::status_panel::StatusEntryKind::Currencies)
                 .expect("Currencies is a Status row"),
         )
         .unwrap();
@@ -19667,15 +20925,13 @@ mod tests {
         }
     }
 
-
-    /// ur/105's motivating example under law: Commands -> Missions on the relabel seat. The one
-    /// pane plays close-out then grow-in through the squeeze function (no word swap under a static
-    /// frame), chrome-only while it animates, and `update_main_menu` writes the new words at the
-    /// landing. Unit-world layout never runs, so fed `ComputedNode` sizes and an explicit transform
-    /// stand in for the laid-out box (as in the pin fences). The grow phase needs a remembered
-    /// shape, so cycle one (which learns) closes out and lands plain; cycle two must grow.
+    /// ur/142 (owner ruling, in-game at 60 fps: "the box drops to 1 height, then grows (about 1-2
+    /// frames). This is BAD behavior.. when all its supposed todo is remove the >"): a column kind
+    /// swap is instant. Every frame of the relabel - including the first - keeps the right-edge
+    /// anchor and an `Auto` left; no absolute fx seat, no shrinking box, words kept wherever the
+    /// incoming kind has them. Replaces ur/105's close-out/grow-in fence.
     #[test]
-    fn column_relabel_squeezes_out_and_back_with_words_written_last() {
+    fn column_relabel_swaps_in_place_with_no_fx_frames() {
         let mut app = root_menu_app(0); // Commands open: spawned + `update_main_menu` ran.
         app.add_systems(Update, squeeze_menu_column.after(update_main_menu));
 
@@ -19730,80 +20986,59 @@ mod tests {
             "Commands paints its words at rest"
         );
 
-        // Cycle one: learn the new shape. The close-out plays; the landing may be plain.
+        // The banned signature: any frame that lifts the seat off its anchor or hands it an
+        // absolute fx left/top is a drop-then-grow cycle. Demand none, every frame.
+        let anchored = |app: &mut App, at: &str| {
+            let node = pane_node(app);
+            assert_eq!(
+                node.right,
+                Val::Px(MENU_RIGHT_EDGE),
+                "{at}: the column stays on its right-edge anchor"
+            );
+            assert!(
+                matches!(node.left, Val::Auto),
+                "ur/142: {at} drew an absolute fx seat ({:?}) - the drop-then-grow cycle is back",
+                node.left
+            );
+        };
         if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
             live.push(MenuKind::MissionList);
         }
         app.update();
-        let shrinking = pane_node(&mut app);
-        assert_eq!(
-            shrinking.right,
-            Val::Auto,
-            "fx takes the seat off its anchor"
-        );
-        let (Val::Px(l), Val::Px(t), Val::Px(w1), Val::Px(h1)) = (
-            shrinking.left,
-            shrinking.top,
-            shrinking.width,
-            shrinking.height,
-        ) else {
-            panic!("a collapsing box keeps pixelled axes");
-        };
-        assert!(
-            w1 < w_root && h1 < h_root,
-            "the relabel starts by closing out"
-        );
-        assert!((l + w1 / 2.0 - center.0).abs() < 0.5, "held its center x");
-        assert!((t + h1 / 2.0 - center.1).abs() < 0.5, "held its center y");
-        assert_eq!(
-            visible_words(&mut app),
-            0,
-            "words off from the first close frame"
-        );
-        for _ in 0..crate::hud::menu_anim::MENU_SQUEEZE_FRAMES + 8 {
-            feed_layout(&mut app); // unit-world keeps standing the fed box while fx runs.
+        anchored(&mut app, "relabel frame one (push)");
+        for at in 0..PIN_SETTLE_FRAMES + 2 {
+            feed_layout(&mut app); // unit-world keeps standing the fed box.
             app.update();
+            anchored(&mut app, &format!("relabel settle frame {at}"));
         }
-
-        // Cycle two, back to Commands: now both shapes are known, so it must grow as well as close.
+        // And back to Commands: same demand, and the home shape settles back to its remembered box.
         if let InputMode::Menu(live) = &mut *app.world_mut().resource_mut::<InputMode>() {
             live.pop();
         }
-        app.update();
-        assert_eq!(
-            pane_node(&mut app).right,
-            Val::Auto,
-            "cycle two closes out too"
-        );
-        let mut landed = None;
-        for _ in 0..2 * crate::hud::menu_anim::MENU_SQUEEZE_FRAMES + 8 {
+        for at in 0..PIN_SETTLE_FRAMES + 2 {
             feed_layout(&mut app);
             app.update();
-            let node = pane_node(&mut app);
-            if node.right == Val::Px(MENU_RIGHT_EDGE) && landed.is_none() {
-                assert_eq!(
-                    node.width,
-                    Val::Px(w_root),
-                    "the landing keeps the natural width"
-                );
-                assert!(
-                    visible_words(&mut app) > 0,
-                    "words are written at the end of an open"
-                );
-                landed = Some(node.clone());
-            }
+            anchored(&mut app, &format!("back-relabel frame {at}"));
         }
-        let landed = landed.expect("the relabel lands right-anchored with words rewritten");
-        assert_eq!(landed.height, Val::Px(h_root));
+        let back = pane_node(&mut app);
+        assert_eq!(
+            back.width,
+            Val::Px(w_root),
+            "Commands keeps its remembered width"
+        );
+        assert_eq!(
+            back.height,
+            Val::Px(h_root),
+            "Commands keeps its remembered height"
+        );
     }
 
-    /// ur/140 fence (owner: "wtf is that random ass window over there", and two rounds earlier
-    /// "when you click things in the menu TWO menus pop"): a relabel grow-in must stand on the
-    /// screen edge this column was actually laid out at, never on `MENU_DESIGN_WIDTH`. Centering on
-    /// 512 parked a chrome-only box near mid-screen for five frames beside the real menu on every
-    /// Commands-to-Missions Enter - which is what read as the menu opening twice. Stands one fed
-    /// Commands box with its right edge at style x=1592 (a wide window) and demands that every frame
-    /// of the relabel, close and grow alike, stays in that box's own right-hand territory.
+    /// ur/140 fence, hardened by ur/142: the column fx this once policed is revoked outright (the
+    /// grow-in standing on `MENU_DESIGN_WIDTH` was half of the "wtf is that random ass window over
+    /// there" reports; the drop-then-grow the owner banned in-game at 60 fps was the other half), so
+    /// a relabel must never lift the seat off its right-edge anchor for even one frame. Stands one
+    /// fed Commands box with its right edge at style x=1592 (a wide window) and counts any frame
+    /// that leaves it.
     #[test]
     fn a_column_relabel_never_stands_its_box_on_the_design_width() {
         const VIEW_W: f32 = 1600.0;
@@ -19846,7 +21081,7 @@ mod tests {
             app.update();
         }
 
-        let mut fx_frames = 0;
+        let mut off_anchor = 0;
         let mut step = |app: &mut App| {
             feed_layout(app);
             app.update();
@@ -19856,26 +21091,9 @@ mod tests {
                 .single(app.world())
                 .expect("one selector column")
                 .clone();
-            if node.right != Val::Auto {
-                return; // At rest on its own anchor: nothing to judge.
+            if node.right != Val::Px(MENU_RIGHT_EDGE) || !matches!(node.left, Val::Auto) {
+                off_anchor += 1;
             }
-            let (Val::Px(left), Val::Px(width)) = (node.left, node.width) else {
-                panic!("an animating box keeps pixelled axes");
-            };
-            fx_frames += 1;
-            // The design-width phantom stood this box's right edge at `MENU_DESIGN_WIDTH` - on a
-            // window that wide it is off in the middle of the world, next to no menu at all.
-            assert!(
-                left + width > VIEW_W / 2.0,
-                "frame {fx_frames} of the relabel draws a box at x={left}..{} on a {}-wide screen",
-                left + width,
-                VIEW_W
-            );
-            assert!(
-                left + width <= seat_right + 0.5,
-                "frame {fx_frames} spills past the column's right edge: x={left}..{}",
-                left + width
-            );
         };
         // Cycle one learns the incoming shape; cycle two is a relabel with both shapes known, which
         // is where the grow-in runs (owner saw it "50% of the time" for exactly that reason).
@@ -19891,9 +21109,9 @@ mod tests {
         for _ in 0..2 * crate::hud::menu_anim::MENU_SQUEEZE_FRAMES + 8 {
             step(&mut app);
         }
-        assert!(
-            fx_frames >= 2 * usize::from(crate::hud::menu_anim::MENU_SQUEEZE_FRAMES),
-            "two relabels should each have animated, saw {fx_frames} fx frames"
+        assert_eq!(
+            off_anchor, 0,
+            "ur/142: a column relabel never animates; saw {off_anchor} frame(s) off the anchor"
         );
     }
 
@@ -20293,10 +21511,13 @@ mod tests {
         assert!(!want.is_empty(), "the log has rows to show");
         let child = drawn_stack_windows(&mut app);
         assert_eq!(child.len(), 1, "one framed child on screen");
+        // The drawer's marker field is exactly the first two chars, "> " on the
+        // cursor and "  " elsewhere; only that comes off, so entry indents
+        // survive the comparison.
         let got: Vec<&str> = child[0]
             .rows
             .iter()
-            .map(|row| row.trim_start_matches("> ").trim_start())
+            .map(|row| row.strip_prefix("> ").unwrap_or(&row[2..]))
             .collect();
         assert_eq!(
             got,
@@ -20313,6 +21534,76 @@ mod tests {
             "exactly one cursor mark on the live window: {:?}",
             child[0].rows
         );
+    }
+
+    /// ur/153 owner ruling ("Retail is just a text line. it should not be selectable"):
+    /// the key item description window draws its prose with no cursor mark and no gold
+    /// on any row - the family selector law never lands there.
+    #[test]
+    fn key_item_description_window_draws_prose_without_a_cursor() {
+        assert!(window_plain_text(MenuKind::KeyItemText { id: 1 }));
+        let mut app = App::new();
+        app.init_resource::<GraphicsSettings>()
+            .init_resource::<crate::hud::HudPanels>()
+            .init_resource::<crate::hud::network_status::NetStatusVisible>()
+            .init_resource::<crate::snapshot::SceneState>();
+        #[cfg(not(target_arch = "wasm32"))]
+        app.init_resource::<crate::audio::AudioMuteState>();
+        app.init_resource::<crate::hud::item_detail::SortOptions>()
+            .init_resource::<crate::hud::item_screen::ItemScreenContainer>()
+            .init_resource::<MagicSchoolTable>()
+            .init_resource::<ConfigDatRows>()
+            .init_resource::<PooledSeats>()
+            .init_resource::<CommandSelectorCaptions>()
+            .init_resource::<EquipRecords>()
+            .init_resource::<crate::keybinds::Bindings>()
+            .init_resource::<crate::hud::unity_fp::UnityFpDat>()
+            .init_resource::<crate::hud::merit_windows::MeritDat>()
+            .init_resource::<DynamicMenu>();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::KeyItemList { category: 0 });
+        stack.push(MenuKind::KeyItemText { id: 1 });
+        app.insert_resource(InputMode::Menu(stack));
+        app.add_systems(Startup, spawn_main_menu);
+        app.add_systems(
+            Update,
+            (
+                refresh_dynamic_menu_rows,
+                update_main_menu,
+                update_menu_stack_windows,
+            )
+                .chain(),
+        );
+        for _ in 0..2 {
+            app.update();
+        }
+
+        let drawn = drawn_stack_windows(&mut app);
+        assert_eq!(drawn.len(), 1, "the description draws on its own seat");
+        assert!(!drawn[0].rows.is_empty(), "prose lines are shown");
+        assert!(
+            drawn[0].rows.iter().all(|row| !row.starts_with("> ")),
+            "no arrow lands on prose: {:?}",
+            drawn[0].rows
+        );
+    }
+
+    /// ur/153 owner ruling ("Retail has the question in the box.."): Examine wears
+    /// its question as the window caption; every other kind keeps its plain title.
+    #[test]
+    fn examine_prompt_wears_its_question_as_caption() {
+        let want = format!(
+            "Examine {}?",
+            ffxi_vocab::key_item_names::lookup(1).unwrap_or("this item")
+        );
+        assert_eq!(window_caption(MenuKind::KeyItemExamine { id: 1 }), want);
+        for kind in [
+            MenuKind::KeyItems,
+            MenuKind::KeyItemList { category: 0 },
+            MenuKind::KeyItemText { id: 1 },
+        ] {
+            assert_eq!(window_caption(kind), menu_title(kind));
+        }
     }
 
     /// ur/85 + ur/102: opening Quests over Commands must not repaint that opener
@@ -20612,7 +21903,7 @@ mod tests {
     }
 
     #[test]
-    fn bazaar_stall_picker_is_dynamic_titled_and_root_drilled() {
+    fn the_bazaar_setup_panel_is_dynamic_titled_and_root_drilled() {
         assert!(is_dynamic(MenuKind::BazaarStalls));
         assert_eq!(menu_title(MenuKind::BazaarStalls), "Bazaar");
         // The ungated page-2 arm (vault main_menu.md §33) drills it from Root.
@@ -20623,54 +21914,13 @@ mod tests {
     }
 
     #[test]
-    fn bazaar_stall_rows_follow_the_entity_bazaar_flag() {
-        use kuluu_snapshot::{Entity, EntityKind};
-        let mut snap = kuluu_snapshot::SceneSnapshot::default();
-        assert_eq!(bazaar_stall_rows(&snap).len(), 1);
-        assert!(bazaar_stall_rows(&snap)[0]
-            .label
-            .contains("no player bazaars"));
-
-        snap.entities.push(Entity {
-            id: 7,
-            act_index: 2,
-            kind: EntityKind::Pc,
-            name: Some("Kupipi".into()),
-            pos: kuluu_snapshot::Vec3::default(),
-            heading: 0,
-            hp_pct: Some(100),
-            bt_target_id: 0,
-            face_target: 0,
-            claim_id: 0,
-            speed: 0,
-            speed_base: 0,
-            look: None,
-            animation: 0,
-            animationsub: 0,
-            mount: None,
-            status: 0,
-            char_flags: Default::default(),
-            monstrosity: false,
-            name_vis: None,
-        });
-        assert!(
-            bazaar_stall_rows(&snap)[0]
-                .label
-                .contains("no player bazaars"),
-            "the flag is required"
-        );
-        snap.entities[0].char_flags.bazaar = true;
-        let rows = bazaar_stall_rows(&snap);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].label, "Kupipi's Bazaar");
-        assert_eq!(
-            rows[0].action,
-            DynamicMenuAction::BazaarStall { char_id: 7 }
-        );
-        snap.self_char_id = Some(7);
-        assert!(bazaar_stall_rows(&snap)[0]
-            .label
-            .contains("no player bazaars"));
+    fn the_bazaar_setup_panel_lists_the_two_retail_rows_in_order() {
+        let rows = bazaar_setup_rows();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].label, "Set Prices");
+        assert_eq!(rows[1].label, "Edit Comment");
+        assert_eq!(rows[0].action, DynamicMenuAction::BazaarSetupRow { row: 0 });
+        assert_eq!(rows[1].action, DynamicMenuAction::BazaarSetupRow { row: 1 });
     }
 
     /// `DynamicMenu::client_message` reads the DAT-sourced table-9 catalog once (retail's
@@ -21849,7 +23099,7 @@ mod tests {
         );
         assert_eq!(
             labels(&rows),
-            ["Current:", "Completed:", "No completed missions."]
+            ["Current:", "Completed:", "  No completed missions."]
         );
     }
 
@@ -21872,12 +23122,12 @@ mod tests {
             labels(&fallback)[..4],
             [
                 "Current:",
-                "No current mission.",
+                "  No current mission.",
                 "Completed:",
-                "The Zeruhn Report"
+                "  The Zeruhn Report"
             ]
         );
-        assert_eq!(fallback[4].label, "Geological Survey");
+        assert_eq!(fallback[4].label, "  Geological Survey");
 
         let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
@@ -21899,7 +23149,7 @@ mod tests {
             "the op briefing comes from the catalog's second string slot"
         );
         let rows = mission_detail_rows(&snap, &texts, MISSION_LOG_BASTOK, 0);
-        assert_eq!(rows[4].label, "A Geological Survey");
+        assert_eq!(rows[4].label, "  A Geological Survey");
     }
 
     /// ur/80 ("clicking Adoulin is not correctly linked to seekers or Adoulin"):
@@ -21936,8 +23186,8 @@ mod tests {
         });
         let rows =
             mission_detail_rows(&snap, &MissionTextCatalog::default(), MISSION_LOG_BASTOK, 0);
-        assert_eq!(rows[3].label, "The Zeruhn Report");
-        assert_eq!(rows[4].label, "Geological Survey"); // no install: scraped lattice
+        assert_eq!(rows[3].label, "  The Zeruhn Report");
+        assert_eq!(rows[4].label, "  Geological Survey"); // no install: scraped lattice
         for (row, id) in [(&rows[3], 0u16), (&rows[4], 1)] {
             assert_eq!(
                 row.action,
@@ -22044,6 +23294,49 @@ mod tests {
             assert_eq!(
                 row.action,
                 DynamicMenuAction::QuestDetailRow { log: 2, id: 5 }
+            );
+        }
+    }
+
+    /// Gated on a retail install: the hub's page list and every item's page are
+    /// the ones the installed key-item table files, so an owner looking for an
+    /// airship pass, a gate crystal or a job gesture finds them under Permanent,
+    /// voidstones under Voidwatch and a GPS crystal under Mog Garden. If a patch
+    /// re-files pages or renames them, this fails before the windows do.
+    #[test]
+    fn installed_filing_drives_the_key_item_pages() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let mut texts = KeyItemTexts::default();
+        texts.ensure_loaded(Some(&root));
+        assert_eq!(
+            texts.page_labels(),
+            KEY_ITEM_CATEGORY_LABELS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        snap.key_items.extend([
+            1u16, 8, 353, 1738, 1539, 2398, // Temporary/Permanent/Voidwatch/Garden
+        ]);
+        let pages: [(u8, &[u16]); 4] =
+            [(0, &[1]), (1, &[8, 353, 1738]), (3, &[1539]), (6, &[2398])];
+        for (category, want) in pages {
+            let rows = key_item_page_rows(&snap, &texts, category);
+            let got: Vec<u16> = rows
+                .iter()
+                .map(|row| match row.action {
+                    DynamicMenuAction::KeyItem { id } => id,
+                    other => panic!("unexpected action on a key item page: {other:?}"),
+                })
+                .collect();
+            assert_eq!(
+                got,
+                want.to_vec(),
+                "page {category} ({})",
+                KEY_ITEM_CATEGORY_LABELS[category as usize]
             );
         }
     }

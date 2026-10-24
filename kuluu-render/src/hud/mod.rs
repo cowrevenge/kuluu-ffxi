@@ -1,11 +1,15 @@
 pub mod action_model;
 pub mod auction;
+pub mod bazaar_comment;
 pub mod bazaar_view;
 #[cfg(feature = "enhanced-cast-bar")]
 pub mod cast_bar;
 pub mod chat_input;
 pub mod chat_panel;
 pub mod check_view;
+/// The player's own macro and equipment-set files in the install; see this module's header for what
+/// law they establish.
+pub mod client_user_files;
 pub mod compass;
 pub mod controls_law;
 pub mod currency_law;
@@ -31,6 +35,8 @@ pub mod list_view;
 pub mod logout_countdown;
 // Depends on `crate::minimap`, which is itself gated off wasm (lib.rs).
 pub mod graphics_debug;
+/// The macro palette's two-rows-of-ten keytop band (`mcr1pall`/`mcr2pall`).
+pub mod macro_pallet_view;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod map_screen;
 pub mod menu;
@@ -216,6 +222,10 @@ pub fn spawn_bottom_left_stack(
                                 weather_icon::spawn_weather_icon_as_child(under);
                             });
                     });
+
+                    // Last in the column, so the field stands directly above the chat log it
+                    // belongs to (owner 2026-10-24).
+                    bazaar_comment::spawn_bazaar_comment_editor(col);
                 });
 
                 target_action_menu::spawn_target_action_menu_as_child(row);
@@ -410,9 +420,16 @@ impl Plugin for HudPlugin {
                 .after(party_frame::update_party_frame_system),
         );
 
+        // A window input opened owns its rows in the same frame: every stack mutator (keyboard,
+        // mouse nav, arrows, cancel) runs inside the chain that ends at `dock_windows_system`, and
+        // the row rebuild sits between that boundary and every draw pass. No drawn frame can then
+        // see a new kind with unbuilt rows - holding the previous occupant's words onto a fresh
+        // box for one frame was the right-side flash on any menu kind change.
         app.add_systems(
             Update,
-            menu::refresh_dynamic_menu_rows.before(menu::update_main_menu),
+            menu::refresh_dynamic_menu_rows
+                .after(crate::hud::dock::dock_windows_system)
+                .before(menu::update_main_menu),
         );
         // The window title bands: they need the word and the pixel width `update_main_menu` picks
         // for this frame, so they place immediately after it. They also write text faces, so they go
@@ -514,7 +531,11 @@ impl Plugin for HudPlugin {
                 check_view::update_check_view,
                 bazaar_view::update_bazaar_view,
                 bazaar_view::update_bazaar_scrollbar.after(bazaar_view::update_bazaar_view),
-                status_panel::update_status_panel,
+                // The Status column's squeeze legs (menu_anim law): this system writes persona
+                // and `level` box geometry last, after the passes that place them.
+                status_panel::update_status_panel
+                    .after(status_panel::update_status_level_box)
+                    .after(status_panel::update_persona_frame),
                 equipment_screen::update_equipment_screen.after(menu::refresh_dynamic_menu_rows),
                 delivery::rebuild_delivery_inventory,
                 delivery::update_delivery_screen.after(delivery::rebuild_delivery_inventory),
@@ -522,6 +543,17 @@ impl Plugin for HudPlugin {
                 auction::update_auction_screen.after(auction::rebuild_sell_inventory),
                 auction::auction_chat_echo_system,
             ),
+        );
+        // Its own registration: the pass reads only `InputMode` and `DynamicMenu`, so it owes
+        // nothing to the group above and that group has no room left in it.
+        app.add_systems(Update, bazaar_comment::update_bazaar_comment_editor);
+        // The palette band fills from the rows `refresh_dynamic_menu_rows` just built (their labels are
+        // the display names of the book's keytops), so it runs behind that pass and never earlier.
+        app.add_systems(
+            Update,
+            macro_pallet_view::update_macro_pallet_view
+                .after(menu::refresh_dynamic_menu_rows)
+                .after(bazaar_comment::update_bazaar_comment_editor),
         );
         // Map screen + minimap markers depend on `crate::minimap` (wasm-gated).
         #[cfg(not(target_arch = "wasm32"))]
@@ -678,6 +710,7 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
             trade::spawn_trade_window,
             check_view::spawn_check_view,
             bazaar_view::spawn_bazaar_view,
+            macro_pallet_view::spawn_macro_pallet_view,
             status_panel::spawn_status_panel,
             menu::spawn_status_detail_window,
             equipment_screen::spawn_equipment_screen,

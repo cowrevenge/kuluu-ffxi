@@ -107,7 +107,6 @@ pub enum KeyItemTableError {
 
     #[error("gen-2 block {block} carries {found} descriptor pairs, not 7")]
     ExtendedBlockShape { block: usize, found: u32 },
-
 }
 
 // vendor/POLUtils/PlayOnline.FFXI/FFXIEncryption.cs
@@ -193,13 +192,7 @@ pub fn parse_key_item_names(dat_bytes: &[u8]) -> Result<BTreeMap<u16, String>, K
 /// Names plus the `{count, ptr}` description blocks behind entry words 3/4.
 pub fn parse_key_item_entries(
     dat_bytes: &[u8],
-) -> Result<
-    (
-        BTreeMap<u16, String>,
-        BTreeMap<u16, Vec<String>>,
-    ),
-    KeyItemTableError,
-> {
+) -> Result<(BTreeMap<u16, String>, BTreeMap<u16, Vec<String>>), KeyItemTableError> {
     let section = chunk::walk(dat_bytes)
         .filter_map(|r| r.ok())
         .find(is_key_item_chunk)
@@ -277,19 +270,13 @@ const EXTENDED_PAIR_DESCRIPTION: usize = 6;
 /// kept first-row-wins and counted for a one-line summary.
 pub fn parse_extended_key_item_entries(
     dat_bytes: &[u8],
-) -> Result<
-    (
-        BTreeMap<u16, String>,
-        BTreeMap<u16, Vec<String>>,
-    ),
-    KeyItemTableError,
-> {
+) -> Result<(BTreeMap<u16, String>, BTreeMap<u16, Vec<String>>), KeyItemTableError> {
     let (b, table_offset, table_size, block_size, num_strings) =
         crate::dmsg::decode_common(dat_bytes)?;
     if table_size != 0 {
-        return Err(KeyItemTableError::Extended(crate::dmsg::DmsgError::NotFixedBlock(
-            table_size,
-        )));
+        return Err(KeyItemTableError::Extended(
+            crate::dmsg::DmsgError::NotFixedBlock(table_size),
+        ));
     }
     let mut names = BTreeMap::new();
     let mut descriptions = BTreeMap::new();
@@ -307,9 +294,7 @@ pub fn parse_extended_key_item_entries(
             return Err(KeyItemTableError::ExtendedBlockShape { block, found });
         }
         // Descriptor pairs are {off, flag} - stride eight bytes from +4.
-        let pair_off = |pair: usize| {
-            read_u32_le(&b, start + 4 + pair * (size_of::<u32>() * 2))
-        };
+        let pair_off = |pair: usize| read_u32_le(&b, start + 4 + pair * (size_of::<u32>() * 2));
         let id_word = pair_off(EXTENDED_PAIR_ID)
             .and_then(|off| read_u32_le(&b, start + off as usize))
             .ok_or(KeyItemTableError::Extended(
@@ -356,6 +341,127 @@ pub fn parse_extended_key_item_entries(
     Ok((names, descriptions))
 }
 
+/// One key-item menu page as the gen-2 table files it: retail's own label plus,
+/// through [`KeyItemFiling::page_of`], the ids stored under it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyItemFiling {
+    labels: Vec<String>,
+    page_of_id: BTreeMap<u16, u8>,
+}
+
+impl KeyItemFiling {
+    pub fn is_empty(&self) -> bool {
+        self.labels.is_empty()
+    }
+
+    /// Page names in the order the table files them, retail's own spelling with
+    /// [`PAGE_LABEL_MARKER`] removed.
+    pub fn labels(&self) -> &[String] {
+        &self.labels
+    }
+
+    /// The page an id is stored on; `None` for ids the table has no row for.
+    pub fn page_of(&self, key_item_id: u16) -> Option<u8> {
+        self.page_of_id.get(&key_item_id).copied()
+    }
+
+    /// Every id the table files, ascending.
+    pub fn ids(&self) -> impl Iterator<Item = u16> + '_ {
+        self.page_of_id.keys().copied()
+    }
+
+    /// Ids filed per page, index-aligned with [`Self::labels`].
+    pub fn ids_on_page(&self, page: u8) -> Vec<u16> {
+        self.page_of_id
+            .iter()
+            .filter(|(_, p)| **p == page)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+}
+
+/// Retail marks each page of its key-item menu inside the same table that holds
+/// the item text: the row ending a page carries id word 0 and names the page in
+/// the name slot, prefixed with this marker.
+const PAGE_LABEL_MARKER: char = '-';
+
+/// The name slot of a boundary row, which always opens with the marker: retail's
+/// own column-header row (`in-text name`, `English Desc`) is unmarked and files
+/// nothing.
+fn page_label(text: &str) -> Option<String> {
+    let label = text.strip_prefix(PAGE_LABEL_MARKER)?.trim();
+    (!label.is_empty()).then(|| label.to_string())
+}
+
+/// Read retail's filing of the key-item menu pages out of the gen-2 table (see
+/// [`parse_extended_key_item_entries`] for the container law). A row whose id word
+/// is zero closes the page above it when its name slot opens with
+/// [`PAGE_LABEL_MARKER`]; measured on this install the marked rows sit at blocks
+/// 1610/1986/2399... in Pivot's overlay copy of the file and 1632/2022/... in the
+/// game tree's own, which is why page boundaries must be found by their label and
+/// never by block number. Unmarked id-zero rows (the table's column headers) file
+/// nothing. Membership inside a page is retail's own: the gate crystals (ids
+/// 352-357, 963-965) and `job gesture: warrior` (1738) sit in the run closed by
+/// `-Permanent Key Items`, `voidstone` (1539) under `-Voidwatch`, `Atma of the
+/// Savior` (1699) under `-Abyssea`, every claim slip under `-Claim Slips`. Pages
+/// come from the table's row order, never from a hand-built id list.
+pub fn parse_key_item_filing(dat_bytes: &[u8]) -> Result<KeyItemFiling, KeyItemTableError> {
+    let (b, table_offset, table_size, block_size, num_strings) =
+        crate::dmsg::decode_common(dat_bytes)?;
+    if table_size != 0 {
+        return Err(KeyItemTableError::Extended(
+            crate::dmsg::DmsgError::NotFixedBlock(table_size),
+        ));
+    }
+    let mut filing = KeyItemFiling::default();
+    let mut pending: Vec<u16> = Vec::new();
+    for block in 0..num_strings {
+        let start = table_offset
+            .checked_add(block.saturating_mul(block_size))
+            .ok_or(KeyItemTableError::Extended(
+                crate::dmsg::DmsgError::TruncatedHeader,
+            ))?;
+        let found = read_u32_le(&b, start).unwrap_or(0);
+        if found as usize != EXTENDED_PAIRS {
+            return Err(KeyItemTableError::ExtendedBlockShape { block, found });
+        }
+        let pair_off = |pair: usize| read_u32_le(&b, start + 4 + pair * (size_of::<u32>() * 2));
+        let id_word = pair_off(EXTENDED_PAIR_ID)
+            .and_then(|off| read_u32_le(&b, start + off as usize))
+            .unwrap_or(0);
+        if id_word != COLUMN_HEADER_ROW_ID {
+            if let Ok(id) = u16::try_from(id_word) {
+                pending.push(id);
+                continue;
+            }
+        }
+        let Some(label) = pair_off(EXTENDED_PAIR_NAME)
+            .and_then(|off| crate::dmsg::blob_at(&b, start, off as usize))
+            .and_then(|text| page_label(&text))
+        else {
+            continue;
+        };
+        filing.labels.push(label);
+        let page = (filing.labels.len() - 1) as u8;
+        for id in pending.drain(..) {
+            // First row to claim an id files it, as the text reader does.
+            match filing.page_of_id.entry(id) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(page);
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {}
+            }
+        }
+    }
+    if !pending.is_empty() {
+        eprintln!(
+            "key item filing: {} rows sit past the last page label, so they are not filed",
+            pending.len()
+        );
+    }
+    Ok(filing)
+}
+
 /// The installed client's key-item names, keyed by the id
 /// `vendor/server/scripts/enum/key_item.lua` uses. Empty when the DAT is
 /// missing or malformed, so a partial install degrades to whatever the caller
@@ -364,6 +470,7 @@ pub fn parse_extended_key_item_entries(
 pub struct KeyItemTable {
     names: BTreeMap<u16, String>,
     descriptions: BTreeMap<u16, Vec<String>>,
+    filing: KeyItemFiling,
 }
 
 impl KeyItemTable {
@@ -409,6 +516,7 @@ impl KeyItemTable {
         };
         match parse_key_item_entries(&bytes) {
             Ok((names, descriptions)) => KeyItemTable {
+                filing: KeyItemFiling::default(),
                 names,
                 descriptions,
             },
@@ -440,6 +548,12 @@ impl KeyItemTable {
             }
             Err(e) => eprintln!("key item text: {} rejected ({e})", path.display()),
         }
+        if self.filing.is_empty() {
+            match parse_key_item_filing(&bytes) {
+                Ok(filing) => self.filing = filing,
+                Err(e) => eprintln!("key item filing: {} rejected ({e})", path.display()),
+            }
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -459,6 +573,12 @@ impl KeyItemTable {
     /// printable line.
     pub fn description_lines(&self, key_item_id: u16) -> Option<&[String]> {
         self.descriptions.get(&key_item_id).map(Vec::as_slice)
+    }
+
+    /// How retail files its key-item menu pages, read from the same table as the
+    /// text; empty when no gen-2 file was readable.
+    pub fn filing(&self) -> &KeyItemFiling {
+        &self.filing
     }
 }
 
@@ -671,7 +791,9 @@ mod tests {
             .description_lines(1)
             .expect("Zeruhn report carries examine text");
         assert!(
-            report.last().is_some_and(|line| line.contains("Overseer Makarim")),
+            report
+                .last()
+                .is_some_and(|line| line.contains("Overseer Makarim")),
             "{report:?}"
         );
         // A marker-only block (airship passes) yields no printable lines rather
@@ -778,9 +900,8 @@ mod tests {
     /// pairs 1..6 -> string blobs {marker, 0x18 zeros, NUL text}.
     fn synth_extended_block(b: &SynthExtendedBlock) -> Vec<u8> {
         let mut body = vec![0u8; SYNTH_EXTENDED_BLOCK_SIZE];
-        let put = |body: &mut [u8], at: usize, v: u32| {
-            body[at..at + 4].copy_from_slice(&v.to_le_bytes())
-        };
+        let put =
+            |body: &mut [u8], at: usize, v: u32| body[at..at + 4].copy_from_slice(&v.to_le_bytes());
         put(&mut body, 0, EXTENDED_PAIRS as u32);
         // Pair 0 -> id word (raw u32, no marker); pair 1 -> the measured
         // companion word (value 1), whose meaning nothing on either side uses.
@@ -862,9 +983,7 @@ mod tests {
                     id: 500,
                     name: Some("job gesture: warrior".to_string()),
                     plural: Some("job gestures: warrior".to_string()),
-                    desc: Some(
-                        "\nStrike a pose befitting a mighty\nwarrior.\n".to_string(),
-                    ),
+                    desc: Some("\nStrike a pose befitting a mighty\nwarrior.\n".to_string()),
                 },
                 SynthExtendedBlock {
                     id: 3,
@@ -877,7 +996,10 @@ mod tests {
             0,
         );
         let (names, descriptions) = parse_extended_key_item_entries(&dat).unwrap();
-        assert_eq!(names.get(&500).map(String::as_str), Some("job gesture: warrior"));
+        assert_eq!(
+            names.get(&500).map(String::as_str),
+            Some("job gesture: warrior")
+        );
         assert_eq!(names.get(&3).map(String::as_str), Some("third thing"));
         // The id-0 column header row is not a key item.
         assert!(!names.contains_key(&0));
@@ -924,10 +1046,7 @@ mod tests {
         }
         assert_eq!(
             parse_extended_key_item_entries(&dat),
-            Err(KeyItemTableError::ExtendedBlockShape {
-                block: 1,
-                found: 6
-            })
+            Err(KeyItemTableError::ExtendedBlockShape { block: 1, found: 6 })
         );
     }
 
@@ -1017,12 +1136,7 @@ mod tests {
         assert_eq!(table.lookup(1), Some("the Zeruhn report"));
         assert_eq!(
             table.description_lines(1),
-            Some(
-                &[
-                    "fresh gen-2 line one".to_string(),
-                    "line two".to_string()
-                ][..]
-            )
+            Some(&["fresh gen-2 line one".to_string(), "line two".to_string()][..])
         );
         // Name from gen-2, description absent there so the era block stands.
         assert_eq!(table.lookup(256), Some("gen-2 treasure map"));
@@ -1057,5 +1171,160 @@ mod tests {
         // Shared ids take the gen-2 wording; this one matches the era file's
         // (same retail text, newer container).
         assert_eq!(table.lookup(1), Some("Zeruhn report"));
+    }
+
+    /// The page law without any install: a labelled row files every keyed row
+    /// above it since the previous label, so page order follows the table.
+    #[test]
+    fn filing_pages_end_at_their_label_row() {
+        let block = |id: u32, name: &str| SynthExtendedBlock {
+            id,
+            name: Some(name.to_string()),
+            plural: None,
+            desc: None,
+        };
+        let dat = synth_extended_file(
+            &[
+                block(0, "in-text name"),
+                block(5, "first item"),
+                block(7, "second item"),
+                block(0, "-Alpha Page"),
+                block(9, "third item"),
+                block(0, "-Beta Page"),
+            ],
+            SYNTH_EXTENDED_BLOCK_SIZE,
+            0,
+        );
+        let filing = parse_key_item_filing(&dat).unwrap();
+        assert_eq!(
+            filing.labels(),
+            &["Alpha Page".to_string(), "Beta Page".to_string()]
+        );
+        assert_eq!((filing.page_of(5), filing.page_of(7)), (Some(0), Some(0)));
+        assert_eq!(filing.page_of(9), Some(1));
+        assert_eq!(filing.page_of(4094), None);
+        // The label rows are not items, so the text reader keeps skipping them.
+        let (names, _) = parse_extended_key_item_entries(&dat).unwrap();
+        assert!(!names.contains_key(&0));
+    }
+
+    /// Install-gated law: retail's own page labels and filing, quoted from this
+    /// install, plus the sample ids that show each boundary (`airship pass` and
+    /// `job gesture: warrior` really do sit on the Permanent page, where retail's
+    /// window files them). Both copies of the table - the game tree's own and any
+    /// Pivot overlay winner over it - must agree.
+    #[test]
+    fn installed_filing_files_pages_like_retail() {
+        let Some(root) = crate::archive::open_test_install() else {
+            return;
+        };
+        const MEASURED_PAGE_LABELS: [&str; 10] = [
+            "Temporary Key Items",
+            "Permanent Key Items",
+            "Abyssea",
+            "Voidwatch",
+            "Geas Fete",
+            "Mounts",
+            "Mog Garden",
+            "Magical Maps",
+            "Claim Slips",
+            "Active Effects",
+        ];
+        let table = KeyItemTable::open_from_root(&root);
+        let filing = table.filing();
+        assert_eq!(
+            filing.labels(),
+            MEASURED_PAGE_LABELS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
+        for (id, page) in [
+            (1u16, 0u8), // Zeruhn report
+            (8, 1),      // airship pass
+            (353, 1),    // Dem gate crystal
+            (1738, 1),   // job gesture: warrior
+            (1699, 2),   // Atma of the Savior
+            (1539, 3),   // voidstone
+            (2839, 4),   // reaper
+            (3055, 5),   // trainer's whistle
+            (2398, 6),   // GPS crystal
+            (2307, 7),   // map of Escha - Zi'Tah
+            (1920, 8),   // iron chainmail claim slip
+        ] {
+            assert_eq!(
+                filing.page_of(id),
+                Some(page),
+                "{id} ({}) is filed on page {page} ({:?})",
+                table.lookup(id).unwrap_or("<unnamed>"),
+                filing.labels().get(page as usize).map(String::as_str)
+            );
+        }
+
+        // The era `sc_item_` section adds nothing that needs filing separately:
+        // every era-named id also has a row (and so a page) in the gen-2 table.
+        let era_path = root
+            .resolve(KEY_ITEM_TEXT_FILE_ID)
+            .map(|loc| loc.path_under(&root))
+            .unwrap_or_else(|_| root.root().join(KEY_ITEM_TEXT_ERA_ROM_PATH));
+        if let Ok(bytes) = std::fs::read(&era_path) {
+            let (era_names, _) = parse_key_item_entries(&bytes).unwrap();
+            let unfiled: Vec<u16> = era_names
+                .keys()
+                .copied()
+                .filter(|&id| u32::from(id) != COLUMN_HEADER_ROW_ID && filing.page_of(id).is_none())
+                .collect();
+            assert!(
+                unfiled.is_empty(),
+                "era ids the gen-2 table does not file: {unfiled:?}"
+            );
+        }
+
+        // The game tree's own copy of the table labels the pages the same and
+        // files every id on the same page but the two pinned below.
+        let tree = root.root().join(KEY_ITEM_EXTENDED_ERA_ROM_PATH);
+        if tree.is_file() {
+            let other = parse_key_item_filing(&std::fs::read(&tree).unwrap()).unwrap();
+            assert_eq!(filing.labels(), other.labels());
+            eprintln!(
+                "copies file {} and {} ids",
+                filing.ids().count(),
+                other.ids().count()
+            );
+            let mut disagreements: Vec<u16> = filing
+                .ids()
+                .filter(|&id| other.page_of(id) != filing.page_of(id))
+                .collect();
+            disagreements.sort_unstable();
+            let page_name = |f: &KeyItemFiling, id: u16| {
+                f.page_of(id)
+                    .and_then(|p| f.labels().get(p as usize).cloned())
+                    .unwrap_or_else(|| "<none>".to_string())
+            };
+            // Measured on this install: retail's own two copies of the table
+            // disagree about exactly two ids - `White Card` (349) and `Black Card`
+            // (351) sit on the Temporary page in Pivot's overlay winner, which is
+            // what the client renders, and on the Permanent page in the game
+            // tree's older copy. Kuluu files them as the resolved winner does, like
+            // every other DAT read, so the divergence is recorded here rather than
+            // smoothed away.
+            assert_eq!(
+                disagreements,
+                [349u16, 351],
+                "copies disagree via {:?}",
+                disagreements
+                    .iter()
+                    .map(|id| {
+                        (
+                            *id,
+                            table.lookup(*id).unwrap_or("<unnamed>"),
+                            page_name(filing, *id),
+                            page_name(&other, *id),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 }

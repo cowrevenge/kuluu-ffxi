@@ -122,8 +122,8 @@ fn resolve_menu_entry(
 ) -> MenuDispatch {
     use kuluu_render::graphics_settings::MenuAction;
     use kuluu_render::hud::menu::{
-        magic_category_for_label, COMM_EMOTE_LIST, COMM_FRIEND_LIST, MACRO_ROW_MACRO_RESULT,
-        MACRO_ROW_SELECT_MACRO, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_REGION_INFO, ROOT_SET_BAZAAR,
+        magic_category_for_label, COMM_EMOTE_LIST, COMM_FRIEND_LIST, MACRO_ROW_EDIT_EQUIP_SETS,
+        MACRO_ROW_EDIT_MACRO, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_REGION_INFO, ROOT_SET_BAZAAR,
         ROOT_SHUT_DOWN, ROOT_VIEW_HOUSE, SYNTH_ROW_OPEN_LIST, SYNTH_ROW_PICK_MATERIAL,
     };
     // The Config family resolves through no labels at all: every window's rows are DAT
@@ -220,12 +220,12 @@ fn resolve_menu_entry(
 
         // The mcrmenu launcher rows drill the §41 windows built by bead .19.1
         // (handler FFXiMain.dll retail-2026-09 RVA 0x1A64B0 items {1,2}; vault
-        // main_menu.md §34/§41): Select Macro opens the store-backed mcrselec,
-        // Macro Result the grounded-empty mcres20 surface.
-        (MenuKind::MacrosPalette, l) if l == MACRO_ROW_SELECT_MACRO => {
+        // main_menu.md §34/§41): Edit Macro opens the store-backed mcrselec, Edit Equip.Sets the
+        // grounded-empty mcres20 surface.
+        (MenuKind::MacrosPalette, l) if l == MACRO_ROW_EDIT_MACRO => {
             MenuDispatch::OpenSubmenu(MenuKind::MacroSelect)
         }
-        (MenuKind::MacrosPalette, l) if l == MACRO_ROW_MACRO_RESULT => {
+        (MenuKind::MacrosPalette, l) if l == MACRO_ROW_EDIT_EQUIP_SETS => {
             MenuDispatch::OpenSubmenu(MenuKind::MacroResult)
         }
 
@@ -255,6 +255,17 @@ fn resolve_menu_entry(
                 MenuDispatch::OpenSubmenu(MenuKind::RoomList)
             } else {
                 MenuDispatch::NotImplemented(label.to_string())
+            }
+        }
+
+        // `mogcont`'s fifteen box rows (handler FFXiMain.dll retail-2026-09 RVA 0x14EC40, select
+        // items 1..0xF; vault main_menu.md §32): each opens its own LSB bag through the same browse
+        // seam the item/equipment windows already use. A row the server did not size draws grey and
+        // its select is refused before this table runs, so it never reaches here.
+        (MenuKind::MogContainers, label) => {
+            match kuluu_render::hud::menu::mog_container_row_container(label) {
+                Some(container) => MenuDispatch::BrowseBag { container },
+                None => MenuDispatch::NotImplemented(label.to_string()),
             }
         }
 
@@ -705,7 +716,12 @@ pub(super) fn confirm_menu_at_cursor(
             // no-mark and settled-width states never get torn down to rebuild.
             if matches!(
                 action,
-                A::MissionLogRow { .. } | A::MissionTextRow { .. } | A::QuestDetailRow { .. }
+                A::MissionLogRow { .. }
+                    | A::MissionTextRow { .. }
+                    // ur/152: the key item description window's lines are inert
+                    // readout rows under the same law.
+                    | A::KeyItemTextRow { .. }
+                    | A::QuestDetailRow { .. }
             ) {
                 return None;
             }
@@ -794,6 +810,16 @@ pub(super) fn confirm_menu_at_cursor(
                 item_no,
             } = action
             {
+                // A greyed read-only page refuses its rows like every other
+                // grey row: Safe/Safe 2F/Storage/Locker browsed outside your
+                // own Mog House (LSB's validContainers law, vendor/server/src/
+                // map/packets/c2s/0x029_item_move.cpp) open no item submenu.
+                if !kuluu_render::hud::item_screen::container_accessible(
+                    &scene_state.snapshot,
+                    container,
+                ) {
+                    return None;
+                }
                 stack.push(MenuKind::ItemAction {
                     container,
                     index,
@@ -909,6 +935,14 @@ pub(super) fn confirm_menu_at_cursor(
                     completed,
                 );
                 stack.push(MenuKind::QuestList { completed, region });
+                return None;
+            }
+
+            // ur/150: a Key Items bucket row pushes that bucket's list on the
+            // same `evitem` seat - one box relabelled, like every accepted
+            // hub-drill family.
+            if let A::OpenKeyItemCategory { category } = action {
+                stack.push(MenuKind::KeyItemList { category });
                 return None;
             }
 
@@ -1128,24 +1162,22 @@ pub(super) fn confirm_menu_at_cursor(
                 return None;
             }
 
-            // Bazaar stall picker select = “request to view a bazaar”: c2s 0x105
-            // for that seller (vault main_menu.md §33), then kuluu's browse screen
-            // takes over — the same seam as the /check wares path in check.rs.
-            // The empty-list hint row never resolves to an entity and stays inert.
-            if let A::BazaarStall { char_id } = action {
-                let target_index = scene_state
-                    .snapshot
-                    .entities
-                    .iter()
-                    .find(|e| e.id == char_id && e.char_flags.bazaar)
-                    .map(|e| e.act_index)?;
-                if let Err(e) = cmd_tx.try_send(AgentCommand::OpenBazaar {
-                    target_id: char_id,
-                    target_index,
-                }) {
-                    push_system_chat_line(scene_state, format!("[menu] bazaar open dropped: {e}"));
+            // `Set Prices` opens our own price menu: the packet raises the server-side
+            // flag and a one-shot hands this frame to that surface. `Edit Comment` opens the
+            // field over the chat log, which keeps the draft it already holds.
+            if let A::BazaarSetupRow { row } = action {
+                if row == 0 {
+                    dynamic.bazaar_prices_request = true;
+                    if cmd_tx.try_send(AgentCommand::BazaarPricesEnter).is_err() {
+                        push_system_chat_line(
+                            scene_state,
+                            "[menu] bazaar price menu open dropped".to_string(),
+                        );
+                    }
+                    return None;
                 }
-                return Some(InputMode::Bazaar);
+                stack.push(MenuKind::BazaarComment);
+                return None;
             }
 
             // Craft-list select: the plan was resolved against the bag when the rows
@@ -1202,6 +1234,76 @@ pub(super) fn confirm_menu_at_cursor(
             // main_menu.md §34) — line rows seed the level's mcrledit buffer,
             // and the clear row commits without it. Nothing here touches the
             // wire except through CommitMacros (§41 [V-negative]).
+            // A `BookNN` row raises that book's `mcrselop` options window beside the pager.
+            if let A::MacroBookRow { book } = action {
+                stack.push(MenuKind::MacroBookOptions { book });
+                return None;
+            }
+            // The five blocks of `mcrselop`, whose table-14 descriptions read `Edit macro book.` /
+            // `Edit name of macro book.` / `Copy macro book.` / `Paste macro book.` / `Delete macro
+            // book.`: the first walks into that book's pallet, the other four edit the client's own
+            // files through `hud::client_user_files`. Macros never ride the wire (§34/§41), so each of
+            // those is a file write plus its memory copy - which the pagers and the band read back on
+            // their next frame. The window stays open for all four (owner 2026-10-24: "none of these
+            // options work but the confirm button.. wire them up").
+            if let A::MacroBookOptionRow { option } = action {
+                let MenuKind::MacroBookOptions { book } = kind else {
+                    return None;
+                };
+                let book = usize::from(book);
+                use kuluu_render::hud::menu::{
+                    MACRO_BOOK_OPTION_CHANGE_NAME, MACRO_BOOK_OPTION_CONFIRM,
+                    MACRO_BOOK_OPTION_COPY, MACRO_BOOK_OPTION_DELETE, MACRO_BOOK_OPTION_PASTE,
+                };
+                match option {
+                    MACRO_BOOK_OPTION_CONFIRM => {
+                        // The pallet band is that same book, so it takes the index as a `u8` block.
+                        stack.push(MenuKind::MacroPallet { book: book as u8 });
+                    }
+                    // `Change Name` opens its field in that very row (see
+                    // `menu::macro_book_option_rows`), seeded with the name the title files carry so
+                    // editing it edits something.
+                    MACRO_BOOK_OPTION_CHANGE_NAME => {
+                        let current = kuluu_render::hud::client_user_files::client_user_files()
+                            .book_title(book)
+                            .unwrap_or_default()
+                            .to_string();
+                        if let Some(level) = stack.current_mut() {
+                            level.macro_book_name_edit = Some(current);
+                        }
+                    }
+                    MACRO_BOOK_OPTION_COPY => report_macro_book_edit(
+                        scene_state,
+                        "copy",
+                        book,
+                        kuluu_render::hud::client_user_files::copy_macro_book(book),
+                    ),
+                    MACRO_BOOK_OPTION_PASTE => report_macro_book_edit(
+                        scene_state,
+                        "paste",
+                        book,
+                        kuluu_render::hud::client_user_files::paste_macro_book(book),
+                    ),
+                    MACRO_BOOK_OPTION_DELETE => report_macro_book_edit(
+                        scene_state,
+                        "delete",
+                        book,
+                        kuluu_render::hud::client_user_files::delete_macro_book(book),
+                    ),
+                    // `mcrselop` draws five blocks; a row outside them changes nothing.
+                    _ => {}
+                }
+                return None;
+            }
+            // Same law for equipment sets: a `SetNNN` row raises its `mcresmn` options box beside
+            // the pager. Every set-option arm there is unread, so those rows change nothing.
+            if let A::EquipSetRow { set } = action {
+                stack.push(MenuKind::EquipSetOptions { set });
+                return None;
+            }
+            if let A::EquipSetOptionRow { .. } = action {
+                return None;
+            }
             if let A::MacroSlotRow { block, index } = action {
                 stack.push(MenuKind::MacroEditor { block, index });
                 return None;
@@ -1287,17 +1389,13 @@ pub(super) fn confirm_menu_at_cursor(
                     return None;
                 }
             }
-            // Retail's key-item detail pane needs a description DAT not yet
-            // identified (bead kuluu-h7x retail_unknowns); echo the name and
-            // keep the list open.
+            // ur/152 ("missing examine item opened"): a key item row asks first,
+            // like the owner's capture shows - Yes opens the item's own `sc_item_`
+            // description window on the same `evitem` seat, No pops back to the
+            // bucket list. This replaces kuluu-h7x's chat echo: the DAT holding
+            // the text was found (entry words 3/4 blocks), so the echo is dead.
             if let A::KeyItem { id } = action {
-                push_system_chat_line(
-                    scene_state,
-                    format!(
-                        "Key item: {}.",
-                        kuluu_render::hud::menu::key_item_row_label(id, true)
-                    ),
-                );
+                stack.open_confirm(MenuKind::KeyItemExamine { id }, ConfirmDefault::Yes);
                 return None;
             }
             if let Some(sub_action) = sub_target_action_for(action) {
@@ -1401,6 +1499,16 @@ pub(super) fn confirm_menu_at_cursor(
         stack.pop();
         return None;
     }
+    // ur/152: the key item Examine answer. Yes trades the prompt for the
+    // description window on its seat (pop+push - one box relabelled); No pops
+    // and the bucket list resumes with its cursor untouched.
+    if let MenuKind::KeyItemExamine { id } = kind {
+        stack.pop();
+        if label == kuluu_render::hud::menu::DROP_CONFIRM_YES {
+            stack.push(MenuKind::KeyItemText { id });
+        }
+        return None;
+    }
     if let MenuKind::ItemDropConfirm {
         container,
         index,
@@ -1419,6 +1527,13 @@ pub(super) fn confirm_menu_at_cursor(
         }
         stack.pop();
         stack.pop();
+        return None;
+    }
+    // ur/65 law for `mogcont`: a bag the server never sized draws grey, and its select answers
+    // nothing at all - key press or mouse click changes no state.
+    if matches!(kind, MenuKind::MogContainers)
+        && kuluu_render::hud::menu::menu_row_disabled(kind, cursor, &scene_state.snapshot)
+    {
         return None;
     }
     // The myroom door row is identified by its select id (id 6 of handler FFXiMain.dll retail-2026-09
@@ -1451,9 +1566,21 @@ pub(super) fn confirm_menu_at_cursor(
                 );
                 return None;
             }
-            if let Err(e) = cmd_tx.try_send(AgentCommand::OpenMogMenu) {
-                push_system_chat_line(scene_state, format!("[menu] Mog Menu open dropped: {e}"));
+            // ur/155 (owner's outside capture): standing outside the row name-opens retail's
+            // `mogcont`, so kuluu draws that box list in the command column - Commands is replaced
+            // exactly as Missions replaces it, and nothing goes on the wire (§32: the arm itself is
+            // client-side). Inside a Mog House or rent-a-room the row keeps serving the ops panel,
+            // where Delivery Box / Change Jobs / Gardening / Layout / Remodel actually live.
+            if scene_state.snapshot.self_in_mog_house() {
+                if let Err(e) = cmd_tx.try_send(AgentCommand::OpenMogMenu) {
+                    push_system_chat_line(
+                        scene_state,
+                        format!("[menu] Mog Menu open dropped: {e}"),
+                    );
+                }
+                return None;
             }
+            stack.push(MenuKind::MogContainers);
             None
         }
         MenuDispatch::TextCommand(cmd) => {
@@ -1973,6 +2100,102 @@ fn toggle_debug_panel(
     );
 }
 
+/// What one book arm answered, when it could not do what its row said: `mcrselop` carries no message
+/// of its own (its record holds five blocks and nothing else), so the chat log carries these. Silence
+/// on success is deliberate - a copy has nothing to show for itself until its paste lands.
+fn report_macro_book_edit(
+    scene_state: &mut SceneState,
+    arm: &str,
+    book: usize,
+    edit: Result<(), kuluu_render::hud::client_user_files::MacroEditError>,
+) {
+    if let Err(e) = edit {
+        push_system_chat_line(
+            scene_state,
+            format!("[menu] {arm} macro book {}: {e}", book + 1),
+        );
+    }
+}
+
+/// Consume one keystroke while a `mcrselop` `Change Name` field holds a draft: printable characters
+/// append up to what the client's title slot stores (`book_title_fits`), Backspace pops, Enter commits
+/// through `set_book_title`, Esc discards without writing. Either way the option window stays open with
+/// its other four rows untouched, and nav keys stay dead while typing - the mcrledit law (FFXiMain.dll
+/// retail-2026-09 RVA 0x1A6180; vault main_menu.md §34/§41).
+fn macro_book_name_key(
+    key: &Key,
+    bindings: &Bindings,
+    stack: &mut MenuStack,
+    scene_state: &mut SceneState,
+) {
+    let book = match stack.current().map(|level| level.kind) {
+        Some(MenuKind::MacroBookOptions { book }) => usize::from(book),
+        // A draft belongs to the option window that opened it; on any other window it is dropped.
+        _ => {
+            if let Some(level) = stack.current_mut() {
+                level.macro_book_name_edit = None;
+            }
+            return;
+        }
+    };
+    // Backspace first: the erase key must never fall through into a window-cancel arm under it (see
+    // `handle_bazaar_comment_key`).
+    if bindings.matches_logical(Action::ChatBackspace, key) {
+        if let Some(draft) = stack
+            .current_mut()
+            .and_then(|level| level.macro_book_name_edit.as_mut())
+        {
+            draft.pop();
+        }
+        return;
+    }
+    if bindings.matches_logical(Action::NavCancel, key) {
+        if let Some(level) = stack.current_mut() {
+            level.macro_book_name_edit = None;
+        }
+        return;
+    }
+    if bindings.matches_logical(Action::NavConfirm, key) {
+        let draft = stack
+            .current()
+            .and_then(|level| level.macro_book_name_edit.clone())
+            .unwrap_or_default();
+        if let Some(level) = stack.current_mut() {
+            level.macro_book_name_edit = None;
+        }
+        report_macro_book_edit(
+            scene_state,
+            "name",
+            book,
+            kuluu_render::hud::client_user_files::set_book_title(book, &draft),
+        );
+        return;
+    }
+    use kuluu_render::hud::client_user_files::book_title_fits;
+    let Some(draft) = stack
+        .current_mut()
+        .and_then(|level| level.macro_book_name_edit.as_mut())
+    else {
+        return;
+    };
+    match key {
+        Key::Space => {
+            if book_title_fits(draft, 1) {
+                draft.push(' ');
+            }
+        }
+        Key::Character(chars) => {
+            for ch in chars.chars() {
+                if ch.is_control() || !book_title_fits(draft, ch.len_utf8()) {
+                    break;
+                }
+                draft.push(ch);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Consume one keystroke while a macro line editor buffer is open (bead
 /// kuluu-o9qt7.19.3): printable characters append, Backspace pops, Enter
 /// commits the merged set through CommitMacros (retail's mcrledit commit —
@@ -2033,6 +2256,66 @@ fn macro_line_edit_key(
     }
 }
 
+/// Consume one keystroke while the bazaar comment field owns the stack: printable characters
+/// append up to what LSB stores, Backspace pops, Enter commits c2s 0x0DE and closes, Esc closes
+/// without sending (`bazaar_comment`). The `Set Bazaar` panel under it survives both, so a second
+/// Esc closes that.
+fn handle_bazaar_comment_key(
+    key: &Key,
+    bindings: &Bindings,
+    stack: &mut MenuStack,
+    dynamic: &mut kuluu_render::hud::menu::DynamicMenu,
+    cmd_tx: &Sender<AgentCommand>,
+    scene_state: &mut SceneState,
+) {
+    // Backspace first: retail's own erase key must never fall through to the window-cancel arm
+    // underneath it.
+    if bindings.matches_logical(Action::ChatBackspace, key) {
+        dynamic.bazaar_comment_draft.pop();
+        return;
+    }
+    if bindings.matches_logical(Action::NavCancel, key) {
+        stack.pop();
+        return;
+    }
+    if bindings.matches_logical(Action::NavConfirm, key) {
+        let text = dynamic.bazaar_comment_draft.clone();
+        if cmd_tx
+            .try_send(AgentCommand::BazaarComment { text })
+            .is_err()
+        {
+            push_system_chat_line(
+                scene_state,
+                "[menu] bazaar comment send dropped".to_string(),
+            );
+        }
+        stack.pop();
+        return;
+    }
+    match key {
+        Key::Space => {
+            if kuluu_render::hud::bazaar_comment::fits(&dynamic.bazaar_comment_draft, 1) {
+                dynamic.bazaar_comment_draft.push(' ');
+            }
+        }
+        Key::Character(s) => {
+            for c in s.chars() {
+                if c.is_control() {
+                    continue;
+                }
+                if !kuluu_render::hud::bazaar_comment::fits(
+                    &dynamic.bazaar_comment_draft,
+                    c.len_utf8(),
+                ) {
+                    break;
+                }
+                dynamic.bazaar_comment_draft.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Route one keypress in the open menu. In the sort pane, any key the pane
 /// does not own maps to SortPaneKey::Other so it can't leak into list
 /// navigation. Commands > Items opens on the inventory; only the Mog Menu
@@ -2084,6 +2367,13 @@ pub(super) fn handle_menu_key(
         .current()
         .is_some_and(kuluu_render::input_mode::MenuLevel::cursor_locked)
     {
+        return None;
+    }
+
+    // The comment field takes every keystroke while it is up, exactly as the macro line editor
+    // does: nothing of it belongs to the list under it.
+    if top_kind == MenuKind::BazaarComment {
+        handle_bazaar_comment_key(key, bindings, stack, dynamic, cmd_tx, scene_state);
         return None;
     }
 
@@ -2197,6 +2487,17 @@ pub(super) fn handle_menu_key(
     // dead while typing, which is also the `.29` rule.
     if stack.current().is_some_and(|l| l.macro_line_edit.is_some()) {
         macro_line_edit_key(key, bindings, stack, scene_state, cmd_tx);
+        return None;
+    }
+
+    // …and the same law for a `Change Name` draft in an open `mcrselop` box: while it holds one every
+    // keystroke belongs to that field, which types into its own row (see
+    // `kuluu_render::hud::menu::macro_book_option_rows`).
+    if stack
+        .current()
+        .is_some_and(|l| l.macro_book_name_edit.is_some())
+    {
+        macro_book_name_key(key, bindings, stack, scene_state);
         return None;
     }
 
@@ -2585,6 +2886,36 @@ pub(super) fn handle_menu_key(
             ) {
                 level.kind = MenuKind::MissionDetail { log, member };
                 level.cursor = 0;
+            }
+            return None;
+        }
+    }
+
+    // The macro palette is a grid, not a list: two rows of ten keytops (`hud::macro_pallet_view`). Its
+    // four directions move along and between those rows. Left stepping through the row list slid the
+    // highlight sideways under Up/Down and paged a window that has no pages at all, which is what
+    // "the selector doenst work.. it just goins top to bottom" reported (owner 2026-10-24).
+    if matches!(kind, MenuKind::MacroPallet { .. }) {
+        let step = if bindings.matches_logical(Action::NavLeft, key) {
+            Some(kuluu_render::hud::menu::macro_pallet_column_step(
+                cursor, false,
+            ))
+        } else if bindings.matches_logical(Action::NavRight, key) {
+            Some(kuluu_render::hud::menu::macro_pallet_column_step(
+                cursor, true,
+            ))
+        } else if bindings.matches_logical(Action::NavUp, key) {
+            Some(kuluu_render::hud::menu::macro_pallet_row_step(
+                cursor, false,
+            ))
+        } else if bindings.matches_logical(Action::NavDown, key) {
+            Some(kuluu_render::hud::menu::macro_pallet_row_step(cursor, true))
+        } else {
+            None
+        };
+        if let Some(next) = step {
+            if let Some(level) = stack.current_mut() {
+                level.step_cursor_to(next);
             }
             return None;
         }
@@ -5011,11 +5342,11 @@ mod menu_key_tests {
         std::iter::from_fn(|| harness._cmd_rx.try_recv().ok()).collect()
     }
 
-    /// Status row id 11 opens `ut_menu` over the selector, asking for every ranking set whose
-    /// table completed (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md);
-    /// the row is never disabled, and with a display-only detail up the detail closes first.
+    /// Owner ruling (ur/147): the Unity row is grey and its select refused whatever the
+    /// snapshot holds - even a completed ranking table opens nothing, above a display-only
+    /// detail or anywhere else.
     #[test]
-    fn unity_row_opens_ut_menu_and_requests_completed_sets() {
+    fn unity_row_is_greyed_and_answers_nothing() {
         use kuluu_render::hud::status_panel::StatusEntryKind;
         let mut harness = Harness::new();
         let mut world = marker_world();
@@ -5042,11 +5373,16 @@ mod menu_key_tests {
         );
         assert_eq!(
             stack.levels.iter().map(|l| l.kind).collect::<Vec<_>>(),
-            vec![MenuKind::Root, MenuKind::Status, MenuKind::UnityMenu]
+            vec![
+                MenuKind::Root,
+                MenuKind::Status,
+                MenuKind::StatusDetail { entry: 0 }
+            ],
+            "a grey row opens nothing"
         );
-        assert_eq!(
-            drain_commands(&mut harness),
-            vec![AgentCommand::RequestUnityRanking { result_set: 1 }]
+        assert!(
+            drain_commands(&mut harness).is_empty(),
+            "and sends no ranking request"
         );
     }
 
@@ -5503,7 +5839,7 @@ mod menu_dispatch_tests {
         // Ungated page-2 arm FFXiMain.dll retail-2026-09 RVA 0x14E8BD name-opens
         // `menu    mcrmenu` (vault main_menu.md §34); its two rows drill the
         // §41 windows bead .19.1 built.
-        use kuluu_render::hud::menu::{MACRO_ROW_MACRO_RESULT, MACRO_ROW_SELECT_MACRO};
+        use kuluu_render::hud::menu::{MACRO_ROW_EDIT_EQUIP_SETS, MACRO_ROW_EDIT_MACRO};
         assert_eq!(
             resolve_menu_entry(
                 MenuKind::Root,
@@ -5514,18 +5850,13 @@ mod menu_dispatch_tests {
             MenuDispatch::OpenSubmenu(MenuKind::MacrosPalette)
         );
         assert_eq!(
-            resolve_menu_entry(
-                MenuKind::MacrosPalette,
-                MACRO_ROW_SELECT_MACRO,
-                false,
-                false
-            ),
+            resolve_menu_entry(MenuKind::MacrosPalette, MACRO_ROW_EDIT_MACRO, false, false),
             MenuDispatch::OpenSubmenu(MenuKind::MacroSelect)
         );
         assert_eq!(
             resolve_menu_entry(
                 MenuKind::MacrosPalette,
-                MACRO_ROW_MACRO_RESULT,
+                MACRO_ROW_EDIT_EQUIP_SETS,
                 false,
                 false
             ),

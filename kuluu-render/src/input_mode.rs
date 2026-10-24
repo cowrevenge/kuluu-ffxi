@@ -344,6 +344,12 @@ pub enum MenuKind {
     /// zone's PCs with LSB's entity-stream BazaarFlag; select sends c2s 0x105 for
     /// that seller and hands off to the bazaar browse screen.
     BazaarStalls,
+
+    /// The bazaar comment editor page-2 row 5's `Edit Comment` raises: a small text
+    /// field retail docks above the chat log (owner 2026-10-24). Bespoke surface, like
+    /// `Map`; its draft lives on `DynamicMenu::bazaar_comment_draft` and what you
+    /// commit goes out as c2s 0x0DE INSPECT_MESSAGE.
+    BazaarComment,
     /// The `mcrmenu` macro-palette launcher: two rows = its handler's select
     /// items {1,2} (vault main_menu.md §34).
     MacrosPalette,
@@ -429,6 +435,16 @@ pub enum MenuKind {
     /// container widgets (vault main_menu.md §40).
     HomeView,
 
+    /// The Mog House storage-box list page-2 row 4 (`View House`) name-opens while the player
+    /// stands OUTSIDE a Mog House: retail's arm FFXiMain.dll retail-2026-09 RVA 0x14E8F5 opens
+    /// `menu    mogcont`, whose handler (RVA 0x14EC40, vault main_menu.md §32) answers select items
+    /// 1..0xF with one storage container each - Mog Safe, Mog Safe 2, Storage, Mog Locker, Mog
+    /// Satchel, Mog Sack, Mog Case, then Mog Wardrobe and wardrobes 2-8. A bag the server's s2c
+    /// 0x01C ITEM_MAX gives zero capacity draws dim and refuses its select (ur/65 law). Kuluu seats
+    /// it in the command column, so opening it replaces Commands the way Missions does; inside a
+    /// Mog House or rent-a-room the same row keeps serving `HomeView`'s ops panel instead.
+    MogContainers,
+
     /// The `roomlist` window the myroom Remodel row opens (select id 7 → instance
     /// [0x106631e0] method .text FFXiMain.dll retail-2026-09 0x1D6890, tail jmp to the
     /// control's show slot +0x70 = .text 0x1D6820 name-opening `menu    roomlist`; vault
@@ -483,6 +499,29 @@ pub enum MenuKind {
     /// retail-2026-09 RVA 0x1A6EB0 (vault main_menu.md §41); grounded-empty
     /// until kuluu executes macros.
     MacroResult,
+
+    /// The `mcresmn` options window a set's row raises out of the `mcres20` pager: eight blocks
+    /// (`Edit this equipment set.` … `Set appearance of own equipment to that of this item set.`).
+    /// `set` is the 0-based index into the two-hundred-set store.
+    EquipSetOptions {
+        set: u16,
+    },
+
+    /// One book's macro pallet - retail draws it as two stacked rows of ten keytop blocks
+    /// (`mcr1pall`/`mcr2pall`, x=16 w=480 h=42 each), which kuluu collapses into one surface at
+    /// that left-side record. `book` is the 0-based index into the forty-book store.
+    MacroPallet {
+        book: u8,
+    },
+
+    /// The `mcrselop` window a book's row raises beside the `mcrselec` pager: five
+    /// blocks whose table-14 descriptions read `Edit macro book.` / `Edit name of
+    /// macro book.` / `Copy macro book.` / `Paste macro book.` / `Delete macro
+    /// book.`, under the caption band retail reads `Options`. `book` is the 0-based
+    /// index into the forty-book store.
+    MacroBookOptions {
+        book: u8,
+    },
 
     /// The `miss00` log window for one chain member — missionm's select tail
     /// name-opens it over itself (FFXiMain.dll retail-2026-09 RVA 0x22DB40; vault
@@ -539,7 +578,34 @@ pub enum MenuKind {
 
     Items,
 
+    /// The modern main-menu Key Item window opens on this page hub: retail lists
+    /// its pages before any item, and the count comes from the install's own
+    /// key-item table ([`hud::menu::KEY_ITEM_CATEGORY_LABELS`]). Selecting a row
+    /// pushes [`MenuKind::KeyItemList`] for that page on the same `evitem` seat,
+    /// so the one box relabels in place.
     KeyItems,
+
+    /// One page list of the Key Items family (`category` indexes
+    /// [`hud::menu::KEY_ITEM_CATEGORY_LABELS`]): the owned items the install's
+    /// table files there, id order, page-sized and scrollable like every list
+    /// since Currencies (ur/150).
+    KeyItemList {
+        category: u8,
+    },
+
+    /// ur/152: selecting a key item row asks first, exactly like the owner's
+    /// capture ("missing examine item opened") - Yes/No rows on the same
+    /// `evitem` seat as the rest of the family. Yes opens [`MenuKind::KeyItemText`].
+    KeyItemExamine {
+        id: u16,
+    },
+
+    /// ur/152 ("missing item description then opens"): the item's own `sc_item_`
+    /// description lines read from the install DAT, retail's wrapping kept;
+    /// an item whose block held no printable line shows the neutral empty note.
+    KeyItemText {
+        id: u16,
+    },
 
     /// Retail Command Menu "Items": only items that can actually be used
     /// right now (LSB 0x037 semantics — see `hud::menu::item_usable_now`),
@@ -613,6 +679,11 @@ pub struct MenuLevel {
     /// mcrledit law), the working buffer lives on this level — scoping cancel
     /// and commit to the window that opened it.
     pub macro_line_edit: Option<MacroLineBuffer>,
+    /// The draft a `mcrselop` `Change Name` row is typing. It lives on the option window for the same
+    /// reason as the line buffer above: Esc discards it there and Enter commits it there, through
+    /// [`crate::hud::client_user_files::set_book_title`]. While it holds a draft that window's second
+    /// row wears it (see `menu::macro_book_option_rows`).
+    pub macro_book_name_edit: Option<String>,
     /// The remembered cursor this window opened on still waits for its rows, which bound it.
     pub clamp_pending: bool,
     /// Set when the window was created with its last DAT item unselectable.
@@ -625,6 +696,7 @@ impl MenuLevel {
             kind,
             cursor,
             macro_line_edit: None,
+            macro_book_name_edit: None,
             clamp_pending: false,
             last_item_lock: None,
         }

@@ -848,6 +848,17 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             .run_if(in_state(AppPhase::InGame)),
     );
 
+    // Registered on its own: the group above stands at bevy's `.chain()` arity
+    // ceiling, so a new sync system cannot join it. It still runs before the key
+    // handler, which is what makes `Set Prices` take the frame cleanly.
+    app.add_systems(
+        Update,
+        text_input::bazaar_price_mode_sync_system
+            .after(text_input::bazaar_mode_sync_system)
+            .before(input::handle_input_system)
+            .run_if(in_state(AppPhase::InGame)),
+    );
+
     app.add_systems(
         Update,
         input::camera_polish_system

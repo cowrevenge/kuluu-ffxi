@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy::ui::{ComputedNode, UiGlobalTransform};
 
 use crate::hud::overlay::ActiveOverlay;
 use crate::hud::style::{self, theme};
@@ -103,7 +104,8 @@ pub const STATUS_ENTRIES: &[StatusEntry] = &[
     StatusEntry {
         kind: StatusEntryKind::Unity,
         label: "Unity",
-        enabled: true,
+        // Owner ruling 2026-10-22: Unity stays grey and refused - it is never played with here.
+        enabled: false,
     },
     StatusEntry {
         kind: StatusEntryKind::PlayTime,
@@ -158,6 +160,9 @@ pub const ALTER_EGO_POINTS_KEY_ITEM: u16 = 3361;
 pub fn status_row_enabled(kind: StatusEntryKind, snap: &kuluu_snapshot::SceneSnapshot) -> bool {
     use ffxi_proto::decode::CharSkillLevels;
     match kind {
+        // Owner ruling 2026-10-22 (ur/147): Unity is greyed out and its select refused,
+        // whatever the snapshot says; the unity windows are not used in kuluu.
+        StatusEntryKind::Unity => false,
         StatusEntryKind::CombatSkill => visible_in_range(
             snap,
             CharSkillLevels::COMBAT_SKILL_RANGE,
@@ -287,6 +292,10 @@ pub const JOBLEVEL_STATUS_TOP: f32 = 48.0;
 
 /// The `level` window opens with Status at its own record frame.
 pub const STATUS_LEVEL_WINDOW: &str = "level";
+
+/// The air between persona and the stacked `level` box: DAT delta between persona's bottom
+/// (16+190) and `level`'s record top (208).
+const STATUS_STACK_GAP_PX: f32 = 2.0;
 
 /// Full-screen host for the persona panel and its `level` box: persona sits at its Status
 /// spot, and the box stacks under it until the `level` record places it.
@@ -734,8 +743,7 @@ pub fn spawn_status_panel(mut commands: Commands) {
                     ..default()
                 },
                 flex_direction: FlexDirection::Column,
-                // DAT delta between persona's bottom (16+190) and `level`'s record top (208).
-                row_gap: Val::Px(2.0),
+                row_gap: Val::Px(STATUS_STACK_GAP_PX),
                 display: Display::None,
                 ..default()
             },
@@ -807,15 +815,18 @@ pub fn spawn_status_panel(mut commands: Commands) {
             // The experience gauge spans the box: blue caps at both ends of a grey
             // track that grows between them, salmon fill over it from the left
             // (owner ruling 2026-10-18; colors measured off the retail box [O]).
-            b.spawn(Node {
-                width: Val::Percent(100.0),
-                align_items: AlignItems::Center,
-                // The gauge row carries the air under its own bottom edge so the caps' extra
-                // edges count into the box's measured height instead of sitting on the border
-                // (owner ruling 2026-10-20; capture ur/24).
-                margin: UiRect::bottom(Val::Px(LEVEL_GAUGE_BOTTOM_CLEARANCE_PX)),
-                ..default()
-            })
+            b.spawn((
+                LevelGaugeRow,
+                Node {
+                    width: Val::Percent(100.0),
+                    align_items: AlignItems::Center,
+                    // The gauge row carries the air under its own bottom edge so the caps' extra
+                    // edges count into the box's measured height instead of sitting on the border
+                    // (owner ruling 2026-10-20; capture ur/24).
+                    margin: UiRect::bottom(Val::Px(LEVEL_GAUGE_BOTTOM_CLEARANCE_PX)),
+                    ..default()
+                },
+            ))
             .with_children(|g| {
                 g.spawn((
                     Node {
@@ -1037,6 +1048,16 @@ pub fn comma_groups(value: u32) -> String {
     out
 }
 
+/// The wrapper row of one `level` box line. Marked so the squeeze pass can take it off-box
+/// with the gauge during a chrome-only frame; the word itself rides inside as its only child.
+#[derive(Component)]
+pub(crate) struct LevelRowWrap;
+
+/// The gauge row of the `level` box, marked for the same reason (it is pure background
+/// furniture, not text).
+#[derive(Component)]
+pub(crate) struct LevelGaugeRow;
+
 /// One `level` box line: wrapper row + text child (`StatusLevelLine`).
 fn spawn_level_line(
     b: &mut bevy::ecs::relationship::RelatedSpawnerCommands<'_, ChildOf>,
@@ -1044,7 +1065,7 @@ fn spawn_level_line(
     text: &'static str,
     node: Node,
 ) {
-    b.spawn(node).with_child((
+    b.spawn((LevelRowWrap, node)).with_child((
         StatusLevelLine(line),
         Text::new(text),
         style::text_font(13.0),
@@ -1230,10 +1251,35 @@ pub fn update_persona_frame(
     }
 }
 
-pub fn update_status_panel(
+/// The squeeze state of both Status column boxes: one leg per box plus the full-size shape
+/// each last stood at while at rest - a hidden host lays out nothing, so a grow-in has no
+/// memory without it.
+#[derive(Default)]
+pub(crate) struct StatusColumnFx {
+    panel: crate::hud::menu_anim::WindowFx,
+    level: crate::hud::menu_anim::WindowFx,
+    seen_panel: Option<crate::hud::menu_anim::FullRect>,
+    seen_level: Option<crate::hud::menu_anim::FullRect>,
+}
+
+#[allow(clippy::type_complexity)]
+pub(crate) fn update_status_panel(
     mode: Res<crate::input_mode::InputMode>,
     state: Res<SceneState>,
-    mut stack_q: Query<&mut Node, With<StatusLeftStack>>,
+    mut stack_q: Query<
+        &mut Node,
+        (
+            With<StatusLeftStack>,
+            Without<StatusPanel>,
+            Without<StatusLevelBox>,
+            Without<PersonaRow>,
+            Without<StatusExpFill>,
+            Without<StatusCaption>,
+            Without<StatusCaptionMask>,
+            Without<LevelRowWrap>,
+            Without<LevelGaugeRow>,
+        ),
+    >,
     // Pairwise-disjoint per the cycle-57 B0001 law: every &mut Text/&mut Node query here
     // must exclude every other marker in the system.
     mut level_line_q: Query<(&StatusLevelLine, &mut Text), Without<PersonaCell>>,
@@ -1244,6 +1290,12 @@ pub fn update_status_panel(
             Without<PersonaRow>,
             Without<StatusLevelLine>,
             Without<StatusLeftStack>,
+            Without<StatusPanel>,
+            Without<StatusLevelBox>,
+            Without<StatusCaption>,
+            Without<StatusCaptionMask>,
+            Without<LevelRowWrap>,
+            Without<LevelGaugeRow>,
         ),
     >,
     mut row_q: Query<
@@ -1252,10 +1304,68 @@ pub fn update_status_panel(
             Without<StatusLevelLine>,
             Without<StatusExpFill>,
             Without<StatusLeftStack>,
+            Without<StatusPanel>,
+            Without<StatusLevelBox>,
+            Without<StatusCaption>,
+            Without<StatusCaptionMask>,
+            Without<LevelRowWrap>,
+            Without<LevelGaugeRow>,
         ),
     >,
     mut cell_q: Query<(&PersonaCell, &mut Text, &mut TextColor), Without<StatusLevelLine>>,
+    // The Status column's own squeeze legs (owner window-fx law 2026-10-22): while one runs
+    // these two nodes are the only writers of its box geometry. This system is chained after
+    // `update_persona_frame`/`update_status_level_box`, so when the fx goes quiet those
+    // passes stand the natural shape again on their own.
+    mut panel_q: Query<
+        (&mut Node, &ComputedNode, &UiGlobalTransform),
+        (
+            With<StatusPanel>,
+            Without<StatusLeftStack>,
+            Without<StatusLevelBox>,
+            Without<PersonaRow>,
+            Without<StatusExpFill>,
+            Without<StatusCaption>,
+            Without<StatusCaptionMask>,
+            Without<LevelRowWrap>,
+            Without<LevelGaugeRow>,
+        ),
+    >,
+    mut level_box_q: Query<
+        (&mut Node, &ComputedNode, &UiGlobalTransform),
+        (
+            With<StatusLevelBox>,
+            Without<StatusLeftStack>,
+            Without<StatusPanel>,
+            Without<PersonaRow>,
+            Without<StatusExpFill>,
+            Without<StatusCaption>,
+            Without<StatusCaptionMask>,
+            Without<LevelRowWrap>,
+            Without<LevelGaugeRow>,
+        ),
+    >,
+    // The body furniture the chrome-only law takes off: caption, its mask, the level-box
+    // wrapper rows and the gauge row.
+    mut body_q: Query<
+        &mut Node,
+        (
+            Or<(
+                With<StatusCaption>,
+                With<StatusCaptionMask>,
+                With<LevelRowWrap>,
+                With<LevelGaugeRow>,
+            )>,
+            Without<StatusLeftStack>,
+            Without<StatusPanel>,
+            Without<StatusLevelBox>,
+            Without<PersonaRow>,
+            Without<StatusExpFill>,
+        ),
+    >,
+    mut fx: Local<StatusColumnFx>,
 ) {
+    use crate::hud::menu_anim::{FullRect, WindowFx};
     let Ok(mut stack_node) = stack_q.single_mut() else {
         return;
     };
@@ -1263,22 +1373,64 @@ pub fn update_status_panel(
     // A wide detail replaces the panel: retail keeps neither persona nor its level box
     // visible under one.
     let covered = stats_panel_covered(&mode);
-    if (!open || covered) && stack_node.display != Display::None {
-        stack_node.display = Display::None;
+    let want_show = open && !covered;
+    if !want_show && stack_node.display == Display::None {
         return;
     }
-    if open && !covered && stack_node.display == Display::None {
+    let was_shown = stack_node.display != Display::None;
+    let idle_at_start = matches!(fx.panel, WindowFx::Idle) && matches!(fx.level, WindowFx::Idle);
+    if want_show && !idle_at_start {
+        // ESC back onto a column mid-collapse stands it full and plain at once: returning to
+        // the same place is instant and never grows through the closing leg's geometry.
+        fx.panel = WindowFx::Idle;
+        fx.level = WindowFx::Idle;
+    }
+    if was_shown && idle_at_start {
+        // Frames at rest keep the remembered shapes current; a squeeze always animates to or
+        // from what the boxes last really stood.
+        let panel_rect = panel_q
+            .single()
+            .ok()
+            .and_then(|(_, c, t)| FullRect::from_laid_out_box(c, t));
+        if let Some(rect) = panel_rect {
+            fx.seen_panel = Some(rect);
+        }
+        let level_rect = level_box_q
+            .single()
+            .ok()
+            .and_then(|(_, c, t)| FullRect::from_laid_out_box(c, t));
+        if let Some(rect) = level_rect {
+            fx.seen_level = Some(rect);
+        }
+    }
+    if want_show && !was_shown {
+        if let (Some(p), Some(l)) = (fx.seen_panel, fx.seen_level) {
+            fx.panel = WindowFx::opening(p);
+            fx.level = WindowFx::opening(l);
+        }
         stack_node.display = Display::Flex;
     }
+    let leaving = !want_show && was_shown;
+    if leaving && idle_at_start {
+        if let (Some(p), Some(l)) = (fx.seen_panel, fx.seen_level) {
+            fx.panel = WindowFx::closing(p);
+            fx.level = WindowFx::closing(l);
+        }
+    }
+    // One tick each per frame; `WindowFx` owns the shared period law.
+    let pf = fx.panel.tick();
+    let lf = fx.level.tick();
+    let animating = !matches!(fx.panel, WindowFx::Idle) || !matches!(fx.level, WindowFx::Idle);
 
     let snap = &state.snapshot;
     let lines = persona_lines(snap);
     for (row, mut node) in row_q.iter_mut() {
         let line = lines.get(row.index);
-        let want_display = if line.is_some() {
-            Display::Flex
-        } else {
+        // Chrome-only fx frames take the words off too ("text ... removed at the start").
+        let want_display = if animating || line.is_none() {
             Display::None
+        } else {
+            Display::Flex
         };
         if node.display != want_display {
             node.display = want_display;
@@ -1348,6 +1500,73 @@ pub fn update_status_panel(
         if fill.width != want {
             fill.width = want;
         }
+    }
+
+    // The center-hold legs. The boxes stay in flow and hold their centers by relative offsets:
+    // persona pins its own seat (first child of the host), so each axis keeps half its slack
+    // as an offset. The `level` box's flow seat follows the animated height persona asserts
+    // above it, so its top offset carries that eaten height too - without it the box would
+    // slide up the column while the panel collapsed.
+    let extra = match (fx.panel.full(), pf) {
+        (Some(fp), Some((_, h1))) => fp.height - h1,
+        _ => 0.0,
+    };
+    if let (Some((w, h)), Some(full)) = (pf, fx.panel.full()) {
+        if let Ok((mut node, _, _)) = panel_q.single_mut() {
+            node.left = Val::Px((full.width - w) / 2.0);
+            node.top = Val::Px((full.height - h) / 2.0);
+            node.width = Val::Px(w);
+            node.height = Val::Px(h);
+        }
+    }
+    if let (Some((w, h)), Some(full)) = (lf, fx.level.full()) {
+        if let Ok((mut node, _, _)) = level_box_q.single_mut() {
+            node.left = Val::Px((full.width - w) / 2.0);
+            node.top = Val::Px((full.height - h) / 2.0 + extra);
+            node.width = Val::Px(w);
+            node.height = Val::Px(h);
+        }
+    }
+    if pf.is_none() && lf.is_none() {
+        // At rest nothing of ours may linger on the nodes. Persona's placement pass owns
+        // every other field and re-asserts them each frame; the `level` box's height has no
+        // such owner (`update_status_level_box` pins position and width only), so our last
+        // squeeze fraction would otherwise stand there forever with its words overflowing
+        // an invisible stub chrome.
+        if let Ok((mut node, _, _)) = panel_q.single_mut() {
+            if !(node.left == Val::Auto && node.top == Val::Auto && node.height == Val::Auto) {
+                node.left = Val::Auto;
+                node.top = Val::Auto;
+                node.height = Val::Auto;
+            }
+        }
+        if let Ok((mut node, _, _)) = level_box_q.single_mut() {
+            if !(node.left == Val::Auto && node.top == Val::Auto && node.height == Val::Auto) {
+                node.left = Val::Auto;
+                node.top = Val::Auto;
+                node.height = Val::Auto;
+            }
+        }
+    }
+
+    // Chrome-only law for the body furniture: caption, mask, level rows and the gauge row go
+    // off at a squeeze's first frame and land only when full shape arrives. (Persona rows are
+    // taken off in their own pass above; no other system owns these nodes' display.)
+    let body = if animating {
+        Display::None
+    } else {
+        Display::Flex
+    };
+    for mut node in body_q.iter_mut() {
+        if node.display != body {
+            node.display = body;
+        }
+    }
+
+    // The host comes down when the legs reach zero (or were never armed at all - the plain
+    // instant hide, unchanged behavior for shapes that never stood).
+    if !want_show && matches!(fx.panel, WindowFx::Idle) && matches!(fx.level, WindowFx::Idle) {
+        stack_node.display = Display::None;
     }
 }
 
@@ -3001,11 +3220,8 @@ mod tests {
         gated.status_data_ready = true;
         assert!(status_row_enabled(StatusEntryKind::FacetCategories, &gated));
         assert!(
-            status_row_enabled(
-                StatusEntryKind::Unity,
-                &kuluu_snapshot::SceneSnapshot::default()
-            ),
-            "row 11 is never disabled"
+            !status_row_enabled(StatusEntryKind::Unity, &gated),
+            "owner ruling ur/147: row 11 stays grey whatever the snapshot says"
         );
     }
 

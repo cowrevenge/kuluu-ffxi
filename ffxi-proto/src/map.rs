@@ -198,6 +198,30 @@ pub mod c2s {
     // BuyNum u32 (validator range 1..=99).
     pub const BAZAAR_BUY: u16 = 0x106;
 
+    // GP_CLI_COMMAND_BAZAAR_CLOSE, vendor/server/src/map/packets/c2s/0x10b_bazaar_close.h:
+    // what the client sends when it ENTERS its own `Set Prices` menu (LSB names the id
+    // after XiPackets, not after what it does). AllListClearFlg u32 @4, validated always
+    // 0; the handler raises `isSettingBazaarPrices` and clears BazaarCustomers.
+    pub const BAZAAR_PRICES_ENTER: u16 = 0x10B;
+
+    // GP_CLI_COMMAND_BAZAAR_ITEMSET, vendor/server/src/map/packets/c2s/0x10a_bazaar_itemset.h:
+    // price one LOC_INVENTORY slot of our own stall. ItemIndex u8 @4, padding u8[3],
+    // Price u32 @8 (validator range 0..=99_999_999; 0 frees the item again). The server
+    // answers ITEM_ATTR + ITEM_SAME for that slot.
+    pub const BAZAAR_ITEMSET: u16 = 0x10A;
+
+    // GP_CLI_COMMAND_BAZAAR_OPEN, vendor/server/src/map/packets/c2s/0x109_bazaar_open.h:
+    // header only, sent when the client LEAVES its `Set Prices` menu; clears
+    // `isSettingBazaarPrices` and raises UPDATE_HP so the stall re-publishes.
+    pub const BAZAAR_PRICES_DONE: u16 = 0x109;
+
+    // GP_CLI_COMMAND_INSPECT_MESSAGE, vendor/server/src/map/packets/c2s/0x0de_inspect_message.h:
+    // the only writer of our bazaar comment. Body is a fixed uint8[123] buffer (plus one
+    // pad byte to fill the last word) and LSB stores at most its first 120 bytes verbatim;
+    // there is no ack, and the string comes back to us only as s2c 0x0CA when someone
+    // checks us. Not to be confused with c2s 0x0E0 SET_USERMSG (the Seacom seek message).
+    pub const INSPECT_MESSAGE: u16 = 0x0DE;
+
     // GP_CLI_COMMAND_TROPHY_ENTRY, vendor/server/src/map/packets/c2s/0x041_trophy_entry.h.
     // Cast lots on a pool item: TrophyItemIndex u8, PropertyItemIndex u8,
     // padding u8[2]. The server rolls the number itself — the client sends no

@@ -71,7 +71,23 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
         kuluu_render::MenuKind::AbilitiesGroups => "Abilities".into(),
         kuluu_render::MenuKind::AbilitiesGroup(group) => format!("AbilityList({group})").into(),
         kuluu_render::MenuKind::Items => "Items".into(),
+        // ur/150: the bucket hub echoes `Key Items`; a bucket list echoes its
+        // own name, like MagicGroup echoes its school above.
         kuluu_render::MenuKind::KeyItems => "Key Items".into(),
+        kuluu_render::MenuKind::KeyItemList { category } => {
+            kuluu_render::hud::menu::KEY_ITEM_CATEGORY_LABELS
+                .get(category as usize)
+                .copied()
+                .unwrap_or("Key Items")
+                .to_string()
+                .into()
+        }
+        // ur/152: Examine and the description window echo the item's own name,
+        // like a bucket list echoes its category above.
+        kuluu_render::MenuKind::KeyItemExamine { id }
+        | kuluu_render::MenuKind::KeyItemText { id } => {
+            kuluu_render::hud::menu::key_item_row_label(id).into()
+        }
         kuluu_render::MenuKind::UsableItems => "Items (usable)".into(),
         kuluu_render::MenuKind::Equipment => "Equipment".into(),
         kuluu_render::MenuKind::Root => "Root".into(),
@@ -102,7 +118,9 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
         }
         // Bazaar row's stall picker (vault main_menu.md §33).
         kuluu_render::MenuKind::BazaarStalls => "Bazaar".into(),
-        kuluu_render::MenuKind::MacrosPalette => "MacroPalette".into(),
+        // …and the second row of that panel, which opens the comment field over the chat log.
+        kuluu_render::MenuKind::BazaarComment => "Edit Comment".into(),
+        kuluu_render::MenuKind::MacrosPalette => "Macros".into(),
         kuluu_render::MenuKind::RetailConfig => "Config".into(),
         // A config page window inherits the hub's caption (vault main_menu.md §47).
         kuluu_render::MenuKind::RetailConfigPage(_) => "Config".into(),
@@ -133,6 +151,9 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
         // The Map-row myroom variant inherits its parent caption (the
         // `myro` DAT record has no title token; vault main_menu.md §40).
         kuluu_render::MenuKind::HomeView => "Map".into(),
+        // `mogcont`'s own DAT title token is the View House row caption (catalog 107; §32), so the
+        // box list wears that string as well.
+        kuluu_render::MenuKind::MogContainers => kuluu_render::hud::menu::ROOT_VIEW_HOUSE.into(),
         // …and the roomlist pair likewise inherits the Remodel row's caption
         // (`roomlist` carries no title token — widget captions are −1 [V-neg]; bead
         // kuluu-o9qt7.13.5, vault main_menu.md §59 addendum 20/21).
@@ -149,6 +170,12 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
         kuluu_render::MenuKind::MacroSelect
         | kuluu_render::MenuKind::MacroEditor { .. }
         | kuluu_render::MenuKind::MacroResult => "Macros".into(),
+        // …while the book options window echoes its own band word, and a pallet names its book.
+        kuluu_render::MenuKind::MacroBookOptions { .. }
+        | kuluu_render::MenuKind::EquipSetOptions { .. } => "Options".into(),
+        kuluu_render::MenuKind::MacroPallet { book } => {
+            format!("Macro Set Book{:02} (#{})", book + 1, book + 1).into()
+        }
         // The /quest seam (vault main_menu.md §31; ur/87 hub first).
         kuluu_render::MenuKind::QuestMenu | kuluu_render::MenuKind::QuestList { .. } => {
             "Quests".into()

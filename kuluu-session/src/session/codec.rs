@@ -409,6 +409,78 @@ pub fn build_subpacket_bazaar_exit(sync: u16) -> Vec<u8> {
     buf
 }
 
+// GP_CLI_COMMAND_BAZAAR_CLOSE, vendor/server/src/map/packets/c2s/0x10b_bazaar_close.h:
+// AllListClearFlg u32 @4. LSB's validator refuses anything but 0 and raises
+// `isSettingBazaarPrices`, so this is the packet retail sends on entering our own
+// `Set Prices` menu.
+pub fn build_subpacket_bazaar_prices_enter(sync: u16) -> Vec<u8> {
+    const ALL_LIST_CLEAR_FLG: u32 = 0;
+    let mut buf = vec![0u8; 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::BAZAAR_PRICES_ENTER,
+        2,
+        sync,
+    ));
+    buf[4..8].copy_from_slice(&ALL_LIST_CLEAR_FLG.to_le_bytes());
+    buf
+}
+
+// GP_CLI_COMMAND_BAZAAR_ITEMSET, vendor/server/src/map/packets/c2s/0x10a_bazaar_itemset.h:
+// ItemIndex u8 @4, padding u8[3], Price u32 @8. One LOC_INVENTORY slot of our stall;
+// the price 0 frees an item that was priced.
+pub fn build_subpacket_bazaar_price_set(sync: u16, index: u8, price: u32) -> Vec<u8> {
+    let mut buf = vec![0u8; 12];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::BAZAAR_ITEMSET,
+        3,
+        sync,
+    ));
+    buf[4] = index;
+    buf[8..12].copy_from_slice(&price.to_le_bytes());
+    buf
+}
+
+// GP_CLI_COMMAND_BAZAAR_OPEN, vendor/server/src/map/packets/c2s/0x109_bazaar_open.h:
+// header only. Sent leaving the `Set Prices` menu; clears the flag and re-publishes
+// our stall on the entity stream.
+pub fn build_subpacket_bazaar_prices_done(sync: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; 4];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::BAZAAR_PRICES_DONE,
+        1,
+        sync,
+    ));
+    buf
+}
+
+// GP_CLI_COMMAND_INSPECT_MESSAGE, vendor/server/src/map/packets/c2s/0x0de_inspect_message.h:
+// `uint8_t sInspectMessage[123]` @4 plus one pad byte. LSB stores the first 120 bytes
+// verbatim as our bazaar comment and answers nothing; a shorter message needs no work beyond
+// the NUL that zero-fill already gives it.
+pub fn build_subpacket_bazaar_comment(sync: u16, message: &str) -> Vec<u8> {
+    const INSPECT_MESSAGE_BODY_OFFSET: usize = 4;
+    const INSPECT_MESSAGE_BUFFER_BYTES: usize = 123;
+    const INSPECT_MESSAGE_PAD_BYTES: usize = 1;
+    const INSPECT_MESSAGE_TOTAL_WORDS: usize =
+        (4 + INSPECT_MESSAGE_BUFFER_BYTES + INSPECT_MESSAGE_PAD_BYTES) / 4;
+    let mut buf = vec![0u8; INSPECT_MESSAGE_TOTAL_WORDS * 4];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::INSPECT_MESSAGE,
+        INSPECT_MESSAGE_TOTAL_WORDS as u16,
+        sync,
+    ));
+    let mut written = 0usize;
+    for ch in message.chars() {
+        if written + ch.len_utf8() > ffxi_proto::decode::BAZAAR_COMMENT_MAX_BYTES {
+            break;
+        }
+        let at = INSPECT_MESSAGE_BODY_OFFSET + written;
+        buf[at..at + ch.len_utf8()].copy_from_slice(ch.encode_utf8(&mut [0u8; 4]).as_bytes());
+        written += ch.len_utf8();
+    }
+    buf
+}
+
 // GP_CLI_COMMAND_CONFIG, vendor/server/src/map/packets/c2s/0x0dc_config.h:
 // four SAVE_CONF mask bytes, two reserved uint32s, SetFlg, padding — the body
 // law lives in ffxi_proto::config::build_config_change; only the named flag's

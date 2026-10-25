@@ -4485,6 +4485,7 @@ dependencies = [
  "kuluu-dlss-nr",
  "kuluu-session",
  "kuluu-snapshot",
+ "md-5",
  "serde",
  "serde_json",
  "tracing",

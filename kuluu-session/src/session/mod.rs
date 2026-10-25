@@ -29,8 +29,9 @@ pub use codec::{
     build_subpacket_bazaar_prices_done, build_subpacket_bazaar_prices_enter,
     build_subpacket_buffcancel, build_subpacket_camp, build_subpacket_currencies,
     build_subpacket_emote_list_req, build_subpacket_equip_inspect, build_subpacket_equip_set,
-    build_subpacket_fishing, build_subpacket_item_move, build_subpacket_item_stack,
-    build_subpacket_item_use, build_subpacket_motion, build_subpacket_myroom_bankin,
+    build_subpacket_equipset_check, build_subpacket_equipset_set, build_subpacket_fishing,
+    build_subpacket_item_move, build_subpacket_item_stack, build_subpacket_item_use,
+    build_subpacket_lockstyle_set, build_subpacket_motion, build_subpacket_myroom_bankin,
     build_subpacket_myroom_is, build_subpacket_myroom_job, build_subpacket_myroom_layout,
     build_subpacket_myroom_layout_done, build_subpacket_myroom_plant_add,
     build_subpacket_myroom_plant_check, build_subpacket_myroom_plant_crop,
@@ -4643,6 +4644,62 @@ async fn keepalive_loop(
                             let _ = event_tx.send(AgentEvent::Error {
                                 message: format!("equip_set send: {e}"),
                             });
+                        }
+                    }
+                    // The set arms: 0x051 wears a whole set and the server answers with ordinary
+                    // equipment updates (LSB's `GP_CLI_COMMAND_EQUIPSET_SET::process` runs every equip call).
+                    Some(AgentCommand::EquipSetWear { entries }) => {
+                        let payload = build_subpacket_equipset_set(sub_seq, &entries);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "equipset_set send failed");
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: format!("equipment set wear send: {e}"),
+                            });
+                        } else {
+                            // `Count` leads the body (payload byte 4): what actually packed into it.
+                            tracing::info!(count = payload[4], "equipset_set send (0x051)");
+                        }
+                    }
+                    // Mode = Set over a set's contents; positions past feet were dropped by the encoder.
+                    Some(AgentCommand::StyleLockSet { entries }) => {
+                        let payload = build_subpacket_lockstyle_set(sub_seq, &entries);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "lockstyle send failed");
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: format!("style lock send: {e}"),
+                            });
+                        } else {
+                            tracing::info!(count = payload[4], "lockstyle send (0x053) mode=Set");
+                        }
+                    }
+                    // One set edit reported as "what changed plus the full list"; LSB answers s2c 0x116,
+                    // which kuluu does not read yet, so this stays one-way for now.
+                    Some(AgentCommand::EquipSetCheck {
+                        position,
+                        change,
+                        contents,
+                    }) => {
+                        let payload =
+                            build_subpacket_equipset_check(sub_seq, position, &change, &contents);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "equipset_check send failed");
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: format!("equipment set edit send: {e}"),
+                            });
+                        } else {
+                            tracing::info!(position, "equipset_check send (0x052)");
                         }
                     }
                     Some(AgentCommand::StackInventory { container }) => {

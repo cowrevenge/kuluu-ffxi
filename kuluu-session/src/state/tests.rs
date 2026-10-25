@@ -2670,6 +2670,10 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         AgentCommand::Cancel { .. } => (),
         AgentCommand::UseItem { .. } => (),
         AgentCommand::Equip { .. } => (),
+        // The set arms: c2s 0x051/0x053/0x052 (`.agents/skills/retail-observe/references/2026-10-25-equip-set-apply.md`).
+        AgentCommand::EquipSetWear { .. } => (),
+        AgentCommand::StyleLockSet { .. } => (),
+        AgentCommand::EquipSetCheck { .. } => (),
         AgentCommand::StackInventory { .. } => (),
         AgentCommand::DeliveryBox { .. } => (),
         AgentCommand::DeliveryTake { .. } => (),

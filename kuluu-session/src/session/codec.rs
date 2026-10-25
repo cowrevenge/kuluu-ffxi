@@ -579,6 +579,65 @@ pub fn build_subpacket_equip_set(
     buf
 }
 
+// GP_CLI_COMMAND_EQUIPSET_SET, vendor/server/src/map/packets/c2s/0x051_equipset_set.h: the body is
+// `ffxi_proto::equipset::equipset_set_body`, and retail commits a fixed packet holding all sixteen entry
+// slots whatever Count says. The server runs the equip calls (`GP_CLI_COMMAND_EQUIPSET_SET::process`).
+pub fn build_subpacket_equipset_set(
+    sync: u16,
+    entries: &[ffxi_proto::equipset::EquipSetEntry; ffxi_proto::equipset::EQUIPSET_ENTRIES],
+) -> Vec<u8> {
+    const PACKET_BYTES: usize = 4 + ffxi_proto::equipset::SET_BODY_BYTES;
+    let mut buf = vec![0u8; PACKET_BYTES];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::EQUIPSET_SET,
+        (PACKET_BYTES / 4) as u16,
+        sync,
+    ));
+    buf[4..].copy_from_slice(&ffxi_proto::equipset::equipset_set_body(entries));
+    buf
+}
+
+// GP_CLI_COMMAND_EQUIPSET_CHECK, vendor/server/src/map/packets/c2s/0x052_equipset_check.h: one edit to a
+// set's contents (`position` is the LSB `EquipKind`, bounded 0..15 by its validate), staged as "what changed"
+// plus the whole list by `ffxi_proto::equipset::equipset_check_body`. LSB answers s2c 0x116 EQUIPSET_VALID;
+// nothing is worn through it.
+pub fn build_subpacket_equipset_check(
+    sync: u16,
+    position: u8,
+    change: &ffxi_proto::equipset::EquipSetEntry,
+    contents: &[ffxi_proto::equipset::EquipSetEntry; ffxi_proto::equipset::EQUIPSET_ENTRIES],
+) -> Vec<u8> {
+    const PACKET_BYTES: usize = 4 + ffxi_proto::equipset::CHECK_BODY_BYTES;
+    let mut buf = vec![0u8; PACKET_BYTES];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::EQUIPSET_CHECK,
+        (PACKET_BYTES / 4) as u16,
+        sync,
+    ));
+    buf[4..].copy_from_slice(&ffxi_proto::equipset::equipset_check_body(
+        position, change, contents,
+    ));
+    buf
+}
+
+// GP_CLI_COMMAND_LOCKSTYLE, vendor/server/src/map/packets/c2s/0x053_lockstyle.h: Mode = Set over the set's
+// contents (`ffxi_proto::equipset::lockstyle_set_body`, which admits only positions through feet). The
+// enable/disable/query variants stay unwired until their own arms exist.
+pub fn build_subpacket_lockstyle_set(
+    sync: u16,
+    entries: &[ffxi_proto::equipset::EquipSetEntry; ffxi_proto::equipset::EQUIPSET_ENTRIES],
+) -> Vec<u8> {
+    const PACKET_BYTES: usize = 4 + ffxi_proto::equipset::LOCKSTYLE_BODY_BYTES;
+    let mut buf = vec![0u8; PACKET_BYTES];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::LOCKSTYLE,
+        (PACKET_BYTES / 4) as u16,
+        sync,
+    ));
+    buf[4..].copy_from_slice(&ffxi_proto::equipset::lockstyle_set_body(entries));
+    buf
+}
+
 /// GP_CLI_COMMAND_ITEM_STACK, vendor/server/src/map/packets/c2s/0x03a_item_stack.h:
 /// `uint32_t Category` (container id) after the 4-byte subpacket header, so 8 bytes
 /// total (size_words = 2). The server consolidates same-id partial stacks.

@@ -87,6 +87,18 @@ pub mod c2s {
 
     pub const EQUIP_SET: u16 = 0x050;
 
+    // GP_CLI_COMMAND_EQUIPSET_SET, vendor/server/src/map/packets/c2s/0x051_equipset_set.h: wear one
+    // equipment set whole; the server runs the equip calls (see `equipset::equipset_set_body`).
+    pub const EQUIPSET_SET: u16 = 0x051;
+
+    // GP_CLI_COMMAND_EQUIPSET_CHECK, vendor/server/src/map/packets/c2s/0x052_equipset_check.h: one edit to a
+    // set's contents, answered by s2c 0x116 EQUIPSET_VALID.
+    pub const EQUIPSET_CHECK: u16 = 0x052;
+
+    // GP_CLI_COMMAND_LOCKSTYLE, vendor/server/src/map/packets/c2s/0x053_lockstyle.h: the Mode byte picks the
+    // operation; kuluu's set arm sends Mode = Set (`equipset::lockstyle_set_body`).
+    pub const LOCKSTYLE: u16 = 0x053;
+
     // GP_CLI_COMMAND_MYROOM_JOB, vendor/server/src/map/packets/c2s/0x100_myroom_job.h.
     // Mog House job change: MainJobIndex u8, SupportJobIndex u8 (0 = keep current).
     pub const MYROOM_JOB: u16 = 0x100;

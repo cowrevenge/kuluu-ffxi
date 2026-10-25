@@ -4949,6 +4949,28 @@ pub enum AgentCommand {
         equip_slot: u8,
     },
 
+    /// Wear one's whole equipment set: c2s 0x051 (`equipset::equipset_set_body` packs the populated entries;
+    /// the server runs every equip call, so appearance updates arrive back as normal equipment updates - the
+    /// client applies nothing locally, `.agents/skills/retail-observe/references/2026-10-25-equip-set-apply.md`).
+    /// `entries` is the set record's contents half in order.
+    EquipSetWear {
+        entries: [ffxi_proto::equipset::EquipSetEntry; ffxi_proto::equipset::EQUIPSET_ENTRIES],
+    },
+
+    /// Lock one's style to an equipment set: c2s 0x053 Mode = Set. Entries past the feet position are dropped
+    /// by the encoder, whichever arm hands them over.
+    StyleLockSet {
+        entries: [ffxi_proto::equipset::EquipSetEntry; ffxi_proto::equipset::EQUIPSET_ENTRIES],
+    },
+
+    /// Report one edit to a set's contents: c2s 0x052, the edited `position` (LSB bounds it 0..15), the entry
+    /// just placed or removed, and the whole list as now stored. Nothing is worn by this packet.
+    EquipSetCheck {
+        position: u8,
+        change: ffxi_proto::equipset::EquipSetEntry,
+        contents: [ffxi_proto::equipset::EquipSetEntry; ffxi_proto::equipset::EQUIPSET_ENTRIES],
+    },
+
     /// Ask the server to consolidate same-id partial stacks in a container
     /// (retail's inventory "Sort"). `container` is the LSB CONTAINER_ID
     /// (LOC_INVENTORY = 0). See GP_CLI_COMMAND_ITEM_STACK (0x03A).

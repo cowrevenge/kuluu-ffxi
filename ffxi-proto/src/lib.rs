@@ -5,6 +5,7 @@ pub mod checksum;
 pub mod config;
 pub mod decode;
 pub mod entity_stream;
+pub mod equipset;
 pub mod fishing_messages;
 pub mod framing;
 pub mod linkshell;

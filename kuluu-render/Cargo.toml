@@ -116,6 +116,9 @@ ffxi-actor = { path = "../ffxi-actor" }
 ffxi-proto = { path = "../ffxi-proto" }
 ffxi-vocab = { path = "../ffxi-vocab" }
 serde = { workspace = true }
+# The MD5 that every client user file (`mcr*.dat`, `mcr*.ttl`, `es*.dat`) carries over its own records:
+# a writer has to recompute it or the client stops trusting the file (see `hud::client_user_files`).
+md-5 = { workspace = true }
 # Diagnostic lines (target "mob_hp") in the nameplate billboard system.
 tracing = { workspace = true }
 # Local-timezone civil date for the Current Time menu's Earth-time chat line

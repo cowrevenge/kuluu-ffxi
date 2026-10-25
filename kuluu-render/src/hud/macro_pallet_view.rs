@@ -24,8 +24,9 @@ use crate::hud::menu::{ConfigDatRows, DynamicMenu, MACRO_PALLET_SLOTS_PER_KEYSET
 use crate::input_mode::{InputMode, MenuKind};
 use crate::ui_font;
 
-/// The palette's own DAT record. `mcr2pall` records the identical grid, so either yields the seat.
-const PALLET_WINDOW_NAME: &str = "mcr1pall";
+/// The palette's own DAT record. `mcr2pall` records the identical grid, so either yields the seat. Its
+/// corner is also where a keytop editor stands (see [`crate::hud::macro_edit_view`]).
+pub const PALLET_WINDOW_NAME: &str = "mcr1pall";
 
 /// Pinned seat for a host whose DATs have not been read yet, transcribed from that record (x 16 y 48)
 /// so an early-opened palette keeps the retail corner instead of drifting to a default one.

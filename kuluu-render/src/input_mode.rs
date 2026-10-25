@@ -500,9 +500,9 @@ pub enum MenuKind {
     /// until kuluu executes macros.
     MacroResult,
 
-    /// The `mcresmn` options window a set's row raises out of the `mcres20` pager: eight blocks
-    /// (`Edit this equipment set.` … `Set appearance of own equipment to that of this item set.`).
-    /// `set` is the 0-based index into the two-hundred-set store.
+    /// The `mcresmn` options window a set's row raises out of the `mcres20` pager, in retail's own eight
+    /// words (see `hud::menu::EQUIP_SET_OPTION_ROWS`): Edit / Change Name / Copy / Paste / Delete /
+    /// Use Current / Equip / Style Lock. `set` is the 0-based index into the two-hundred-set store.
     EquipSetOptions {
         set: u16,
     },
@@ -512,6 +512,18 @@ pub enum MenuKind {
     /// that left-side record. `book` is the 0-based index into the forty-book store.
     MacroPallet {
         book: u8,
+    },
+
+    /// One keytop, edited in its own window: a Prev/Next pair steps that book's twenty keytops, one row
+    /// carries the keytop's hotkey word beside its display name, and below them sit exactly
+    /// [`crate::hud::menu::MACRO_EDIT_LINE_SLOTS`] command line slots (owner ruling 2026-10-24,
+    /// annotated on his capture of the window: `<Prev next>` / `button - name` / `6 lines`). `book` is
+    /// the 0-based index into the forty-book store and `slot` the keytop's position in its book file
+    /// (the client's own order, Ctrl+1..0 then Alt+1..0; see
+    /// [`crate::hud::menu::macro_edit_hotkey_word`]).
+    MacroEdit {
+        book: u8,
+        slot: u8,
     },
 
     /// The `mcrselop` window a book's row raises beside the `mcrselec` pager: five
@@ -684,6 +696,17 @@ pub struct MenuLevel {
     /// [`crate::hud::client_user_files::set_book_title`]. While it holds a draft that window's second
     /// row wears it (see `menu::macro_book_option_rows`).
     pub macro_book_name_edit: Option<String>,
+    /// The draft a `mcresmn` `Change Name` row is typing, for the same reasons as the book title above: Esc
+    /// discards it there and Enter commits it there, through
+    /// [`crate::hud::client_user_files::set_set_name`], and while it holds one that window's second row wears
+    /// it (see `menu::equip_set_option_rows`).
+    pub equip_set_name_edit: Option<String>,
+    /// What the keytop editor ([`MenuKind::MacroEdit`]) holds while he types: the display name and the
+    /// line slots, seeded from his own macro file when the window opens. Every field on screen wears
+    /// this draft rather than the stored entry, so an edit shows the moment it is typed; Enter or a
+    /// Prev/Next step writes it through to that file (see
+    /// [`crate::hud::client_user_files::set_macro_entry`]) and Esc drops it.
+    pub macro_edit_draft: Option<MacroEditDraft>,
     /// The remembered cursor this window opened on still waits for its rows, which bound it.
     pub clamp_pending: bool,
     /// Set when the window was created with its last DAT item unselectable.
@@ -697,6 +720,8 @@ impl MenuLevel {
             cursor,
             macro_line_edit: None,
             macro_book_name_edit: None,
+            equip_set_name_edit: None,
+            macro_edit_draft: None,
             clamp_pending: false,
             last_item_lock: None,
         }
@@ -716,6 +741,47 @@ impl MenuLevel {
     pub fn step_cursor_to(&mut self, row: usize) {
         if !self.row_locked(row) {
             self.cursor = row;
+        }
+    }
+
+    /// Whether this window is holding text someone is mid-way through typing. Its keystrokes are
+    /// letters, so the character must stand still while they arrive - which is the law a chat box
+    /// already runs (see `crate::view_native::input::mode_swallows_keys`). Every draft of that kind
+    /// counts: a keytop editor's name or command lines, an `mcrledit` line, a macro book's title, an
+    /// equipment set's name, a bazaar comment.
+    pub fn holds_text_draft(&self) -> bool {
+        self.macro_edit_draft.is_some()
+            || self.macro_line_edit.is_some()
+            || self.macro_book_name_edit.is_some()
+            || self.equip_set_name_edit.is_some()
+            || matches!(self.kind, MenuKind::BazaarComment)
+    }
+}
+
+/// One keytop editor's working copy: its display name and [`MACRO_EDIT_LINE_SLOTS`] command line
+/// slots (empty ones hold nothing and store as nothing). The draft carries no caret of its own - the
+/// level's cursor is the window's control position, buttons first (see
+/// [`crate::hud::menu::macro_edit_control_at`]), so one window keeps one cursor like every other
+/// window in the stack.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MacroEditDraft {
+    pub name: String,
+    pub lines: Vec<String>,
+}
+
+impl MacroEditDraft {
+    /// A draft for one stored entry: its name, and its commands spread over the line slots in order,
+    /// blank ones dropped as the file format drops them and any command past the last slot left off.
+    pub fn new(name: &str, body: &str) -> Self {
+        let mut lines: Vec<String> = body
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_string)
+            .collect();
+        lines.resize_with(crate::hud::menu::MACRO_EDIT_LINE_SLOTS, String::new);
+        Self {
+            name: name.to_string(),
+            lines,
         }
     }
 }
@@ -966,6 +1032,13 @@ impl MenuStack {
 
     pub fn current_mut(&mut self) -> Option<&mut MenuLevel> {
         self.levels.last_mut()
+    }
+
+    /// Whether the focused window wants every keyboard event as text, in which case the character
+    /// stops moving and direction keys stay letters' neighbours. Only the focused level counts:
+    /// a draft left behind under an open window is not being typed into.
+    pub fn typing_owns_the_keyboard(&self) -> bool {
+        self.current().is_some_and(MenuLevel::holds_text_draft)
     }
 
     /// Open `kind` the way retail opens a window: one name is at most one window.

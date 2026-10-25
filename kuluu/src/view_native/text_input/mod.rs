@@ -1371,6 +1371,11 @@ fn sub_target_action_for(
         // dispatch (bead kuluu-o9qt7.19.3); they never target anything — nor
         // does the run row, whose steps ride the chat pipeline instead
         // (bead .19.4). A book/set row only raises its options box.
+        // A band keytop drills its editor window and a field row only moves that window's caret: both
+        // are client-local and answered in confirm, so neither has anything to target.
+        | A::MacroKeytopRow { .. }
+        | A::MacroKeytopStep { .. }
+        | A::MacroEditFieldFocus { .. }
         | A::MacroBookRow { .. }
         | A::MacroBookOptionRow { .. }
         | A::EquipSetRow { .. }
@@ -2027,6 +2032,11 @@ fn dispatch_dynamic_menu_action(
         A::AutomatonSlotRow { .. }
         | A::MacroSlotRow { .. }
         // Book/set rows drill their option boxes (and a pallet) in confirm; nothing rides the wire.
+        // Both are answered in the confirm seam above (the editor writes his own macro files, never the
+        // wire), so nothing leaves here.
+        | A::MacroKeytopRow { .. }
+        | A::MacroKeytopStep { .. }
+        | A::MacroEditFieldFocus { .. }
         | A::MacroBookRow { .. }
         | A::MacroBookOptionRow { .. }
         | A::EquipSetRow { .. }

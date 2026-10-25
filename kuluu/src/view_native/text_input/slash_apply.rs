@@ -168,6 +168,7 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
         // mcrselec/mcres20 and the line editor likewise inherit `Macros`
         // (§41 title law).
         kuluu_render::MenuKind::MacroSelect
+        | kuluu_render::MenuKind::MacroEdit { .. }
         | kuluu_render::MenuKind::MacroEditor { .. }
         | kuluu_render::MenuKind::MacroResult => "Macros".into(),
         // …while the book options window echoes its own band word, and a pallet names its book.

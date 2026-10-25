@@ -35,6 +35,8 @@ pub mod list_view;
 pub mod logout_countdown;
 // Depends on `crate::minimap`, which is itself gated off wasm (lib.rs).
 pub mod graphics_debug;
+/// One macro keytop editor: Prev/Next, its hotkey word and name, six command line slots.
+pub mod macro_edit_view;
 /// The macro palette's two-rows-of-ten keytop band (`mcr1pall`/`mcr2pall`).
 pub mod macro_pallet_view;
 #[cfg(not(target_arch = "wasm32"))]
@@ -51,7 +53,6 @@ pub mod quick_action;
 // Reads the region map DATs through `crate::minimap` (wasm-gated), like `map_screen`.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod region_map;
-pub mod stair_debug;
 // (roster mockup deleted — real party/self HUD is party_frame.rs)
 pub mod party_frame;
 pub mod self_fishing;
@@ -96,15 +97,6 @@ pub struct HudPanels {
     /// the enternity blacklist (Paintbrush of Souls, Geomantic Reservoir) are
     /// not advanced. Toggled from the Debug menu "Auto-Enter CS" row.
     pub auto_enter_cs: bool,
-    /// Stair-climber debug: when true, shows the status panel populated by
-    /// the input crate's stair detection state (orbs, slopes, classification
-    /// counts). Independent from `stair_draw` (whether the in-world gizmos
-    /// render); either can be on without the other.
-    pub stair_debug: bool,
-    /// Draws the in-world stair-climber gizmos (ring orbs, purple march,
-    /// head sphere, ramp line). Off = detection still runs (the character
-    /// still climbs), just no visuals.
-    pub stair_draw: bool,
     /// Graphics-debug panel (win/img/panel metrics). Runtime-only, no persist.
     pub graphics_debug: bool,
     /// Nameplate Debug panel: last-two-tick pass state from the final in-view
@@ -288,7 +280,6 @@ impl Plugin for HudPlugin {
         app.init_resource::<chat_panel::ChatUnread>();
         app.init_resource::<chat_panel::ChatActivityTracker>();
         app.init_resource::<mesh_debug::MeshHoverDebug>();
-        app.init_resource::<stair_debug::StairDebugSnapshot>();
         app.init_resource::<graphics_debug::GraphicsDebugState>();
         if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
             render_app.add_systems(
@@ -555,6 +546,14 @@ impl Plugin for HudPlugin {
                 .after(menu::refresh_dynamic_menu_rows)
                 .after(bazaar_comment::update_bazaar_comment_editor),
         );
+        // Same law for the keytop editor: its fields fill from the stack, and it draws over the band's
+        // corner, which that band has just hidden.
+        app.add_systems(
+            Update,
+            macro_edit_view::update_macro_edit_view
+                .after(menu::refresh_dynamic_menu_rows)
+                .after(macro_pallet_view::update_macro_pallet_view),
+        );
         // Map screen + minimap markers depend on `crate::minimap` (wasm-gated).
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(
@@ -648,7 +647,6 @@ impl Plugin for HudPlugin {
             (
                 mesh_debug::update_hover_state,
                 mesh_debug::update_mesh_debug_hud,
-                stair_debug::update_stair_debug_hud,
                 graphics_debug::graphics_debug_metrics_system,
                 graphics_debug::update_graphics_debug_hud,
                 graphics_debug::update_nameplate_debug_hud,
@@ -693,7 +691,6 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
             network_status::spawn_network_status,
         ),
     );
-    app.add_systems(schedule.clone(), stair_debug::spawn_stair_debug_hud);
     app.add_systems(schedule.clone(), graphics_debug::spawn_graphics_debug_hud);
     app.add_systems(schedule.clone(), graphics_debug::spawn_nameplate_debug_hud);
 
@@ -711,6 +708,7 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
             check_view::spawn_check_view,
             bazaar_view::spawn_bazaar_view,
             macro_pallet_view::spawn_macro_pallet_view,
+            macro_edit_view::spawn_macro_edit_view,
             status_panel::spawn_status_panel,
             menu::spawn_status_detail_window,
             equipment_screen::spawn_equipment_screen,

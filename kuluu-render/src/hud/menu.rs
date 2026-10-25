@@ -349,6 +349,27 @@ pub enum DynamicMenuAction {
         index: u8,
     },
 
+    /// One keytop block of a book's palette band. `slot` is that keytop's place in its own book file
+    /// (the client's order, Ctrl+1..0 then Alt+1..0), not its place in the band; selecting raises that
+    /// keytop's editor window ([`MenuKind::MacroEdit`]).
+    MacroKeytopRow {
+        book: u8,
+        slot: u8,
+    },
+
+    /// The cursor stands on one of a keytop editor's two step buttons, which are pressed with Enter
+    /// (owner ruling 2026-10-24). Stepping saves the keytop being left first.
+    MacroKeytopStep {
+        forward: bool,
+    },
+
+    /// One editable field of a keytop editor: `field` counts 0 for the display-name field and 1..=six
+    /// for the command line slots below it. Selecting puts the caret there; typing is handled by that
+    /// window.
+    MacroEditFieldFocus {
+        field: u8,
+    },
+
     /// One `BookNN` row of the `mcrselec` pager: select raises that book's `mcrselop`
     /// options window. The five option rows themselves are inert until their arms are
     /// read, so the store still only changes through the editor/CommitMacros seam.
@@ -368,9 +389,10 @@ pub enum DynamicMenuAction {
         set: u16,
     },
 
-    /// One row of a set's `mcresmn` options window; `option` is that record's block id (1 edit,
-    /// 2 name, 3 copy, 4 paste, 5 delete, 6 overwrite, 7 equip, 8 appearance). Every arm there is
-    /// unread, so the rows stay inert.
+    /// One row of a set's `mcresmn` options window; `option` indexes [`EQUIP_SET_OPTION_ROWS`], which sits in
+    /// that record's block order (1 edit, 2 name, 3 copy, 4 paste, 5 delete, 6 overwrite, 7 equip,
+    /// 8 appearance). Three of them edit the client's own set files; what a set wears is still unread there,
+    /// so those answer with the standard refusal line.
     EquipSetOptionRow {
         option: u8,
     },
@@ -1042,8 +1064,6 @@ pub const DEBUG_ENTITY_LIST: &str = "Entity List";
 pub const DEBUG_SOUND: &str = "Sound";
 pub const DEBUG_VOLUME: &str = "Volume";
 pub const DEBUG_PRINT_POS: &str = "Print POS";
-pub const DEBUG_STAIR_DRAW: &str = "Draw Stair Climber";
-pub const DEBUG_STAIR_STATUS: &str = "Show Stair Status";
 pub const DEBUG_GRAPHICS_DEBUG: &str = "Graphics Debug";
 pub const DEBUG_POSITION_LOG: &str = "Panel Pos Log";
 pub const DEBUG_NAMEPLATES: &str = "Nameplate Debug";
@@ -1195,8 +1215,6 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_SOUND,
     DEBUG_VOLUME,
     DEBUG_PRINT_POS,
-    DEBUG_STAIR_DRAW,
-    DEBUG_STAIR_STATUS,
     DEBUG_GRAPHICS_DEBUG,
     DEBUG_POSITION_LOG,
     DEBUG_NAMEPLATES,
@@ -1334,6 +1352,7 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::MacroBookOptions { .. }
             | MenuKind::EquipSetOptions { .. }
             | MenuKind::MacroPallet { .. }
+            | MenuKind::MacroEdit { .. }
             | MenuKind::MacroEditor { .. }
             | MenuKind::JobPick { .. }
             | MenuKind::RoomList
@@ -1626,7 +1645,10 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::MacroResult => &[],
         // Built by `macro_book_option_rows`; nothing static stands here.
         MenuKind::MacroBookOptions { .. } => &[],
+        // Both the band and a keytop editor are dynamic: their rows come from his own macro files (and
+        // from what he is typing in the editor), never from a static table.
         MenuKind::MacroPallet { .. } => &[],
+        MenuKind::MacroEdit { .. } => &[],
         MenuKind::EquipSetOptions { .. } => &[],
         // DAT-driven rows: the ConfigDatRows arms of refresh_dynamic_menu_rows read
         // each window's captioned item blocks (row law vault main_menu.md §59;
@@ -1825,8 +1847,10 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // mcrledit's DAT chrome has no title token — it inherits Macros (§41
         // title law).
         MenuKind::MacroEditor { .. } => "Macros",
-        // A palette inherits the family word; its own band names the book (`window_caption`).
+        // A palette inherits the family word; its own band names the book (`window_caption`). So does a
+        // keytop editor - retail's record carries no title token for it either.
         MenuKind::MacroPallet { .. } => "Macros",
+        MenuKind::MacroEdit { .. } => "Macros",
         // `mcrselop`'s own band reads `Options`; the record carries no UI string for it, so
         // retail's word is pinned (owner capture 2026-10-24) - same for its equipment-set twin.
         MenuKind::MacroBookOptions { .. } | MenuKind::EquipSetOptions { .. } => "Options",
@@ -5164,6 +5188,9 @@ pub fn renders_bespoke_screen(kind: MenuKind) -> bool {
             | MenuKind::Map
             // The two-rows-of-ten keytop band, drawn by `hud::macro_pallet_view`.
             | MenuKind::MacroPallet { .. }
+            // …and the one-keytop editor (Prev/Next, name, six line fields), drawn by
+            // `hud::macro_edit_view`.
+            | MenuKind::MacroEdit { .. }
     )
 }
 
@@ -5840,8 +5867,10 @@ fn side_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<RecordFra
             | MenuKind::MacroSelect
             | MenuKind::MacroResult
             // The palette band lays itself out at its own record (`hud::macro_pallet_view` reads the
-            // `mcr1pall` blocks directly), so it never takes a generic seat of any kind.
+            // `mcr1pall` blocks directly), so it never takes a generic seat of any kind - and neither
+            // does the keytop editor standing next to it in that same corner.
             | MenuKind::MacroPallet { .. }
+            | MenuKind::MacroEdit { .. }
     ) {
         return None;
     }
@@ -5948,8 +5977,10 @@ fn covers_main_menu(kind: MenuKind) -> bool {
             | MenuKind::MacroResult
             | MenuKind::MacrosPalette
             // The palette band is the widest thing in this family and it stands alone: the owner's
-            // capture of 2026-10-24 shows it with no book list, no option box and no Commands.
+            // capture of 2026-10-24 shows it with no book list, no option box and no Commands. Its
+            // keytop editor stands alone too - which is what its Prev/Next pair is for.
             | MenuKind::MacroPallet { .. }
+            | MenuKind::MacroEdit { .. }
     )
 }
 
@@ -5959,7 +5990,10 @@ fn covers_main_menu(kind: MenuKind) -> bool {
 /// you even .. leave th damn book menu on the right side"), so while it holds focus its ancestors
 /// lose their seats too.
 fn focus_excludes_ancestors(kind: MenuKind) -> bool {
-    matches!(kind, MenuKind::MacroPallet { .. })
+    matches!(
+        kind,
+        MenuKind::MacroPallet { .. } | MenuKind::MacroEdit { .. }
+    )
 }
 
 /// Where one open window of the menu stack draws.
@@ -7442,12 +7476,13 @@ pub fn macro_pallet_rows(
             rows.push(DynamicMenuRow {
                 tint: None,
                 label,
-                // The keytop addresses the client-local store slot under it, which is what
-                // already drills a slot's editor rows; re-lawing that addressing to forty
-                // books belongs with writing those files back.
-                action: DynamicMenuAction::MacroSlotRow {
-                    block: keyset as u8,
-                    index: slot_in_keyset as u8,
+                // The row carries the book it belongs to and the keytop's own place in that book's
+                // file, which is what lets its editor window read - and write back - the entry this
+                // tile shows. Neither survives the old `block`/`index` addressing, which is why the
+                // band drills `MenuKind::MacroEdit` rather than the store-side line editor.
+                action: DynamicMenuAction::MacroKeytopRow {
+                    book: book as u8,
+                    slot: file_slot as u8,
                 },
             });
         }
@@ -7496,10 +7531,135 @@ pub fn macro_pallet_row_step(cursor: usize, down: bool) -> usize {
     next_row * columns + column
 }
 
-/// The `mcres20` pager's rows, twenty to a screen: the numbered pattern an unnamed set reads,
-/// until kuluu reads the names out of the client's own set files. A set's own
-/// command family (`mcresmn`: edit / name / copy / paste / delete / overwrite /
-/// equip) is not lawed yet, so the row is display-only.
+/// How many command line slots one keytop editor shows and edits (owner ruling 2026-10-24: his
+/// capture of retail's window carries six, and they are drawn whether filled or not). Same number as the
+/// slots a stored entry actually has, so the window can never offer a line the file cannot keep.
+pub const MACRO_EDIT_LINE_SLOTS: usize = crate::hud::client_user_files::ENTRY_COMMAND_FIELDS;
+/// Every editable field of that window: the display name above the line slots.
+pub const MACRO_EDIT_FIELD_COUNT: usize = 1 + MACRO_EDIT_LINE_SLOTS;
+/// The Prev/Next pair rides in front of those fields, so a cursor over this window counts the two
+/// buttons first and reaches them with Left/Right; Enter presses the one it stands on (owner ruling
+/// 2026-10-24: "the prev/next are buttons.. L/R should select TO them then you enter").
+pub const MACRO_EDIT_BUTTON_COUNT: usize = 2;
+pub const MACRO_EDIT_PREV_CONTROL: usize = 0;
+pub const MACRO_EDIT_NEXT_CONTROL: usize = 1;
+/// Everything that cursor can stand on: both step buttons, then every field.
+pub const MACRO_EDIT_CONTROL_COUNT: usize = MACRO_EDIT_BUTTON_COUNT + MACRO_EDIT_FIELD_COUNT;
+
+/// What stands under a keytop editor's cursor. Words rather than arithmetic everywhere else: the two
+/// step buttons come first, and from there on each control is one editable field, `field` 0 being the
+/// display name and 1..=[`MACRO_EDIT_LINE_SLOTS`] the command lines below it.
+pub enum MacroEditControl {
+    Step { forward: bool },
+    Field { field: usize },
+}
+
+pub fn macro_edit_control_at(cursor: usize) -> MacroEditControl {
+    match cursor {
+        MACRO_EDIT_PREV_CONTROL => MacroEditControl::Step { forward: false },
+        MACRO_EDIT_NEXT_CONTROL => MacroEditControl::Step { forward: true },
+        rest => MacroEditControl::Field {
+            field: rest - MACRO_EDIT_BUTTON_COUNT,
+        },
+    }
+}
+
+/// The control a field number maps back to, so Up/Down and a field row's action land on the same box.
+pub fn macro_edit_control_of_field(field: usize) -> usize {
+    field + MACRO_EDIT_BUTTON_COUNT
+}
+
+/// The index a keytop sits at in the band, given its index in its book file - and the same function
+/// back again, because swapping the two rows of ten is its own inverse. The client stores Ctrl+1..0
+/// first and Alt+1..0 second while the owner ruled the alt row on top (2026-10-24: "alt on top, ctrl on
+/// bot"), so Prev/Next has to pass through this to step in the order he sees.
+fn macro_band_swap(index: usize) -> usize {
+    let columns = MACRO_PALLET_SLOTS_PER_KEYSET;
+    let keytops = crate::hud::client_user_files::MACRO_BOOK_SLOTS;
+    if columns == 0
+        || index >= keytops
+        || !keytops.is_multiple_of(columns)
+        || keytops / columns != 2
+    {
+        return index;
+    }
+    if index < columns {
+        index + columns
+    } else {
+        index - columns
+    }
+}
+
+/// The hotkey word a stored keytop fires on, in its file position: the first ten of a book are its
+/// Ctrl+1..0 row and the second ten its Alt+1..0 row (see [`crate::hud::client_user_files`]).
+pub fn macro_edit_hotkey_word(slot: usize) -> &'static str {
+    let columns = MACRO_PALLET_SLOTS_PER_KEYSET;
+    match slot.checked_div(columns) {
+        Some(0) => MACRO_PALLET_HOTKEYS[slot % columns],
+        Some(1) => MACRO_PALLET_HOTKEYS_ALT[slot % columns],
+        _ => "",
+    }
+}
+
+/// Prev/Next: the neighbouring keytop of the same book, stepping in band order (alt row first, then
+/// ctrl row) and wrapping at both ends as the band's own Left/Right does inside a row. `slot` is the
+/// file position; the answer is one too.
+pub fn macro_edit_step(slot: usize, forward: bool) -> usize {
+    let keytops = crate::hud::client_user_files::MACRO_BOOK_SLOTS;
+    if keytops == 0 {
+        return slot;
+    }
+    let band = macro_band_swap(slot);
+    let next_band = if forward {
+        (band + 1) % keytops
+    } else {
+        (band + keytops - 1) % keytops
+    };
+    macro_band_swap(next_band)
+}
+
+/// The words the two step buttons print, and their rows wear (the pane draws arrows around them).
+pub const MACRO_EDIT_ROW_PREV: &str = "Prev";
+pub const MACRO_EDIT_ROW_NEXT: &str = "Next";
+
+/// The rows of a keytop editor in the order its cursor walks them: `Prev`, `Next`, then the display
+/// name and each line slot, every one wearing what he has typed so far. They exist for that cursor and
+/// for helper-bar text; the surface itself draws buttons and fields, not list rows (see
+/// [`crate::hud::macro_edit_view`]).
+pub fn macro_edit_rows(draft: &crate::input_mode::MacroEditDraft) -> Vec<DynamicMenuRow> {
+    let mut rows = Vec::with_capacity(MACRO_EDIT_CONTROL_COUNT);
+    rows.push(DynamicMenuRow {
+        tint: None,
+        label: MACRO_EDIT_ROW_PREV.to_string(),
+        action: DynamicMenuAction::MacroKeytopStep { forward: false },
+    });
+    rows.push(DynamicMenuRow {
+        tint: None,
+        label: MACRO_EDIT_ROW_NEXT.to_string(),
+        action: DynamicMenuAction::MacroKeytopStep { forward: true },
+    });
+    // Field numbering matches `macro_edit_control_at`: 0 is the display name, 1..=six the line slots.
+    for (field, value) in std::iter::once(&draft.name)
+        .chain(draft.lines.iter())
+        .enumerate()
+    {
+        rows.push(DynamicMenuRow {
+            tint: None,
+            label: value.clone(),
+            action: DynamicMenuAction::MacroEditFieldFocus { field: field as u8 },
+        });
+    }
+    rows
+}
+
+/// The name an unnamed set reads by, and the one `Delete` stamps back over a record (the fixed template
+/// retail regenerates from, per `.agents/skills/retail-observe/references/2026-10-25-equip-set-apply.md`).
+pub fn default_equip_set_name(set: usize) -> String {
+    format!("Set{:03}", set + 1)
+}
+
+/// The `mcres20` pager's rows, twenty to a screen: the client's own name for a set once its file carries one,
+/// [`default_equip_set_name`] otherwise. Its options window (`mcresmn`) opens on every row.
 pub fn equip_set_rows(
     files: &crate::hud::client_user_files::ClientUserFiles,
 ) -> Vec<DynamicMenuRow> {
@@ -7509,20 +7669,11 @@ pub fn equip_set_rows(
             label: files
                 .set_name(set)
                 .map(str::to_string)
-                .unwrap_or_else(|| format!("Set{:03}", set + 1)),
+                .unwrap_or_else(|| default_equip_set_name(set)),
             action: DynamicMenuAction::EquipSetRow { set: set as u16 },
         })
         .collect()
 }
-
-/// `mcresmn` (w=112 h=138) keeps its record's width, which is what `mcrselop` measured too before its
-/// own rows outgrew it ([`option_box_pane_width`]). Its eight blocks carry only table-14 descriptions,
-/// and the longest of them runs to 57 characters (`Set appearance of own equipment to that of this item
-/// set.`), which is most of kuluu's 512-wide design at menu type - no frame beside a pager could hold
-/// it. Retail's short words for those blocks are not in the DATs and the owner has not ruled them (the
-/// book options' five short words came off his capture of 2026-10-24), so nothing is invented here
-/// meanwhile, and its rows still run past the border like they have been.
-pub const EQUIP_SET_OPTION_PANE_WIDTH: f32 = 112.0;
 
 /// The width of an option box: as narrow as it can be and never narrower than its own rows need, which
 /// is how the Status selector sizes itself (owner ruling 2026-10-24 that an option window stays small,
@@ -7542,32 +7693,62 @@ pub fn option_box_pane_width(kind: MenuKind) -> f32 {
             labels.push(book_name_field.as_str());
             fit_pane_width(&labels)
         }
-        MenuKind::EquipSetOptions { .. } => EQUIP_SET_OPTION_PANE_WIDTH,
+        MenuKind::EquipSetOptions { .. } => {
+            // Same law as the book box: `Change Name` is typed into its own row (see
+            // [`equip_set_option_rows`]), so the frame holds a whole set-name field from the first press
+            // instead of growing under the caret.
+            let set_name_field = "M".repeat(crate::hud::client_user_files::SET_NAME_MAX_BYTES + 1);
+            let mut labels: Vec<&str> = EQUIP_SET_OPTION_ROWS.to_vec();
+            labels.push(set_name_field.as_str());
+            fit_pane_width(&labels)
+        }
         _ => MENU_PANE_WIDTH,
     }
 }
 
-/// The eight blocks `mcresmn` draws for one equipment set, labelled with the only strings its
-/// record carries (its table-14 descriptions). Retail's short words for them are not in the DATs;
-/// the book options' short words came off a capture, these have not had one yet.
+/// The eight words `mcresmn` prints, in the order its blocks come out of the DATs (owner capture
+/// 2026-10-24). Those blocks carry only table-14 descriptions - `Edit this equipment set.` / `Name this
+/// equipment set.` / `Temporarily copy set.` / `Paste copied set.` / `Delete set.` / `Overwrite this set
+/// with the equipment you are currently wearing.` / `Equip this set.` / `Set appearance of own equipment to
+/// that of this item set.` - and retail's short word for each lines up with them one to one, which is what
+/// fixes this order. The long strings stay here as the documentation of what each arm answers to.
 pub const EQUIP_SET_OPTION_ROWS: [&str; 8] = [
-    "Edit this equipment set.",
-    "Name this equipment set.",
-    "Temporarily copy set.",
-    "Paste copied set.",
-    "Delete set.",
-    "Overwrite this set with the equipment you are currently wearing.",
-    "Equip this set.",
-    "Set appearance of own equipment to that of this item set.",
+    "Edit",
+    "Change Name",
+    "Copy",
+    "Paste",
+    "Delete",
+    "Use Current",
+    "Equip",
+    "Style Lock",
 ];
 
-pub fn equip_set_option_rows() -> Vec<DynamicMenuRow> {
+/// Which of the eight blocks each arm sits in, in record order (see [`EQUIP_SET_OPTION_ROWS`]).
+pub const EQUIP_SET_OPTION_EDIT: u8 = 0;
+pub const EQUIP_SET_OPTION_CHANGE_NAME: u8 = 1;
+pub const EQUIP_SET_OPTION_COPY: u8 = 2;
+pub const EQUIP_SET_OPTION_PASTE: u8 = 3;
+pub const EQUIP_SET_OPTION_DELETE: u8 = 4;
+pub const EQUIP_SET_OPTION_USE_CURRENT: u8 = 5;
+pub const EQUIP_SET_OPTION_EQUIP: u8 = 6;
+pub const EQUIP_SET_OPTION_STYLE_LOCK: u8 = 7;
+
+/// The eight rows `mcresmn` draws for the selected set. While its name row is being typed
+/// (`MenuLevel::equip_set_name_edit`) that row wears the draft and a caret instead of its word, the same
+/// in-place law the book options run (see [`macro_book_option_rows`]).
+pub fn equip_set_option_rows(name_edit: Option<&str>) -> Vec<DynamicMenuRow> {
     EQUIP_SET_OPTION_ROWS
         .iter()
         .enumerate()
         .map(|(option, label)| DynamicMenuRow {
             tint: None,
-            label: (*label).to_string(),
+            label: if option as u8 == EQUIP_SET_OPTION_CHANGE_NAME {
+                name_edit
+                    .map(|draft| format!("{draft}_"))
+                    .unwrap_or_else(|| (*label).to_string())
+            } else {
+                (*label).to_string()
+            },
             action: DynamicMenuAction::EquipSetOptionRow {
                 option: option as u8,
             },
@@ -8612,7 +8793,15 @@ fn dynamic_rows_for(
             usize::from(book),
             &crate::hud::client_user_files::client_user_files(),
         ),
-        MenuKind::EquipSetOptions { .. } => equip_set_option_rows(),
+        // A keytop editor's rows are its seven fields: the name he is typing and the six line slots.
+        MenuKind::MacroEdit { .. } => level
+            .macro_edit_draft
+            .as_ref()
+            .map(macro_edit_rows)
+            .unwrap_or_default(),
+        MenuKind::EquipSetOptions { .. } => {
+            equip_set_option_rows(level.equip_set_name_edit.as_deref())
+        }
         // Home-view job pick lists — both sides come from the same roster
         // (vault main_menu.md §53); the sub side renders empty until the
         // packet's sub-job grant arrived, like LSB refusing the row.
@@ -12776,8 +12965,6 @@ pub fn debug_panel_state(
         DEBUG_ENTITY_LIST => panels.entity_list,
         DEBUG_NET_STATUS => net_status_on,
         DEBUG_SOUND => sound_on,
-        DEBUG_STAIR_DRAW => panels.stair_draw,
-        DEBUG_STAIR_STATUS => panels.stair_debug,
         DEBUG_GRAPHICS_DEBUG => panels.graphics_debug,
         DEBUG_POSITION_LOG => panels.position_log,
         DEBUG_NAMEPLATES => panels.nameplate_debug,
@@ -18811,13 +18998,29 @@ mod tests {
             crate::ui_font::text_width_px(&format!("{full_name}_"), MENU_ROW_FONT_PX) + chrome
                 <= option_box_pane_width(kind)
         );
-        // The equipment-set box keeps its record's 112 px for now (`EQUIP_SET_OPTION_PANE_WIDTH`'s
-        // note): holding that law needs words to measure, and retail's short words for those eight
-        // blocks are still the owner's to rule.
-        assert_eq!(
-            option_box_pane_width(MenuKind::EquipSetOptions { set: 0 }),
-            EQUIP_SET_OPTION_PANE_WIDTH
-        );
+        // The equipment-set box runs the same law now that its eight rows have retail's own short words
+        // (owner capture 2026-10-24): measured on `Use Current` and a whole fifteen-character set name, never
+        // wider than the standard column it sits beside.
+        for set in [0u16, EQUIP_SET_COUNT as u16 - 1] {
+            let kind = MenuKind::EquipSetOptions { set };
+            let width = option_box_pane_width(kind);
+            for label in EQUIP_SET_OPTION_ROWS {
+                assert!(
+                    crate::ui_font::text_width_px(label, MENU_ROW_FONT_PX) + chrome <= width,
+                    "set {set} box of {width} px cannot hold {label:?}"
+                );
+            }
+            let full_name = "M".repeat(crate::hud::client_user_files::SET_NAME_MAX_BYTES);
+            assert!(
+                crate::ui_font::text_width_px(&format!("{full_name}_"), MENU_ROW_FONT_PX) + chrome
+                    <= width,
+                "set {set} box of {width} px cannot hold a full name field"
+            );
+            let frame = pinned_option_box_frame(kind).expect("option boxes are pinned");
+            assert_eq!(frame.width, width);
+            let pager_left = MENU_DESIGN_WIDTH - MENU_RIGHT_EDGE - status_pane_width();
+            assert!(frame.x >= 0.0 && frame.x + frame.width <= pager_left);
+        }
     }
 
     /// `Change Name` is a field in its own row rather than another window: while it holds a draft that
@@ -18850,6 +19053,42 @@ mod tests {
             assert_eq!(
                 typing[option as usize].action,
                 DynamicMenuAction::MacroBookOptionRow { option }
+            );
+        }
+    }
+
+    /// The equipment-set box wears the same in-place law: `Change Name` shows the draft he is typing and the
+    /// other seven blocks keep their retail words (`Edit`, `Copy`, … `Style Lock`).
+    #[test]
+    fn typing_a_set_name_replaces_only_its_own_option_row() {
+        let rows = equip_set_option_rows(None);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            EQUIP_SET_OPTION_ROWS
+        );
+        let typing = equip_set_option_rows(Some("Pulled"));
+        assert_eq!(
+            typing[EQUIP_SET_OPTION_CHANGE_NAME as usize].label,
+            "Pulled_"
+        );
+        for option in [
+            EQUIP_SET_OPTION_EDIT,
+            EQUIP_SET_OPTION_COPY,
+            EQUIP_SET_OPTION_PASTE,
+            EQUIP_SET_OPTION_DELETE,
+            EQUIP_SET_OPTION_USE_CURRENT,
+            EQUIP_SET_OPTION_EQUIP,
+            EQUIP_SET_OPTION_STYLE_LOCK,
+        ] {
+            assert_eq!(
+                typing[option as usize].label,
+                EQUIP_SET_OPTION_ROWS[option as usize]
+            );
+            assert_eq!(
+                typing[option as usize].action,
+                DynamicMenuAction::EquipSetOptionRow { option }
             );
         }
     }
@@ -18895,13 +19134,13 @@ mod tests {
         assert_eq!(band[4].label, "JoinPT");
         assert_eq!(
             band[4].action,
-            DynamicMenuAction::MacroSlotRow { block: 1, index: 4 }
+            DynamicMenuAction::MacroKeytopRow { book: 1, slot: 14 }
         );
         // Rows 10..=19 are the ctrl row beneath it: file slot 3 (Ctrl+4) lands on row 13.
         assert_eq!(band[13].label, "NameSW");
         assert_eq!(
             band[13].action,
-            DynamicMenuAction::MacroSlotRow { block: 0, index: 3 }
+            DynamicMenuAction::MacroKeytopRow { book: 1, slot: 3 }
         );
         // A keytop the player left empty labels nothing.
         assert_eq!(band[0].label, "");

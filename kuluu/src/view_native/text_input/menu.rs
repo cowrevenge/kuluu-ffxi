@@ -1296,16 +1296,105 @@ pub(super) fn confirm_menu_at_cursor(
                 return None;
             }
             // Same law for equipment sets: a `SetNNN` row raises its `mcresmn` options box beside
-            // the pager. Every set-option arm there is unread, so those rows change nothing.
+            // the pager.
             if let A::EquipSetRow { set } = action {
                 stack.push(MenuKind::EquipSetOptions { set });
                 return None;
             }
-            if let A::EquipSetOptionRow { .. } = action {
+            // The eight blocks of `mcresmn`. Three of them edit the client's own set files through
+            // `hud::client_user_files` (rename, and the whole-record copy/paste/delete), so each is a file
+            // write plus its memory copy that the pager reads back on the next frame. The other four run over
+            // what a set wears, which those records' sixty-four contents bytes now read as entries
+            // (`client_user_files::equip_set_contents`): `Use Current` overwrites them with the gear worn now,
+            // and `Equip` / `Style Lock` send c2s 0x051 / c2s 0x053 Mode = Set. Nothing applies locally -
+            // wearing is the server's work
+            // (`.agents/skills/retail-observe/references/2026-10-25-equip-set-apply.md`).
+            if let A::EquipSetOptionRow { option } = action {
+                let MenuKind::EquipSetOptions { set } = kind else {
+                    return None;
+                };
+                let set = usize::from(set);
+                use kuluu_render::hud::menu::{
+                    EQUIP_SET_OPTION_CHANGE_NAME, EQUIP_SET_OPTION_COPY, EQUIP_SET_OPTION_DELETE,
+                    EQUIP_SET_OPTION_EDIT, EQUIP_SET_OPTION_EQUIP, EQUIP_SET_OPTION_PASTE,
+                    EQUIP_SET_OPTION_STYLE_LOCK, EQUIP_SET_OPTION_USE_CURRENT,
+                };
+                match option {
+                    // `Change Name` opens its field in that very row (see
+                    // `menu::equip_set_option_rows`), seeded with the name the set files carry so editing it
+                    // edits something.
+                    EQUIP_SET_OPTION_CHANGE_NAME => {
+                        let current = kuluu_render::hud::client_user_files::client_user_files()
+                            .set_name(set)
+                            .unwrap_or_default()
+                            .to_string();
+                        if let Some(level) = stack.current_mut() {
+                            level.equip_set_name_edit = Some(current);
+                        }
+                    }
+                    EQUIP_SET_OPTION_COPY => report_equip_set_edit(
+                        scene_state,
+                        "copy",
+                        set,
+                        kuluu_render::hud::client_user_files::copy_equipment_set(set),
+                    ),
+                    EQUIP_SET_OPTION_PASTE => report_equip_set_edit(
+                        scene_state,
+                        "paste",
+                        set,
+                        kuluu_render::hud::client_user_files::paste_equipment_set(set),
+                    ),
+                    EQUIP_SET_OPTION_DELETE => report_equip_set_edit(
+                        scene_state,
+                        "delete",
+                        set,
+                        kuluu_render::hud::client_user_files::delete_equipment_set(set),
+                    ),
+                    // Retail's own `Edit` answers with no wire at all: it hands the contents half to an editor
+                    // service whose rows report through c2s 0x052. That send path is landed and pinned
+                    // (`AgentCommand::EquipSetCheck`); [`edit_equipment_set`] carries what this arm itself does.
+                    EQUIP_SET_OPTION_EDIT => edit_equipment_set(scene_state, set),
+                    // `Use Current`: the file's contents become what is worn now; nothing rides the wire.
+                    EQUIP_SET_OPTION_USE_CURRENT => {
+                        let outcome = use_current_into_set(scene_state, set);
+                        report_equip_set_edit(scene_state, "use current", set, outcome);
+                    }
+                    // `Equip`: c2s 0x051 after every entry is checked against what the bags hold
+                    // ([`wear_equipment_set`] runs the observation record's fix-or-drop law).
+                    EQUIP_SET_OPTION_EQUIP => wear_equipment_set(scene_state, set, cmd_tx),
+                    // `Style Lock`: c2s 0x053 Mode = Set, which admits positions through feet only.
+                    EQUIP_SET_OPTION_STYLE_LOCK => style_lock_to_set(scene_state, set, cmd_tx),
+                    // `mcresmn` draws eight blocks; a row outside them changes nothing.
+                    _ => {}
+                }
                 return None;
             }
-            if let A::MacroSlotRow { block, index } = action {
-                stack.push(MenuKind::MacroEditor { block, index });
+            // A band keytop raises its own editor window (owner ruling 2026-10-24), and that window
+            // opens on what his macro file already holds: the name and commands seed its draft, so every
+            // field shows something real before he types a word into it.
+            if let A::MacroKeytopRow { book, slot } = action {
+                stack.push(MenuKind::MacroEdit { book, slot });
+                if let Some(level) = stack.current_mut() {
+                    seed_macro_edit_draft(level);
+                    // The caret opens in the name field; Up/Down walk it down to the line slots.
+                    level.cursor = 0;
+                }
+                return None;
+            }
+            // A field row of that window only moves the caret - typing is owned by the window itself -
+            // and it lands on the control that field is, past the two step buttons that lead the window.
+            if let A::MacroEditFieldFocus { field } = action {
+                if let Some(level) = stack.current_mut() {
+                    level.cursor =
+                        kuluu_render::hud::menu::macro_edit_control_of_field(usize::from(field))
+                            .min(kuluu_render::hud::menu::MACRO_EDIT_CONTROL_COUNT - 1);
+                }
+                return None;
+            }
+            // And a step row presses that window's Prev or Next button: the keytop being left is written,
+            // the window reopens on its neighbour.
+            if let A::MacroKeytopStep { forward } = action {
+                step_macro_keytop(stack, scene_state, forward);
                 return None;
             }
             if let A::MacroEditLine { line_index } = action {
@@ -1933,8 +2022,8 @@ fn toggle_debug_panel(
     use kuluu_render::hud::menu::{
         DEBUG_AUTO_ENTER_CS, DEBUG_ENTITY_LIST, DEBUG_FOG, DEBUG_FORCE_18, DEBUG_GRAPHICS_DEBUG,
         DEBUG_MESH, DEBUG_MISSION_WIRE, DEBUG_NAMEPLATES, DEBUG_NET_STATUS, DEBUG_NOCLIP,
-        DEBUG_PERF, DEBUG_POSITION_LOG, DEBUG_PRINT_POS, DEBUG_SOUND, DEBUG_STAIR_DRAW,
-        DEBUG_STAIR_STATUS, DEBUG_TARGET_CYCLE, DEBUG_UI_SETTINGS, DEBUG_WEATHER,
+        DEBUG_PERF, DEBUG_POSITION_LOG, DEBUG_PRINT_POS, DEBUG_SOUND, DEBUG_TARGET_CYCLE,
+        DEBUG_UI_SETTINGS, DEBUG_WEATHER,
     };
 
     // Print Pos is a button, not a toggle: fire and return before the
@@ -2053,14 +2142,6 @@ fn toggle_debug_panel(
             hud_panels.entity_list = !hud_panels.entity_list;
             hud_panels.entity_list
         }
-        DEBUG_STAIR_DRAW => {
-            hud_panels.stair_draw = !hud_panels.stair_draw;
-            hud_panels.stair_draw
-        }
-        DEBUG_STAIR_STATUS => {
-            hud_panels.stair_debug = !hud_panels.stair_debug;
-            hud_panels.stair_debug
-        }
         DEBUG_GRAPHICS_DEBUG => {
             hud_panels.graphics_debug = !hud_panels.graphics_debug;
             hud_panels.graphics_debug
@@ -2114,6 +2195,296 @@ fn report_macro_book_edit(
             scene_state,
             format!("[menu] {arm} macro book {}: {e}", book + 1),
         );
+    }
+}
+
+/// What one set arm answered, when it could not do what its row said. `mcresmn` carries no message of its
+/// own, so the chat log carries these (see [`report_macro_book_edit`], which runs the same law for books).
+fn report_equip_set_edit(
+    scene_state: &mut SceneState,
+    arm: &str,
+    set: usize,
+    edit: Result<(), kuluu_render::hud::client_user_files::MacroEditError>,
+) {
+    if let Err(e) = edit {
+        push_system_chat_line(
+            scene_state,
+            format!("[menu] {arm} equipment set {}: {e}", set + 1),
+        );
+    }
+}
+
+/// Where the snapshot says an item id lives: locked entries first, since worn gear carries LSB's lock flag
+/// and that is the location a set wants recorded. The container list is sorted by id and slots read in index
+/// order, so the answer stands without further tie-breaking.
+fn carried_location(snap: &kuluu_snapshot::SceneSnapshot, item_no: u16) -> Option<(u8, u8)> {
+    for prefer_locked in [true, false] {
+        for bag in &snap.containers {
+            if let Some(item) = bag
+                .items
+                .iter()
+                .find(|item| item.item_no == item_no && item.locked == prefer_locked)
+            {
+                return Some((bag.id, item.index));
+            }
+        }
+    }
+    None
+}
+
+/// `Edit`: retail's block touches no wire at all - it hands the contents half to an editor service whose rows
+/// report through c2s 0x052 (`AgentCommand::EquipSetCheck`, landed and pinned). The placement surface for those
+/// rows is not built yet, so this answers with what its record stores.
+fn edit_equipment_set(scene_state: &mut SceneState, set: usize) {
+    match kuluu_render::hud::client_user_files::equip_set_contents(set) {
+        Ok(Some(contents)) => {
+            let carried = contents.iter().filter(|entry| entry.is_populated()).count();
+            push_system_chat_line(
+                scene_state,
+                format!(
+                    "[menu] edit equipment set {}: {} positions carry items",
+                    set + 1,
+                    carried
+                ),
+            );
+        }
+        Ok(None) => push_system_chat_line(
+            scene_state,
+            format!("[menu] edit equipment set {}: no record", set + 1),
+        ),
+        Err(e) => report_equip_set_edit(scene_state, "edit", set, Err(e)),
+    }
+}
+
+/// `Equip`: the record's contents half sent as a wear (c2s 0x051). Every populated entry must name where it
+/// carries that item: an entry whose stated container and index do not hold it gets rewritten onto the same id
+/// found elsewhere, or loses its populated flag for this send only - never in the stored record - when the id
+/// stands nowhere known (the fix-or-drop law of the observation record). The server wears it from there.
+fn wear_equipment_set(scene_state: &mut SceneState, set: usize, cmd_tx: &Sender<AgentCommand>) {
+    let mut entries = match kuluu_render::hud::client_user_files::equip_set_contents(set) {
+        Ok(Some(entries)) => entries,
+        Ok(None) => {
+            push_system_chat_line(
+                scene_state,
+                format!(
+                    "[menu] equip equipment set {}: no record, nothing to wear",
+                    set + 1
+                ),
+            );
+            return;
+        }
+        Err(e) => {
+            report_equip_set_edit(scene_state, "equip", set, Err(e));
+            return;
+        }
+    };
+    let mut dropped = Vec::new();
+    {
+        let snap = &scene_state.snapshot;
+        for (position, entry) in entries.iter_mut().enumerate() {
+            if !entry.is_populated() {
+                continue;
+            }
+            let stated_holds = snap.container(entry.category).is_some_and(|bag| {
+                bag.items
+                    .iter()
+                    .any(|item| item.index == entry.item_index && item.item_no == entry.item_no)
+            });
+            if stated_holds {
+                continue;
+            }
+            match carried_location(snap, entry.item_no) {
+                Some((category, index)) => {
+                    entry.category = category;
+                    entry.item_index = index;
+                }
+                None => {
+                    entry.has_item = false;
+                    dropped.push(position + 1);
+                }
+            }
+        }
+    }
+    if !dropped.is_empty() {
+        push_system_chat_line(
+            scene_state,
+            format!(
+                "[menu] equip equipment set {}: positions {} not carried and skipped",
+                set + 1,
+                dropped
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+    }
+    if !entries
+        .iter()
+        .any(ffxi_proto::equipset::EquipSetEntry::is_populated)
+    {
+        push_system_chat_line(
+            scene_state,
+            format!("[menu] equip equipment set {}: nothing to wear", set + 1),
+        );
+        return;
+    }
+    if let Err(e) = cmd_tx.try_send(AgentCommand::EquipSetWear { entries }) {
+        push_system_chat_line(scene_state, format!("[menu] dispatch dropped: {e}"));
+    }
+}
+
+/// `Style Lock`: c2s 0x053 Mode = Set over the record's contents half. The encoder enforces the gate through
+/// feet (a set may carry sixteen entries and lock on at most nine); this arm refuses only an empty one, so no
+/// lock ever goes out without a single item behind it.
+fn style_lock_to_set(scene_state: &mut SceneState, set: usize, cmd_tx: &Sender<AgentCommand>) {
+    let contents = match kuluu_render::hud::client_user_files::equip_set_contents(set) {
+        Ok(Some(contents)) => contents,
+        Ok(None) => {
+            push_system_chat_line(
+                scene_state,
+                format!("[menu] style lock equipment set {}: no record", set + 1),
+            );
+            return;
+        }
+        Err(e) => {
+            report_equip_set_edit(scene_state, "style lock", set, Err(e));
+            return;
+        }
+    };
+    if ffxi_proto::equipset::lockstyle_admissible_count(&contents) == 0 {
+        push_system_chat_line(
+            scene_state,
+            format!(
+                "[menu] style lock equipment set {}: nothing through the feet position to lock",
+                set + 1
+            ),
+        );
+        return;
+    }
+    if let Err(e) = cmd_tx.try_send(AgentCommand::StyleLockSet { entries: contents }) {
+        push_system_chat_line(scene_state, format!("[menu] dispatch dropped: {e}"));
+    }
+}
+
+/// `Use Current`: the record's contents half wiped to cleared entries and refilled from what is worn now -
+/// populated flag on, container and index read off the carried item, id as it stands (arm law of the
+/// observation record; nothing rides the wire). A worn item found in no known bag leaves its position cleared:
+/// retail reads that off the worn thing itself, where kuluu has to find the same fact through the bags.
+fn use_current_into_set(
+    scene_state: &mut SceneState,
+    set: usize,
+) -> Result<(), kuluu_render::hud::client_user_files::MacroEditError> {
+    let (contents, not_carried) = {
+        let snap = &scene_state.snapshot;
+        let mut contents = [ffxi_proto::equipset::EquipSetEntry::cleared();
+            ffxi_proto::equipset::EQUIPSET_ENTRIES];
+        let mut not_carried = 0usize;
+        for (slot, worn) in snap
+            .equipped
+            .iter()
+            .take(ffxi_proto::equipset::EQUIPSET_ENTRIES)
+            .enumerate()
+        {
+            let Some(item_no) = worn else { continue };
+            match carried_location(snap, *item_no) {
+                Some((category, index)) => {
+                    contents[slot] =
+                        ffxi_proto::equipset::EquipSetEntry::worn(category, index, *item_no);
+                }
+                None => not_carried += 1,
+            }
+        }
+        (contents, not_carried)
+    };
+    let outcome = kuluu_render::hud::client_user_files::set_equip_set_contents(set, &contents);
+    if not_carried > 0 {
+        push_system_chat_line(
+            scene_state,
+            format!(
+                "[menu] use current equipment set {}: {} worn items stand in no known bag and left their positions cleared",
+                set + 1,
+                not_carried
+            ),
+        );
+    }
+    outcome
+}
+
+/// Consume one keystroke while a `mcresmn` `Change Name` field holds a draft: the same field law as
+/// [`macro_book_name_key`], cut off at what one set record's sixteen-byte name field stores
+/// (`set_name_fits`). Enter commits through `set_set_name`, Esc discards without writing, and nav keys stay
+/// dead while typing.
+fn equip_set_name_key(
+    key: &Key,
+    bindings: &Bindings,
+    stack: &mut MenuStack,
+    scene_state: &mut SceneState,
+) {
+    let set = match stack.current().map(|level| level.kind) {
+        Some(MenuKind::EquipSetOptions { set }) => usize::from(set),
+        // A draft belongs to the option window that opened it; on any other window it is dropped.
+        _ => {
+            if let Some(level) = stack.current_mut() {
+                level.equip_set_name_edit = None;
+            }
+            return;
+        }
+    };
+    // Backspace first: the erase key must never fall through into a window-cancel arm under it.
+    if bindings.matches_logical(Action::ChatBackspace, key) {
+        if let Some(draft) = stack
+            .current_mut()
+            .and_then(|level| level.equip_set_name_edit.as_mut())
+        {
+            draft.pop();
+        }
+        return;
+    }
+    if bindings.matches_logical(Action::NavCancel, key) {
+        if let Some(level) = stack.current_mut() {
+            level.equip_set_name_edit = None;
+        }
+        return;
+    }
+    if bindings.matches_logical(Action::NavConfirm, key) {
+        let draft = stack
+            .current()
+            .and_then(|level| level.equip_set_name_edit.clone())
+            .unwrap_or_default();
+        if let Some(level) = stack.current_mut() {
+            level.equip_set_name_edit = None;
+        }
+        report_equip_set_edit(
+            scene_state,
+            "name",
+            set,
+            kuluu_render::hud::client_user_files::set_set_name(set, &draft),
+        );
+        return;
+    }
+    use kuluu_render::hud::client_user_files::set_name_fits;
+    let Some(draft) = stack
+        .current_mut()
+        .and_then(|level| level.equip_set_name_edit.as_mut())
+    else {
+        return;
+    };
+    match key {
+        Key::Space => {
+            if set_name_fits(draft, 1) {
+                draft.push(' ');
+            }
+        }
+        Key::Character(chars) => {
+            for ch in chars.chars() {
+                if ch.is_control() || !set_name_fits(draft, ch.len_utf8()) {
+                    break;
+                }
+                draft.push(ch);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2194,6 +2565,209 @@ fn macro_book_name_key(
         }
         _ => {}
     }
+}
+
+/// Fill one keytop editor's working copy from the entry its window names, so the fields show what his
+/// own macro file holds before he changes any of them.
+fn seed_macro_edit_draft(level: &mut kuluu_render::input_mode::MenuLevel) {
+    let MenuKind::MacroEdit { book, slot } = level.kind else {
+        return;
+    };
+    let files = kuluu_render::hud::client_user_files::client_user_files();
+    let entry = files.macro_entry(usize::from(book), usize::from(slot));
+    level.macro_edit_draft = Some(kuluu_render::input_mode::MacroEditDraft::new(
+        entry.map(|e| e.name.as_str()).unwrap_or_default(),
+        entry.map(|e| e.body.as_str()).unwrap_or_default(),
+    ));
+}
+
+/// Write the keytop a focused editor holds back into his own macro file: its name, and the line slots
+/// that hold something in order. A refusal rides the chat log, as with the book arms.
+fn commit_macro_keytop(stack: &mut MenuStack, scene_state: &mut SceneState) {
+    let Some((book, slot, draft)) = stack.current().and_then(|level| match level.kind {
+        MenuKind::MacroEdit { book, slot } => Some((
+            usize::from(book),
+            usize::from(slot),
+            level.macro_edit_draft.clone().unwrap_or_default(),
+        )),
+        _ => None,
+    }) else {
+        return;
+    };
+    use kuluu_render::hud::client_user_files::{macro_body_from_slots, set_macro_entry};
+    let body = macro_body_from_slots(&draft.lines);
+    if let Err(e) = set_macro_entry(book, slot, &draft.name, &body) {
+        push_system_chat_line(scene_state, format!("[menu] edit macro: {e}"));
+    }
+}
+
+/// Move a keytop editor to the previous or next keytop of its book: the one being left is written first,
+/// so nothing typed there survives only in memory, and the window opens on the stored self of the keytop
+/// it lands on.
+fn step_macro_keytop(stack: &mut MenuStack, scene_state: &mut SceneState, forward: bool) {
+    use kuluu_render::hud::menu::macro_edit_step;
+    commit_macro_keytop(stack, scene_state);
+    if let Some(level) = stack.current_mut() {
+        if let MenuKind::MacroEdit { book, slot } = level.kind {
+            level.kind = MenuKind::MacroEdit {
+                book,
+                slot: macro_edit_step(usize::from(slot), forward) as u8,
+            };
+            seed_macro_edit_draft(level);
+        }
+    }
+}
+
+/// Consume one keystroke while a keytop editor holds focus (owner ruling 2026-10-24). Left and Right put
+/// the cursor on the window's Prev or Next button - they are buttons, not shortcuts ("L/R should select
+/// TO them then you enter") - and Enter presses whatever holds the cursor: a button steps to that keytop,
+/// a field writes this keytop into his own macro file. Up/Down walk the cursor around the window,
+/// wrapping; printable keys type into the field holding it; Esc closes without writing. The window owns
+/// every keystroke while it stands (the mcrledit input law), which is also why its cursor keys cannot
+/// move the character.
+fn handle_macro_edit_key(
+    key: &Key,
+    bindings: &Bindings,
+    stack: &mut MenuStack,
+    scene_state: &mut SceneState,
+) {
+    use kuluu_render::hud::client_user_files::{command_fits, keytop_name_fits};
+    use kuluu_render::hud::menu::{
+        macro_edit_control_at, MacroEditControl, MACRO_EDIT_CONTROL_COUNT, MACRO_EDIT_NEXT_CONTROL,
+        MACRO_EDIT_PREV_CONTROL,
+    };
+
+    let cursor = stack.current().map_or(0, |level| level.cursor);
+    let control = macro_edit_control_at(cursor.min(MACRO_EDIT_CONTROL_COUNT - 1));
+    let field = match control {
+        MacroEditControl::Field { field } => Some(field),
+        MacroEditControl::Step { .. } => None,
+    };
+
+    // Erase first: Backspace must never fall through into the cancel arm under it (see
+    // `handle_bazaar_comment_key`). It erases nothing while a button holds the cursor.
+    if bindings.matches_logical(Action::ChatBackspace, key) {
+        if let Some(field) = field {
+            if let Some(draft) = stack
+                .current_mut()
+                .and_then(|level| level.macro_edit_draft.as_mut())
+            {
+                erase_keytop_field(draft, field);
+            }
+        }
+        return;
+    }
+
+    if bindings.matches_logical(Action::NavCancel, key) {
+        // The draft goes with the window: nothing was written that Enter did not commit.
+        stack.pop();
+        return;
+    }
+
+    if bindings.matches_logical(Action::NavConfirm, key) {
+        match control {
+            MacroEditControl::Step { forward } => step_macro_keytop(stack, scene_state, forward),
+            MacroEditControl::Field { .. } => commit_macro_keytop(stack, scene_state),
+        }
+        return;
+    }
+
+    // Left and Right select the two step buttons; neither goes anywhere on its own.
+    if bindings.matches_logical(Action::NavLeft, key) {
+        if let Some(level) = stack.current_mut() {
+            level.cursor = MACRO_EDIT_PREV_CONTROL;
+        }
+        return;
+    }
+    if bindings.matches_logical(Action::NavRight, key) {
+        if let Some(level) = stack.current_mut() {
+            level.cursor = MACRO_EDIT_NEXT_CONTROL;
+        }
+        return;
+    }
+
+    // Up/Down walk the cursor around the whole window - both buttons and every field - wrapping at both
+    // ends as a list's own Up/Down does.
+    if bindings.matches_logical(Action::NavUp, key)
+        || bindings.matches_logical(Action::NavDown, key)
+    {
+        let down = bindings.matches_logical(Action::NavDown, key);
+        if let Some(level) = stack.current_mut() {
+            level.cursor = if down {
+                (level.cursor + 1) % MACRO_EDIT_CONTROL_COUNT
+            } else {
+                (level.cursor + MACRO_EDIT_CONTROL_COUNT - 1) % MACRO_EDIT_CONTROL_COUNT
+            };
+        }
+        return;
+    }
+
+    // Typing, into the field under the cursor; a button takes nothing.
+    let Some(field) = field else { return };
+    let typed = typed_characters(key);
+    let Some(draft) = stack
+        .current_mut()
+        .and_then(|level| level.macro_edit_draft.as_mut())
+    else {
+        return;
+    };
+    if field == 0 {
+        for ch in typed.chars() {
+            if !keytop_name_fits(&draft.name, ch.len_utf8()) {
+                break;
+            }
+            draft.name.push(ch);
+        }
+        return;
+    }
+    let Some(index) = field.checked_sub(1) else {
+        return;
+    };
+    // Each command rides in its own slot of the entry, so what runs out is that slot's room rather than
+    // the whole keytop's (see `client_user_files`' record law). The slots are still worked on outside the
+    // draft, so a character that does not fit leaves nothing half-written.
+    let mut lines = std::mem::take(&mut draft.lines);
+    let Some(line) = lines.get_mut(index) else {
+        draft.lines = lines;
+        return;
+    };
+    for ch in typed.chars() {
+        if !command_fits(line, ch.len_utf8()) {
+            break;
+        }
+        line.push(ch);
+    }
+    draft.lines = lines;
+}
+
+/// One Backspace's worth of work in the field under a keytop editor's cursor: 0 is the display name,
+/// 1..=six the line slots.
+fn erase_keytop_field(draft: &mut kuluu_render::input_mode::MacroEditDraft, field: usize) {
+    if field == 0 {
+        draft.name.pop();
+        return;
+    }
+    if let Some(line) = draft.lines.get_mut(field - 1) {
+        line.pop();
+    }
+}
+
+/// The characters one keystroke adds to a text field: a space, or every non-control character the key
+/// carries. A key that types nothing yields an empty string.
+fn typed_characters(key: &Key) -> String {
+    let mut typed = String::new();
+    match key {
+        Key::Space => typed.push(' '),
+        Key::Character(chars) => {
+            for ch in chars.chars() {
+                if !ch.is_control() {
+                    typed.push(ch);
+                }
+            }
+        }
+        _ => {}
+    }
+    typed
 }
 
 /// Consume one keystroke while a macro line editor buffer is open (bead
@@ -2377,6 +2951,14 @@ pub(super) fn handle_menu_key(
         return None;
     }
 
+    // …and a keytop editor takes them all too: its Prev/Next step the book's keytops, Up/Down move the
+    // caret between the name and the six command line slots, typing edits that slot (owner ruling
+    // 2026-10-24; see `handle_macro_edit_key`).
+    if matches!(top_kind, MenuKind::MacroEdit { .. }) {
+        handle_macro_edit_key(key, bindings, stack, scene_state);
+        return None;
+    }
+
     // The Map screen is a bespoke full-screen surface (full-screen map + a
     // top-right command submenu drilling into Markers/Wide Scan/Change Map),
     // with its own submode navigation, so it intercepts before generic routing.
@@ -2498,6 +3080,15 @@ pub(super) fn handle_menu_key(
         .is_some_and(|l| l.macro_book_name_edit.is_some())
     {
         macro_book_name_key(key, bindings, stack, scene_state);
+        return None;
+    }
+
+    // …and again for a `Change Name` draft in an open `mcresmn` box.
+    if stack
+        .current()
+        .is_some_and(|l| l.equip_set_name_edit.is_some())
+    {
+        equip_set_name_key(key, bindings, stack, scene_state);
         return None;
     }
 
@@ -4143,21 +4734,22 @@ mod menu_key_tests {
         );
     }
 
-    /// Drill law (bead kuluu-o9qt7.19.3): selecting a stored keytop row opens that
-    /// slot's editor as its own level — retail chained the long-form mcr*edit
-    /// windows off the palette/op-select handler (`FFXiMain.dll` retail-2026-09 RVA
-    /// 0x1A68C0; vault main_menu.md §34/§41).
+    /// Drill law as the owner ruled it (2026-10-24): a keytop of a book's band opens that keytop's own
+    /// editor window. That ruling retired the long-form line-editor chain, and with it `MacroSlotRow` -
+    /// nothing builds it any more, since the pager rows are books (`MacroBookRow`) and the band rows are
+    /// keytops. Only the drill is asserted here: a draft's contents come off his own files, which no test
+    /// should touch.
     #[test]
-    fn macro_select_row_drills_the_line_editor() {
+    fn a_band_keytop_drills_its_own_editor() {
         use kuluu_render::hud::menu::{DynamicMenuAction, DynamicMenuRow};
         let mut harness = Harness::new();
         let mut world = marker_world();
         let mut stack = MenuStack::root();
-        stack.push(MenuKind::MacroSelect);
+        stack.push(MenuKind::MacroPallet { book: 0 });
         harness.dynamic.rows = vec![DynamicMenuRow {
             tint: None,
-            label: "B1/5: /ra".to_string(),
-            action: DynamicMenuAction::MacroSlotRow { block: 0, index: 4 },
+            label: String::new(),
+            action: DynamicMenuAction::MacroKeytopRow { book: 0, slot: 4 },
         }];
         stack.current_mut().unwrap().cursor = 0;
         harness.key(
@@ -4168,7 +4760,7 @@ mod menu_key_tests {
         );
         assert_eq!(
             stack.current().map(|l| l.kind),
-            Some(MenuKind::MacroEditor { block: 0, index: 4 })
+            Some(MenuKind::MacroEdit { book: 0, slot: 4 })
         );
     }
 

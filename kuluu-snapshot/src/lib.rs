@@ -553,14 +553,16 @@ pub mod speed {
         move_speed_yps(packet_speed, mounted) / move_speed_yps(BASE_PACKET_SPEED, false)
     }
 
-    // research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp ControllableActor::AdjustAnalogKeyLength
-    // research/XIClient/src/XIClient/source/World/Actor/BaseActor.cpp BaseActor::GetWalkSpeed
-    pub const WALK_SPEED_DIVISOR: f32 = 3.0;
+    // The walker normalizes the intent vector, then scales displacement by its raw length:
+    // above 0.9 stays full, at or below a 0.05 dead zone zero, anything between two thirds.
+    // FFXiMain.dll retail-2026-10 VA 0x100A78D0 (record
+    // .agents/skills/retail-observe/references/2026-10-25-walker-speed-and-step.md).
+    pub const WALK_SPEED_DIVISOR: f32 = 1.5;
 
     /// The walk-lock multiplier on a run speed: the analog walk band's length.
     pub const WALK_SPEED_SCALE: f32 = 1.0 / WALK_SPEED_DIVISOR;
 
-    /// BaseActor::GetWalkSpeed: the raw packet speed over three, with neither the mount doubling
+    /// The walk-speed rate: two thirds of the raw packet speed, with neither the mount doubling
     /// nor the clamp `move_speed_yps` applies.
     pub const fn walk_speed_yps(packet_speed: u8) -> f32 {
         packet_speed as f32 * SPEED_TO_YPS / WALK_SPEED_DIVISOR

@@ -1,25 +1,22 @@
-//! Single-authority player walker (rebuild of the avian bridge + legacy sweep).
+//! Single-authority player walker: retail's mover machine over kuluu's zone
+//! data.
 //!
 //! One module owns horizontal slide, vertical position, falling, and dynamic
 //! obstacles. Geometry queries stay on `MzbCollisionGeometry` (kuluu-render):
-//! grid `cell_index`, column queries (`ground_raycast` / `ground_step`), and
-//! the triangle contact helpers. No ECS inside [`step`] — pure over its
-//! inputs so the test matrices can drive it headless.
+//! grid `cell_index`, column queries, and the triangle contact helpers. No ECS
+//! inside [`step`] — pure over its inputs so the test matrices can drive it
+//! headless.
 //!
-//! Layout: `consts` (every walker constant in one place), `field` (the ramp
-//! field + support probe), `sweep` (horizontal slide against walls),
-//! `obstacles` (doors + mobs, rebuilt every fixed tick), `step` (the tick
-//! itself), `debug` (FieldDebug resource + panel/gizmo plumbing).
+//! Layout: `consts` (every walker constant in one place), `sweep` (horizontal
+//! slide against walls), `obstacles` (doors + mobs, rebuilt every fixed tick),
+//! `step` (the tick itself).
 
 pub mod consts;
-pub mod debug;
-pub mod field;
 pub mod obstacles;
 pub mod step;
 pub mod sweep;
 
-#[cfg(test)]
-mod live_tests;
+pub use step::step;
 
 use bevy::prelude::*;
 
@@ -82,9 +79,13 @@ pub enum WalkMode {
     #[default]
     Stopped,
     Walking,
-    /// Falling: `vy` in yalms/s (negative = down), integrated by FallModel.
+    /// Falling. There is no velocity to carry: retail's fall is a fixed
+    /// per-frame step (`consts::FALL_STEP_FRAME_PROBE`, alternate
+    /// `FALL_STEP_FRAME_ALT`) scaled by one lean float, applied fresh every
+    /// frame from the first moment of the drop. `lean` is that float; neutral
+    /// posture is `consts::LEAN_DEFAULT_NEUTRAL`.
     Airborne {
-        vy: f32,
+        lean: f32,
     },
 }
 
@@ -94,10 +95,11 @@ pub struct Walker {
     pub mode: WalkMode,
     /// Retail's contact block against the actor currently being walked into.
     pub contact: ActorContact,
-    pub fall: consts::FallModel,
-    /// Slew-limited envelope gradient carried across ticks: a
-    /// wobbly estimate or a fast 180 can't spike g.
-    pub grad: bevy::math::Vec2,
+    /// The frame's published contact-probe vertical (yalms, up-positive like
+    /// `step`'s interior): retail keeps one scene-wide measurement word that its
+    /// integration units add straight into position vertical, so kuluu publishes
+    /// the same thing here - exactly what `step` added to Y this tick.
+    pub probe_measurement_y: f32,
 }
 
 /// One tick's outcome. `dx`/`dy` are the allowed horizontal displacement in
@@ -140,8 +142,8 @@ pub enum HorizontalOutcome {
     Noclip,
 }
 
-/// What this tick's vertical pass did. One per tick; the panel shows the last
-/// two and the live matrices in `live_tests` assert on it.
+/// What this tick's vertical pass did. One per tick; the test matrices assert
+/// on it.
 #[derive(Clone, Copy, Debug)]
 pub enum VerticalDecision {
     /// Idle tick: settled toward h0 at speed (or held when already there).
@@ -156,8 +158,10 @@ pub enum VerticalDecision {
     Flat,
     /// Dead band: no ramp in the window, snapped to h0 instantly.
     Poof { delta: f32 },
-    /// Gravity integrated; no landing this tick.
-    Airborne { vy: f32 },
+    /// No contact this frame: the fall step was applied (`delta_y` is this
+    /// tick's change of feet height, yalms up-positive so negative while
+    /// falling; zero on the entry tick) and no floor entered the swept band.
+    Airborne { delta_y: f32, lean: f32 },
     /// Was airborne; a floor entered the swept band and we landed on it.
     Landed,
     /// A rise was rejected for the tick (body top would push into geometry).
@@ -220,7 +224,9 @@ impl VerticalDecision {
             Self::Slope => "Slope".into(),
             Self::Flat => "Flat".into(),
             Self::Poof { delta } => format!("Poof d={:+.2}", delta),
-            Self::Airborne { vy } => format!("Air vy={:+.2}", vy),
+            Self::Airborne { delta_y, lean } => {
+                format!("Air dy={:+.2} lean={:+.1}", delta_y, lean)
+            }
             Self::Landed => "Landed".into(),
             Self::CeilingHold => "CeilHold".into(),
             Self::WallAhead => "WallAhead".into(),
@@ -229,21 +235,14 @@ impl VerticalDecision {
     }
 }
 
-/// One fixed tick of the walker (wire coordinates at the boundary; see
-/// `step.rs` for the pass order).
-pub use step::step;
-
 /// Registers the walker's resources and systems: the obstacle rebuild runs in
 /// FixedUpdate before dispatch, so the walker reads fresh obstacles (the slot
-/// the avian collider syncs used); the debug gizmo + snapshot systems run
-/// every frame.
+/// the avian collider syncs used).
 pub struct WalkerPlugin;
 
 impl Plugin for WalkerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<obstacles::ObstacleSet>();
-        app.init_resource::<debug::FieldDebug>();
-        app.init_resource::<debug::StairDebugZoneCache>();
         app.add_systems(
             FixedUpdate,
             (
@@ -252,13 +251,51 @@ impl Plugin for WalkerPlugin {
             )
                 .run_if(in_state(super::AppPhase::InGame)),
         );
-        app.add_systems(
-            Update,
-            debug::draw_walker_field_gizmos.run_if(in_state(super::AppPhase::InGame)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::consts::{CONTACT_BLOCK_TICKS, CONTACT_TICKS_PER_SEC};
+    use super::ActorContact;
+
+    /// field_5AC = 30 decremented by CheckTick() (60 / EffectiveFramerate)
+    /// is 30 sixtieths of a second regardless of our tick rate: the same
+    /// wall-clock window at 60 Hz and at 30 Hz.
+    #[test]
+    fn contact_budget_expires_after_retail_window() {
+        for hz in [60.0f32, 30.0] {
+            let dt = 1.0 / hz;
+            let mut c = ActorContact::default();
+            let mut blocked = 0u32;
+            while c.contact(1, dt) {
+                blocked += 1;
+            }
+            let secs = blocked as f32 * dt;
+            let want = CONTACT_BLOCK_TICKS / CONTACT_TICKS_PER_SEC;
+            assert!(
+                (secs - want).abs() <= dt + 1e-6,
+                "at {hz} Hz blocked {blocked} ticks ({secs} s), want ~{want} s"
+            );
+        }
+    }
+
+    /// Exhaust the budget against actor 1; a different nearest actor re-arms
+    /// it (what makes a crowd stutter rather than open up); separating
+    /// clears all three fields, so the next approach blocks again.
+    #[test]
+    fn contact_budget_rearms_on_target_change_and_clear() {
+        let dt = 1.0 / 60.0;
+        let mut c = ActorContact::default();
+        while c.contact(1, dt) {}
+        assert!(
+            !c.contact(1, dt),
+            "expired budget must keep passing through"
         );
-        app.add_systems(
-            Update,
-            debug::update_stair_debug_snapshot_system.run_if(in_state(super::AppPhase::InGame)),
-        );
+        assert!(c.contact(2, dt), "target switch must re-arm");
+        while c.contact(2, dt) {}
+        c.clear();
+        assert_eq!(c.target(), None);
+        assert!(c.contact(2, dt), "clear must re-arm the same actor");
     }
 }

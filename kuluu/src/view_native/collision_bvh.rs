@@ -5,8 +5,36 @@ use kuluu_render::dat_mzb::{DrawDistance, MzbCollisionGeometry};
 
 const LEAF_THRESHOLD: usize = 16;
 
+/// The zone's camera-facing collision tree, plus whether it currently covers the geometry that is
+/// loaded. Zone geometry streams in chunk by chunk, so between a change and the rebuilt tree there is no
+/// answer to give a query.
 #[derive(Resource, Default)]
-pub struct ZoneCollisionBvh(pub Option<CollisionBvh>);
+pub struct ZoneCollisionBvh {
+    pub tree: Option<CollisionBvh>,
+    pending: bool,
+}
+
+impl ZoneCollisionBvh {
+    /// The tree as it stands, ready or not. Readiness is the caller's question to ask before spending
+    /// an answer on a mover.
+    pub fn tree(&self) -> Option<&CollisionBvh> {
+        self.tree.as_ref()
+    }
+
+    /// True when a query may be answered: no geometry change is waiting and no build is in flight, so
+    /// the tree covers what is loaded. Retail asks the same question of every candidate before using it
+    /// (.agents/skills/retail-observe/references/2026-10-25-collision-query.md).
+    pub fn query_ready(&self) -> bool {
+        !self.pending
+    }
+
+    /// Drop the tree and mark it unready: what a zone change does, since what is loaded now was never in
+    /// this tree.
+    pub fn invalidate(&mut self) {
+        self.tree = None;
+        self.pending = true;
+    }
+}
 
 #[derive(Component)]
 pub struct CollisionBvh {
@@ -359,7 +387,8 @@ pub fn build_zone_collision_bvh_system(
         };
         let stale = *built_generation != *generation;
         *building = None;
-        zone_bvh.0 = Some(bvh);
+        zone_bvh.tree = Some(bvh);
+        zone_bvh.pending = stale;
         if stale {
             // Geometry moved on while the tree was being built, so this one does
             // not cover what is loaded now.
@@ -372,6 +401,7 @@ pub fn build_zone_collision_bvh_system(
     // geometry has been quiet before building once.
     if changed {
         *debounce = Some(0.0);
+        zone_bvh.pending = true;
         return;
     }
     let Some(quiet) = debounce.as_mut() else {
@@ -383,9 +413,11 @@ pub fn build_zone_collision_bvh_system(
     }
     *debounce = None;
     if geom.tri_count() == 0 {
-        zone_bvh.0 = None;
+        zone_bvh.tree = None;
+        zone_bvh.pending = false;
         return;
     }
+    zone_bvh.pending = true;
     let tris = geom.camera_triangles();
     let tri_count = tris.len();
     let task =
@@ -426,6 +458,27 @@ fn patch_leaf_offsets(nodes: &mut [BvhNode], idx: usize, offset: &mut u32) {
 mod bvh_tests {
     use super::*;
     use kuluu_render::dat_mzb::{build_collision_geometry, load_mzb_placed};
+
+    #[test]
+    fn a_zone_tree_awaiting_a_rebuild_refuses_to_answer() {
+        let mut zone = ZoneCollisionBvh::default();
+        assert!(
+            zone.query_ready(),
+            "nothing loaded and nothing pending is settled"
+        );
+        zone.tree = Some(CollisionBvh::from_world_triangles(vec![[
+            Vec3::ZERO,
+            Vec3::X * 10.0,
+            Vec3::Z * 10.0,
+        ]]));
+        assert!(zone.query_ready(), "a tree covering what is loaded answers");
+        zone.invalidate();
+        assert!(
+            !zone.query_ready(),
+            "after a zone change the tree covers nothing"
+        );
+        assert!(zone.tree().is_none());
+    }
 
     /// The chase camera pulls in on the first `ray_cast` hit between the player
     /// anchor and the camera, so a traversal that misses a surface brute force

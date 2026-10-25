@@ -53,6 +53,43 @@ fn primary_gamepad<'a>(
 pub struct PadStickIntent {
     pub movement: Vec2,
     pub camera: Vec2,
+    /// Retail's press edges for the movement stick, one per axis and sign.
+    pub presses: StickPresses,
+}
+
+/// Retail's pump turns an axis leaving its dead band into a digital press — one bit of a pair per axis and
+/// sign, ORed into the pressed fields — so a stick tap reaches the consumers that watch for presses and not
+/// only the ones reading axes
+/// (.agents/skills/retail-observe/references/2026-10-25-movement-input-actions.md). The band is plus or minus
+/// 63 counts around the neutral count of an axis whose counts run to 128.
+const STICK_PRESS_BAND: f32 = 63.0 / 128.0;
+
+/// One frame's worth of [`stick_press_edges`], in the same (right, forward) convention as
+/// [`PadStickIntent::movement`].
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StickPresses {
+    pub forward: bool,
+    pub backward: bool,
+    pub right: bool,
+    pub left: bool,
+}
+
+impl StickPresses {
+    pub fn any(self) -> bool {
+        self.forward || self.backward || self.right || self.left
+    }
+}
+
+/// Rising edges across [`STICK_PRESS_BAND`]: out this frame and in last frame, per axis and sign. A hold
+/// past the band presses once.
+pub fn stick_press_edges(prev: Vec2, now: Vec2) -> StickPresses {
+    let edge = |was: f32, is: f32, outside: fn(f32) -> bool| outside(is) && !outside(was);
+    StickPresses {
+        forward: edge(prev.y, now.y, |v| v > STICK_PRESS_BAND),
+        backward: edge(prev.y, now.y, |v| v < -STICK_PRESS_BAND),
+        right: edge(prev.x, now.x, |v| v > STICK_PRESS_BAND),
+        left: edge(prev.x, now.x, |v| v < -STICK_PRESS_BAND),
+    }
 }
 
 /// `Action`s the pad fired this frame, consumed by `handle_input_system`
@@ -266,19 +303,25 @@ pub(super) fn gamepad_stick_system(
     primary: Res<PrimaryGamepad>,
     pad_bindings: Res<PadBindings>,
     mut intent: ResMut<PadStickIntent>,
+    mut raw_prev: Local<Vec2>,
 ) {
     let Some(gamepad) = primary_gamepad(&primary, &gamepads) else {
         *intent = PadStickIntent::default();
+        *raw_prev = Vec2::ZERO;
         return;
     };
     let dz = pad_bindings.stick_deadzone;
+    let raw_move = gamepad.left_stick();
+    let presses = stick_press_edges(*raw_prev, raw_move);
+    *raw_prev = raw_move;
     let mut camera = apply_stick_deadzone(gamepad.right_stick(), dz);
     if pad_bindings.invert_camera_y {
         camera.y = -camera.y;
     }
     *intent = PadStickIntent {
-        movement: apply_stick_deadzone(gamepad.left_stick(), dz),
+        movement: apply_stick_deadzone(raw_move, dz),
         camera,
+        presses,
     };
 }
 
@@ -476,6 +519,28 @@ mod tests {
     use kuluu_render::keybinds::pad::STICK_DEADZONE_DEFAULT;
 
     const TEST_FRAME_DT: f32 = 1.0 / 60.0;
+
+    #[test]
+    fn stick_press_fires_once_as_an_axis_leaves_the_dead_band() {
+        let inside = Vec2::new(0.0, STICK_PRESS_BAND - 0.01);
+        assert!(
+            !stick_press_edges(Vec2::ZERO, inside).forward,
+            "inside the band is not a press"
+        );
+
+        let out = stick_press_edges(inside, Vec2::new(0.0, STICK_PRESS_BAND + 0.01));
+        assert!(out.forward, "leaving the band presses forward once");
+        assert!(!out.backward && !out.right && !out.left, "{out:?}");
+
+        let held = stick_press_edges(
+            Vec2::new(0.0, STICK_PRESS_BAND + 0.01),
+            Vec2::new(0.0, STICK_PRESS_BAND + 0.30),
+        );
+        assert!(!held.forward, "a hold past the band does not re-press");
+
+        let flick = stick_press_edges(Vec2::ZERO, Vec2::new(-(STICK_PRESS_BAND + 0.1), 0.0));
+        assert!(flick.left && !flick.right && flick.any());
+    }
 
     fn full_up() -> Vec2 {
         Vec2::new(0.0, 1.0)

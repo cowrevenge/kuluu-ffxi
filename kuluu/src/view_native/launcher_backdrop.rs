@@ -670,7 +670,7 @@ fn drive_backdrop_flight(
     mut fade: ResMut<BackdropFade>,
     mut cams: Query<&mut Transform, With<BackdropCamera>>,
 ) {
-    let Some(bvh) = zone_bvh.0.as_ref() else {
+    let Some(bvh) = zone_bvh.tree() else {
         flight.seated = false;
         return;
     };

@@ -249,6 +249,14 @@ pub struct MzbCollisionBlock {
     pub tri_sub_area: Vec<u32>,
     pub tri_lighting: Vec<Option<GroundLighting>>,
 
+    /// Per triangle, parallel to `indices.chunks(3)`: true when the face was
+    /// baked from a small dedicated placed mesh - an authored blocker object per
+    /// [`PROP_OBJECT_MAX_EXTENT_YAMLS`]. Prop faces answer every wall query and are never
+    /// step-band-suppressed; terrain-law faces (false or empty vector) skip the query only
+    /// when standing entirely within one follow word of the feet. Written by
+    /// [`build_collision_geometry`] alone.
+    pub tri_prop_blocker: Vec<bool>,
+
     /// Which shell [`Self::for_each_hit_in_column`] walks past. Retail suppresses
     /// at query time rather than by rebuilding the block —
     /// `CollisionManager::KO_CharaCollision` admits an object only while
@@ -380,15 +388,44 @@ pub const FLOOR_NORMAL_MIN: f32 = 0.708;
 /// NaN, which would silently make every triangle in the placement non-grounding.
 const NORMAL_MATRIX_MIN_DET: f32 = 1e-6;
 
-/// Tallest rise [`MzbCollisionGeometry::ground_step`] will climb in one tick.
+/// Tallest rise [`MzbCollisionGeometry::ground_step`] accepts under a column in
+/// one probe. Column-probe bound only - the wall sweep's riser rule is bounded
+/// by [`FOLLOW_WORD_YAMLS_PER_FRAME`], not this reach.
 ///
-/// Sized from the rise distribution over 120 lattice walks across Lower Jeuno
-/// (`zz-ground-walk` with `KULUU_RISE_HIST`): stairs and ramps are 77% of rises
-/// and all fall under 0.5, structural jumps between separate surfaces cluster at
-/// 1.75 and above, and 0.5..1.5 is a sparse trough. Set AT the top of the stair
-/// band: 1.0 (the old "double the riser" margin) let the walker climb flower
-/// pots and other sub-yalm props, which retail rejects.
+/// Authored kuluu constant, kept against record silence: the retail record states no maximum
+/// climb reach and no slope test on terrain (`.agents/skills/retail-observe/references/2026-10-25-collision-query.md`,
+/// its step-up section). 0.4 yalm predates the record and stays until a climb rule is actually
+/// established for columns; the wall side moved to the recorded follow-word bound because
+/// shipped-zone staircases measure taller than this (record sections "Step up" and
+/// "Shipped-zone step classes").
 pub const MAX_GROUND_STEP_UP: f32 = 0.4;
+
+/// Retail's one vertical rate bound per movement frame, the follow word: the same
+/// magnitude that steps a fall (`walker/consts.rs` carries it negated as the client's
+/// fall-step constant) also bounds any ground-follow rise, and it is what separates
+/// climbable terrain risers from authored walls in [`MzbCollisionBlock::nearest_wall_contact`] -
+/// a zone face whose top sits
+/// within one follow word of the feet cannot exceed what the
+/// vertical machine could follow that frame, so blocking it would fabricate a wall retail
+/// does not have (record `.agents/skills/retail-observe/references/2026-10-25-collision-query.md`,
+/// spec sections "Step up" and "Fall and landing (mover-probe re-read, 2026-10-25)": no rise
+/// cap exists on terrain; the follow word is the only vertical bound).
+pub const FOLLOW_WORD_YAMLS_PER_FRAME: f32 = 1.3;
+
+/// Maximum local bounding-box extent along every axis for a dedicated placed
+/// collision mesh to be an authored blocker object - kuluu's realization of the record's
+/// structural law that blocking belongs to separately registered shape candidates,
+/// never terrain faces (`.agents/skills/retail-observe/references/2026-10-25-collision-query.md`,
+/// spec sections "Face classification" and "Blocking belongs to other candidates", plus the
+/// placed-prop record `.agents/skills/retail-observe/references/2026-10-26-placed-prop-collision.md`).
+/// Measured over shipped zones 231, 234, 100 and 244 (record section "Shipped-zone step
+/// classes", 2026-10-25): every dedicated small blocker mesh - railings, fence panels,
+/// box props, placed repeatedly from ~x19 to ~x224 instances - fits inside ~1.6 yalm on all
+/// axes, while terrain chunk pieces that carry the shipped staircases (measured rise 0.5,
+/// run 1.0 at Northern San d'Oria) exceed this bound along a horizontal axis. Faces baked
+/// from submeshes fitting entirely within this bound always answer wall queries, never
+/// step-suppressed; faces from bigger meshes take the terrain law.
+pub const PROP_OBJECT_MAX_EXTENT_YAMLS: f32 = 1.75;
 
 /// f32 slack on the step-up reach boundary. The column ray is cast from a fixed
 /// high origin, so reported hit heights carry ~1e-4-yalm numerical noise at zone
@@ -788,12 +825,33 @@ pub fn build_collision_geometry(
     let mut tri_terrain: Vec<u8> = Vec::new();
     let mut tri_sub_area: Vec<u32> = Vec::new();
     let mut tri_lighting = Vec::new();
+    let mut tri_prop_blocker: Vec<bool> = Vec::new();
     let mut missing = 0usize;
+
+    // Authored-blocker identity per mesh, from the LOCAL bbox so every instance of a
+    // type carries it (see PROP_OBJECT_MAX_EXTENT_YAMLS for the measurements behind).
+    let prop_mesh: Vec<bool> = submeshes
+        .iter()
+        .map(|sub| {
+            let mut lo = Vec3::splat(f32::MAX);
+            let mut hi = Vec3::splat(f32::MIN);
+            for p in &sub.positions {
+                let p = Vec3::from_array(*p);
+                lo = lo.min(p);
+                hi = hi.max(p);
+            }
+            if !lo.is_finite() || sub.indices.is_empty() {
+                return false;
+            }
+            (hi - lo).max_element() <= PROP_OBJECT_MAX_EXTENT_YAMLS
+        })
+        .collect();
 
     for inst in instances {
         let Some(sub) = submeshes.get(inst.submesh_idx) else {
             continue;
         };
+        let is_prop = prop_mesh[inst.submesh_idx];
         let n_mat = Mat3::from_mat4(inst.bevy_transform.to_matrix());
         let n_mat = if n_mat.determinant().abs() > NORMAL_MATRIX_MIN_DET {
             n_mat.inverse().transpose()
@@ -823,6 +881,7 @@ pub fn build_collision_geometry(
             tri_terrain.push(sub.tri_terrain.get(t).copied().unwrap_or_default());
             tri_sub_area.push(inst.sub_area_link);
             tri_lighting.push(inst.lighting);
+            tri_prop_blocker.push(is_prop);
         }
     }
 
@@ -845,6 +904,7 @@ pub fn build_collision_geometry(
         tri_terrain,
         tri_sub_area,
         tri_lighting,
+        tri_prop_blocker,
         suppressed: None,
         source_file_id: file_id,
     }
@@ -3506,10 +3566,43 @@ pub(crate) mod ground_tests {
             tri_terrain: Vec::new(),
             tri_sub_area: Vec::new(),
             tri_lighting: Vec::new(),
+            tri_prop_blocker: Vec::new(),
             suppressed: None,
             cell_index: std::collections::HashMap::new(),
             source_file_id: None,
         }
+    }
+
+    #[test]
+    fn wall_query_bands_terrain_risers_and_props_answer_at_any_height() {
+        // The shipped staircase class (rise 0.5 measured in "Shipped-zone step
+        // classes", collision record): one wall-class quad standing half a yalm
+        // over the feet plane. Unflagged it is terrain law and must not answer -
+        // its top stands inside the follow-word band, so blocking would strand
+        // bodies on faces the vertical machine can climb. Flagged as an authored
+        // blocker object it answers at any height; the epsilon-beyond-band half
+        // keeps a taller prop solid.
+        let mut block = MzbCollisionBlock {
+            positions: vec![
+                Vec3::new(0.0, 0.0, -2.0),
+                Vec3::new(0.0, 0.5, -2.0),
+                Vec3::new(0.0, 0.5, 2.0),
+                Vec3::new(0.0, 0.0, 2.0),
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            tri_normals: vec![Vec3::new(-1.0, 0.0, 0.0); 2],
+            ..Default::default()
+        };
+        let probe_center = Vec3::new(0.25, 0.25, 0.0);
+        assert!(
+            block.nearest_wall_contact(probe_center, 0.4, 0.0).is_none(),
+            "a terrain riser inside the follow-word band answered a wall query"
+        );
+        block.tri_prop_blocker = vec![true, true];
+        let hit = block
+            .nearest_wall_contact(probe_center, 0.4, 0.0)
+            .expect("a flagged prop face was step-suppressed");
+        assert!(hit.0.sqrt() - 0.25 < 1e-4);
     }
 
     #[test]
@@ -4637,11 +4730,28 @@ impl MzbCollisionBlock {
     /// same as every collision query. Returns `(dist_sq, normal)` for the
     /// walker sweep's slide re-projection.
     ///
+    /// A terrain-law wall-class triangle standing entirely at or below `feet_y +
+    /// FOLLOW_WORD_YAMLS_PER_FRAME` never blocks: terrain does not gate the walk up it
+    /// (record `.agents/skills/retail-observe/references/2026-10-25-collision-query.md`,
+    /// spec sections "Step up" and "Shipped-zone step classes") — the column probes carry
+    /// the feet onto it, at the same follow-word reach this band uses, so a face this query
+    /// suppresses is exactly one the vertical machine can climb; faces standing above that
+    /// band block across their whole height, so wedge bases and high wall sections cannot be
+    /// walked into. Prop
+    /// faces ([`Self::tri_prop_blocker`] true) are authored blocker objects (the record's
+    /// separately registered shape candidates) and answer at any height.
+    ///
     /// Geometry-side half of the player walker: `point_tri_dist_sq` is its
     /// distance primitive; the sweep that consumes them lives in
     /// kuluu::view_native::walker.
-    pub fn nearest_wall_contact(&self, center: Vec3, r: f32) -> Option<(f32, Vec3)> {
+    pub fn nearest_wall_contact(&self, center: Vec3, r: f32, feet_y: f32) -> Option<(f32, Vec3)> {
         let r2 = r * r;
+        // Same epsilon the column probes use at this boundary (STEP_UP_REACH_EPSILON):
+        // a riser the support probe can accept must never block the sweep - the two
+        // systems disagreeing by float noise strands bodies at the tread edge. The reach is
+        // the recorded follow word, shared with the contact window in `walker/step.rs`, so
+        // suppression and climb acceptance agree by construction.
+        let steppable_ceiling = feet_y + FOLLOW_WORD_YAMLS_PER_FRAME + STEP_UP_REACH_EPSILON;
         let mut best: Option<(f32, Vec3)> = None;
         let mut test = |tri_id: usize| {
             if self.is_suppressed(tri_id) {
@@ -4664,6 +4774,11 @@ impl MzbCollisionBlock {
             let v0 = self.positions[self.indices[base] as usize];
             let v1 = self.positions[self.indices[base + 1] as usize];
             let v2 = self.positions[self.indices[base + 2] as usize];
+            if !self.tri_prop_blocker.get(tri_id).copied().unwrap_or(false)
+                && v0.y.max(v1.y).max(v2.y) <= steppable_ceiling
+            {
+                return;
+            }
             let d2 = point_tri_dist_sq(center, v0, v1, v2);
             if d2 >= r2 {
                 return;
@@ -4745,11 +4860,12 @@ impl MzbCollisionGeometry {
     /// Nearest wall-class triangle within `r` of `center`, across every loaded
     /// block (parent + active interior): the best of each block's
     /// [`MzbCollisionBlock::nearest_wall_contact`]. The walker sweep queries
-    /// its two body spheres through this.
-    pub fn nearest_wall_contact(&self, center: Vec3, r: f32) -> Option<(f32, Vec3)> {
+    /// its body sphere chain through this; `feet_y` selects which wall-class
+    /// faces are step-band risers.
+    pub fn nearest_wall_contact(&self, center: Vec3, r: f32, feet_y: f32) -> Option<(f32, Vec3)> {
         let mut best: Option<(f32, Vec3)> = None;
         for block in &self.slots {
-            if let Some(c) = block.nearest_wall_contact(center, r) {
+            if let Some(c) = block.nearest_wall_contact(center, r, feet_y) {
                 if best.is_none_or(|(bd, _)| c.0 < bd) {
                     best = Some(c);
                 }

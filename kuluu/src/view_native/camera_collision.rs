@@ -412,13 +412,15 @@ pub fn resolve_camera(
             };
             // Retail's wall test runs from just above the player's feet to the eye and keeps the eye
             // short of a hit (`FFXiMain.dll retail-2026-09` RVA 0x20651..0x20765).
-            if let Some(bvh) = zone_bvh.0.as_ref() {
-                let origin = player_pos + Vec3::Y * WALL_RAY_RISE;
-                let to_eye = view.eye - origin;
-                let reach = to_eye.length();
-                if reach > f32::EPSILON {
-                    if let Some(hit) = bvh.ray_cast(origin, to_eye / reach, reach) {
-                        view.eye = short_of_wall(origin, view.eye, hit);
+            if zone_bvh.query_ready() {
+                if let Some(bvh) = zone_bvh.tree() {
+                    let origin = player_pos + Vec3::Y * WALL_RAY_RISE;
+                    let to_eye = view.eye - origin;
+                    let reach = to_eye.length();
+                    if reach > f32::EPSILON {
+                        if let Some(hit) = bvh.ray_cast(origin, to_eye / reach, reach) {
+                            view.eye = short_of_wall(origin, view.eye, hit);
+                        }
                     }
                 }
             }
@@ -511,14 +513,26 @@ pub fn resolve_camera(
     let dir = Vec3::new(chase.yaw.sin() * cos_p, sin_p, chase.yaw.cos() * cos_p);
     let wanted = to_eye.length().max(min_h) / cos_p;
 
+    // Readiness gate: while zone geometry is streaming or its tree is being rebuilt there is no answer
+    // for this boom, so hold last frame's standoff instead of extending the eye through geometry that has
+    // not arrived. Retail refuses an unready candidate rather than answering from it
+    // (.agents/skills/retail-observe/references/2026-10-25-collision-query.md).
+    let ready = zone_bvh.query_ready();
     let mut hit_t = wanted;
-    if let Some(bvh) = zone_bvh.0.as_ref() {
-        if let Some(t) = bvh.ray_cast(pivot, dir, wanted) {
-            hit_t = t.min(hit_t);
+    if ready {
+        if let Some(bvh) = zone_bvh.tree() {
+            if let Some(t) = bvh.ray_cast(pivot, dir, wanted) {
+                hit_t = t.min(hit_t);
+            }
         }
     }
 
     let target = clamped_camera_distance(hit_t, wanted);
+    let target = if ready || chase.snap_to_anchor {
+        target
+    } else {
+        smoothed_effective.unwrap_or(target)
+    };
 
     let mut effective = if !settings.camera_spring || chase.snap_to_anchor {
         target
@@ -630,7 +644,7 @@ pub fn draw_camera_collision_debug(
     };
 
     if source.uses_mzb() {
-        if let Some((mn, mx)) = zone_bvh.0.as_ref().and_then(|b| b.root_aabb()) {
+        if let Some((mn, mx)) = zone_bvh.tree().and_then(|b| b.root_aabb()) {
             draw_aabb(mn, mx, Color::srgba(0.20, 0.80, 1.0, 0.55));
         }
     }

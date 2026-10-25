@@ -3175,7 +3175,7 @@ mod tests {
         let source = include_str!("./animation_test_scene.rs");
         let unlisted: Vec<&str> = source
             .split('"')
-            .filter(|token| token.starts_with("ANIMTEST_"))
+            .filter(|token| token.starts_with(concat!("ANIMTEST", "_")))
             .filter(|token| !ENV_KNOBS.iter().any(|(name, _)| name == token))
             .collect();
         assert!(

@@ -233,9 +233,49 @@ impl KeyBind {
     }
 }
 
+/// The mask width one `u64` gives the suppression bits; growing the action set past it needs a wider
+/// word, and [`Bindings::MASK_WIDTH_GUARD`] fails a test when that happens.
+pub const ACTION_MASK_BITS: usize = u64::BITS as usize;
+
+/// Retail's per-action suppression mask: one bit per action in front of every dispatcher lookup, so a
+/// set bit mutes that action for all consumers at once (rebinding and disabled contexts mute input
+/// without touching them) -
+/// `.agents/skills/retail-observe/references/2026-10-25-movement-input-actions.md`, spec section "Action
+/// dispatch: numbers in, signed unit float out". Kuluu carries the mask inside [`Bindings`] so every read
+/// path is gated by construction rather than each consumer remembering to ask.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct ActionMask {
+    bits: u64,
+}
+
+impl ActionMask {
+    /// The bit one action owns, positional in the variant order of [`Action`] - retail numbers its
+    /// actions the same way.
+    const fn bit(action: Action) -> u64 {
+        1u64 << (action as u32)
+    }
+
+    pub const NONE: Self = Self { bits: 0 };
+
+    /// Mute `action` for every consumer of it.
+    pub fn mute(&mut self, action: Action) {
+        self.bits |= Self::bit(action);
+    }
+
+    pub fn unmute(&mut self, action: Action) {
+        self.bits &= !Self::bit(action);
+    }
+
+    /// Whether `action` is muted.
+    pub const fn is_muted(&self, action: Action) -> bool {
+        (self.bits & Self::bit(action)) != 0
+    }
+}
+
 #[derive(Resource, Debug, Clone)]
 pub struct Bindings {
     map: BTreeMap<Action, KeyBind>,
+    mask: ActionMask,
 }
 
 impl Default for Bindings {
@@ -245,15 +285,21 @@ impl Default for Bindings {
 }
 
 impl Bindings {
+    /// The action set must stay inside one mask word; a new variant past [`ACTION_MASK_BITS`] has to
+    /// widen it rather than silently share a bit.
+    pub const MASK_WIDTH_GUARD: usize = ACTION_MASK_BITS;
+
     pub fn empty() -> Self {
         Self {
             map: BTreeMap::new(),
+            mask: ActionMask::NONE,
         }
     }
 
     pub fn from_pairs<I: IntoIterator<Item = (Action, KeyBind)>>(iter: I) -> Self {
         Self {
             map: iter.into_iter().collect(),
+            mask: ActionMask::NONE,
         }
     }
 
@@ -281,7 +327,25 @@ impl Bindings {
         self.map.is_empty()
     }
 
+    /// The mask half of the dispatcher's two gates: a muted action reads dead from here on, whatever
+    /// it is bound to.
+    pub fn action_muted(&self, action: Action) -> bool {
+        self.mask.is_muted(action)
+    }
+
+    /// Mute `action` for every consumer, keeping its binding so it can come back.
+    pub fn mute_action(&mut self, action: Action) {
+        self.mask.mute(action);
+    }
+
+    pub fn unmute_action(&mut self, action: Action) {
+        self.mask.unmute(action);
+    }
+
     pub fn pressed(&self, action: Action, keys: &ButtonInput<KeyCode>) -> bool {
+        if self.action_muted(action) {
+            return false;
+        }
         match self.map.get(&action) {
             Some(b) => keys.pressed(b.key) && b.mods.matches(keys),
             None => false,
@@ -289,6 +353,9 @@ impl Bindings {
     }
 
     pub fn just_pressed(&self, action: Action, keys: &ButtonInput<KeyCode>) -> bool {
+        if self.action_muted(action) {
+            return false;
+        }
         match self.map.get(&action) {
             Some(b) => keys.just_pressed(b.key) && b.mods.matches(keys),
             None => false,
@@ -296,6 +363,9 @@ impl Bindings {
     }
 
     pub fn matches_logical(&self, action: Action, key: &Key) -> bool {
+        if self.action_muted(action) {
+            return false;
+        }
         let Some(b) = self.map.get(&action) else {
             return false;
         };
@@ -309,9 +379,11 @@ impl Bindings {
     /// bind lives on a non-letter printable (e.g. CameraZoomIn/Out on
     /// Period/Comma), which `matches_logical` deliberately never resolves.
     pub fn matches_keycode(&self, action: Action, key_code: KeyCode) -> bool {
-        self.map
-            .get(&action)
-            .is_some_and(|b| b.mods == Modifiers::NONE && b.key == key_code)
+        !self.action_muted(action)
+            && self
+                .map
+                .get(&action)
+                .is_some_and(|b| b.mods == Modifiers::NONE && b.key == key_code)
     }
 
     /// Short display name for the key bound to `action`, for UI hints like
@@ -693,5 +765,57 @@ mod tests {
 
         assert_eq!(b.get(Action::RotateLeft), Some(KeyBind::new(KeyCode::KeyQ)));
         assert_eq!(b.get(Action::StrafeLeft), None);
+    }
+
+    /// The mask is one bit per action and the action set has to fit in it: a new variant past the last
+    /// bit would silently share another action's mute.
+    #[test]
+    fn every_action_has_its_own_mask_bit() {
+        assert!((Action::MoveForward as usize) < Bindings::MASK_WIDTH_GUARD);
+        assert!((Action::FishingCancel as usize) < Bindings::MASK_WIDTH_GUARD);
+        let mask = ActionMask::NONE;
+        assert!(!mask.is_muted(Action::MoveForward));
+    }
+
+    /// A muted action reads dead through every read path at once, keeps its binding, and mutes nothing
+    /// else; unmuting hands it straight back.
+    #[test]
+    fn a_muted_action_is_dead_for_every_consumer() {
+        let mut b = Bindings::empty();
+        b.insert(Action::MoveForward, KeyBind::new(KeyCode::KeyW));
+        b.insert(Action::RotateLeft, KeyBind::new(KeyCode::KeyQ));
+        let keys = pressed_keys(&[KeyCode::KeyW, KeyCode::KeyQ]);
+        assert!(b.pressed(Action::MoveForward, &keys));
+
+        b.mute_action(Action::MoveForward);
+        assert!(b.action_muted(Action::MoveForward));
+        assert!(
+            !b.pressed(Action::MoveForward, &keys),
+            "held read must go dead"
+        );
+        assert!(
+            !b.just_pressed(Action::MoveForward, &keys),
+            "edge read must go dead"
+        );
+        assert!(
+            !b.matches_logical(Action::MoveForward, &Key::Character("w".into())),
+            "logical nav read must go dead"
+        );
+        assert!(
+            !b.matches_keycode(Action::MoveForward, KeyCode::KeyW),
+            "physical read must go dead"
+        );
+        assert_eq!(
+            b.get(Action::MoveForward),
+            Some(KeyBind::new(KeyCode::KeyW)),
+            "muting keeps the binding"
+        );
+        assert!(
+            b.pressed(Action::RotateLeft, &keys),
+            "one mute must not reach another action"
+        );
+
+        b.unmute_action(Action::MoveForward);
+        assert!(b.pressed(Action::MoveForward, &keys));
     }
 }

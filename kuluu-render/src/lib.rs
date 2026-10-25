@@ -114,10 +114,10 @@ pub mod zone_texture;
 
 pub use camera::{
     camera_transition_system, chase_camera_system, configure_gizmo_render_layer,
-    first_person_eye_y, firstperson_camera_system, heading_for_yaw, nameplate_anchor,
-    self_visibility_for_camera_mode_system, spawn_camera, third_person_anchor_y,
-    toggle_camera_mode, yaw_for_heading, CameraMode, CameraTransition, ChaseCamera, OperatorCamera,
-    ViewFov, WheelZoom, ZoomArm, WORLD_GIZMO_LAYER,
+    first_person_eye_y, firstperson_camera_system, heading_change_term_rad, heading_for_yaw,
+    nameplate_anchor, self_visibility_for_camera_mode_system, spawn_camera, third_person_anchor_y,
+    toggle_camera_mode, yaw_for_heading, BodyFacingReference, CameraMode, CameraTransition,
+    ChaseCamera, OperatorCamera, ViewFov, WheelZoom, ZoomArm, WORLD_GIZMO_LAYER,
 };
 pub use components::{
     CurrRenderPos, EntityModel, HpIndicator, InGameEntity, IsSelf, LookComp, Nameplate,

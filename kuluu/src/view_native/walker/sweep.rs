@@ -1,10 +1,10 @@
 //! Body sweep: horizontal slide against MZB wall triangles.
 //!
 //! Ported from the legacy `dat_mzb::wall_clip_wire` core, minus its step lift,
-//! face_top validation, pending_floor and 45 degree wall test — vertical
-//! authority lives in `step.rs`, and a wall is anything with normal.y <
-//! FLOOR_COS (the 45 degree rule the geometry side already applies). Bevy xz
-//! throughout; y up.
+//! face_top validation and pending_floor — vertical authority lives in
+//! `step.rs`, and a wall is anything with normal.y < FLOOR_COS (the 45 degree
+//! rule the geometry side already applies) except faces standing entirely
+//! inside the step band, which are risers, not walls. Bevy xz throughout; y up.
 
 use bevy::math::{Vec2, Vec3};
 use kuluu_render::dat_mzb::MzbCollisionGeometry;
@@ -16,25 +16,30 @@ use super::consts::*;
 pub trait WallSource {
     /// Nearest wall-class triangle within `r` of `center`: `(dist_sq, normal)`
     /// for the slide re-projection (the 45 degree floor/wall rule lives in the
-    /// source — MZB's authored normals, door winding normals).
-    fn nearest_wall(&self, center: Vec3, r: f32) -> Option<(f32, Vec3)>;
+    /// source — MZB's authored normals, door winding normals). Faces standing
+    /// entirely at or below `feet_y + STEP_MAX` are step-band risers and do
+    /// not answer.
+    fn nearest_wall(&self, center: Vec3, r: f32, feet_y: f32) -> Option<(f32, Vec3)>;
 }
 
 impl WallSource for MzbCollisionGeometry {
-    fn nearest_wall(&self, center: Vec3, r: f32) -> Option<(f32, Vec3)> {
-        self.nearest_wall_contact(center, r)
+    fn nearest_wall(&self, center: Vec3, r: f32, feet_y: f32) -> Option<(f32, Vec3)> {
+        self.nearest_wall_contact(center, r, feet_y)
     }
 }
 
-/// Nearest wall contact for the two-sphere body standing at `xz` with feet at
-/// `feet_y`, across every loaded block. Nothing below feet + STEP_MAX is ever
-/// a horizontal obstacle: the lower sphere bottoms out exactly there.
+/// Nearest wall contact for the sphere-chain body standing at `xz` with feet
+/// at `feet_y`, across every loaded block. The chain covers feet to BODY_HEIGHT
+/// without gaps; low geometry is suppressed by the step-band riser rule in the
+/// source, not by leaving the body's shins unmeasured (a coverage gap under a
+/// tall face let the body walk into wedges and fall out underneath them).
 fn body_contact(src: &impl WallSource, xz: Vec2, feet_y: f32, r: f32) -> Option<(f32, Vec3)> {
     let lower = Vec3::new(xz.x, feet_y + LOWER_CENTER_OFFSET, xz.y);
+    let middle = Vec3::new(xz.x, feet_y + MIDDLE_CENTER_OFFSET, xz.y);
     let upper = Vec3::new(xz.x, feet_y + UPPER_CENTER_OFFSET, xz.y);
     let mut best: Option<(f32, Vec3)> = None;
-    for center in [lower, upper] {
-        if let Some(c) = src.nearest_wall(center, r) {
+    for center in [lower, middle, upper] {
+        if let Some(c) = src.nearest_wall(center, r, feet_y) {
             if best.is_none_or(|(bd, _)| c.0 < bd) {
                 best = Some(c);
             }
@@ -148,7 +153,8 @@ pub enum SweepExit {
 }
 
 /// Clamp a horizontal move against walls (MZB + closed doors): depenetrate an
-/// embedded start, then sweep + slide (Quake III `PM_SlideMove` clip planes).
+/// embedded start, then sweep + slide over the sphere chain (Quake III
+/// `PM_SlideMove` clip planes).
 /// A slide against a face keeps full speed along it. Returns the allowed
 /// displacement in bevy xz and which exit of the slide loop produced it;
 /// `feet_y` is the pre-move height (the body's vertical position does not

@@ -3,7 +3,10 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use crate::camera::{yaw_for_heading, CameraMode, ChaseCamera, ViewFov, WheelZoom};
+use crate::camera::{
+    yaw_for_heading, BodyFacingReference, CameraMode, CameraTransition, ChaseCamera, ViewFov,
+    WheelZoom,
+};
 use crate::input_mode::InputMode;
 use crate::snapshot::SceneState;
 
@@ -199,6 +202,7 @@ impl Plugin for MousePlugin {
             .init_resource::<CursorLockRequest>()
             .init_resource::<CameraMode>()
             .init_resource::<ChaseCamera>()
+            .init_resource::<BodyFacingReference>()
             // A host adding only this plugin gets both resources its systems use.
             .init_resource::<ViewFov>()
             .init_resource::<WheelZoom>()
@@ -470,14 +474,46 @@ pub fn apply_camera_inversion(
     )
 }
 
+/// Whether the control configuration that gates retail's body-facing reference consumer reads active.
+/// The record ties the consumer to one value of a menu-side control setting but leaves which user-facing
+/// setting that is among its material gaps (`.agents/skills/retail-observe/references/
+/// 2026-10-07-camera-orbit-channels.md`, "Priority, applicability and missing laws"), so kuluu's one
+/// control path reads active to carry the channel in the default input mode.
+pub const BODY_REFERENCE_CONTROL_CONFIG_ACTIVE: bool = true;
+
+/// The record's suppression of the direct manual angle (`.agents/skills/retail-observe/references/
+/// 2026-10-07-camera-orbit-channels.md`, "Manual orbit input"): while the follow-mode flag is set, any
+/// positive transition timer suppresses it, holding the orbit still across a camera cut.
+pub fn manual_orbit_suppressed(transition_secs_remaining: f32, follow_mode: bool) -> bool {
+    follow_mode && transition_secs_remaining > 0.0
+}
+
 /// Spend an aim axis on the rig through the orbit and eye-rise laws, inside the mode's pitch band.
-pub fn orbit_chase_by_axis(axis: Vec2, mode: CameraMode, chase: &mut ChaseCamera, delta_secs: f32) {
+/// The frame spends it in retail's order (camera record, "Body-facing reference channel"): the direct
+/// manual angle first, under its transition-timer suppression, then the separately gated body-reference
+/// correction through the same applier. Pitch is no part of either suppression.
+pub fn orbit_chase_by_axis(
+    axis: Vec2,
+    mode: CameraMode,
+    chase: &mut ChaseCamera,
+    delta_secs: f32,
+    body_facing: &BodyFacingReference,
+    transition_secs_remaining: f32,
+) {
     let rig = match mode {
         CameraMode::Chase => Some(chase.distance),
         CameraMode::FirstPerson => None,
     };
-    chase.yaw +=
-        camera_orbit_yaw_rate_rad_per_sec(axis.x, FOLLOW_ACTOR_FREE_RUN_DEFAULT, rig) * delta_secs;
+    if !manual_orbit_suppressed(transition_secs_remaining, FOLLOW_ACTOR_FREE_RUN_DEFAULT) {
+        chase.yaw += camera_orbit_yaw_rate_rad_per_sec(axis.x, FOLLOW_ACTOR_FREE_RUN_DEFAULT, rig)
+            * delta_secs;
+    }
+    chase.yaw += body_facing.post_orbit_angle(
+        BODY_REFERENCE_CONTROL_CONFIG_ACTIVE,
+        FOLLOW_ACTOR_FREE_RUN_DEFAULT,
+        axis.x,
+        transition_secs_remaining,
+    );
     let (lo, hi) = match mode {
         CameraMode::Chase => (ChaseCamera::PITCH_MIN, ChaseCamera::PITCH_MAX),
         CameraMode::FirstPerson => (ChaseCamera::FP_PITCH_MIN, ChaseCamera::FP_PITCH_MAX),
@@ -485,6 +521,15 @@ pub fn orbit_chase_by_axis(axis: Vec2, mode: CameraMode, chase: &mut ChaseCamera
     chase.pitch = (chase.pitch
         + camera_height_pitch_rate_rad_per_sec(axis.y, chase.pitch, rig) * delta_secs)
         .clamp(lo, hi);
+}
+
+/// The remaining seconds of the frame's camera cut, which retail reads as its positive transition
+/// timer (camera record, "Manual orbit input"): kuluu's one timed following-camera transition is the
+/// mode-toggle [`CameraTransition`]; with none running the timer reads zero.
+fn transition_secs_remaining(transition: Option<&CameraTransition>) -> f32 {
+    transition
+        .filter(|t| t.active)
+        .map_or(0.0, |t| (1.0 - t.t).max(0.0) * t.duration)
 }
 
 pub fn mouse_camera_system(
@@ -495,6 +540,8 @@ pub fn mouse_camera_system(
     move_intent: Option<Res<crate::combat_stance::SelfMoveIntent>>,
     inversion: Option<Res<RetailCameraInversion>>,
     edge_rotate: Option<Res<RetailEdgeRotate>>,
+    body_facing: Res<BodyFacingReference>,
+    transition: Option<Res<CameraTransition>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     time: Res<Time>,
     mut chase: ResMut<ChaseCamera>,
@@ -502,6 +549,7 @@ pub fn mouse_camera_system(
     mut prev_drag: Local<bool>,
 ) {
     let mode = *camera_mode;
+    let transition_left = transition_secs_remaining(transition.as_deref());
     // A held button is not enough: retail aims only once the drag has engaged (its mode byte reads 4
     // or 5), and then measures from the press anchor, not the screen centre. Which chain wins when a
     // frame engages both follows retail's mouse handler, which runs the right-button chain first
@@ -526,7 +574,14 @@ pub fn mouse_camera_system(
                 mode,
                 &inversion,
             );
-            orbit_chase_by_axis(axis, mode, &mut chase, time.delta_secs());
+            orbit_chase_by_axis(
+                axis,
+                mode,
+                &mut chase,
+                time.delta_secs(),
+                &body_facing,
+                transition_left,
+            );
         }
     }
     // Parked-cursor rotation is the other aim feed and never runs beside a drag: retail's edge
@@ -543,7 +598,14 @@ pub fn mouse_camera_system(
                 &inversion.as_deref().copied().unwrap_or_default(),
             );
             if axis != Vec2::ZERO {
-                orbit_chase_by_axis(axis, mode, &mut chase, time.delta_secs());
+                orbit_chase_by_axis(
+                    axis,
+                    mode,
+                    &mut chase,
+                    time.delta_secs(),
+                    &body_facing,
+                    transition_left,
+                );
             }
         }
     }
@@ -938,6 +1000,7 @@ mod tests {
             })
             .insert_resource(mode)
             .insert_resource(ChaseCamera::default())
+            .init_resource::<BodyFacingReference>()
             .add_systems(Update, mouse_camera_system);
             app.update();
             assert_eq!(
@@ -968,6 +1031,7 @@ mod tests {
         app.insert_resource(pointer)
             .insert_resource(CameraMode::Chase)
             .insert_resource(ChaseCamera::default())
+            .init_resource::<BodyFacingReference>()
             .add_systems(Update, mouse_camera_system);
         app
     }
@@ -1373,6 +1437,70 @@ mod tests {
             app.world().resource::<ChaseCamera>().yaw,
             ChaseCamera::default().yaw,
             "the drag axis is zero at its own press point, and the edge feed never joins it"
+        );
+    }
+
+    /// The suppression law over the direct manual angle: positive transition time answers only while
+    /// follow mode is set (camera record, "Manual orbit input").
+    #[test]
+    fn a_positive_transition_timer_suppresses_the_direct_angle_in_follow_mode() {
+        assert!(manual_orbit_suppressed(0.35, true));
+        assert!(!manual_orbit_suppressed(0.35, false));
+        assert!(!manual_orbit_suppressed(0.0, true));
+    }
+
+    /// One rig frame retail's way (`orbit_chase_by_axis`): the direct angle first and an active body
+    /// reference contributing its negated term after it; with transition time remaining both horizontal
+    /// contributions read zero, and a frame without manual action never spends the reference.
+    #[test]
+    fn an_active_body_reference_springs_back_after_the_direct_angle() {
+        let dt = 1.0 / 60.0;
+        let axis = Vec2::new(0.5, 0.0);
+        let direct = || {
+            camera_orbit_yaw_rate_rad_per_sec(
+                0.5,
+                FOLLOW_ACTOR_FREE_RUN_DEFAULT,
+                Some(ChaseCamera::default().distance),
+            ) * dt
+        };
+
+        let mut reference = BodyFacingReference::default();
+        let mut chase = ChaseCamera::default();
+        orbit_chase_by_axis(axis, CameraMode::Chase, &mut chase, dt, &reference, 0.0);
+        assert!(
+            (chase.yaw - direct()).abs() < 1e-6,
+            "no reference: the direct angle alone"
+        );
+
+        reference.apply_heading_change(-0.3);
+        let mut chase = ChaseCamera::default();
+        orbit_chase_by_axis(axis, CameraMode::Chase, &mut chase, dt, &reference, 0.0);
+        assert!(
+            (chase.yaw - (direct() + 0.3)).abs() < 1e-6,
+            "the negated term lands after the direct angle"
+        );
+
+        let mut chase = ChaseCamera::default();
+        orbit_chase_by_axis(axis, CameraMode::Chase, &mut chase, dt, &reference, 0.2);
+        assert_eq!(
+            chase.yaw,
+            ChaseCamera::default().yaw,
+            "transition time holds both"
+        );
+
+        let mut chase = ChaseCamera::default();
+        orbit_chase_by_axis(
+            Vec2::ZERO,
+            CameraMode::Chase,
+            &mut chase,
+            dt,
+            &reference,
+            0.0,
+        );
+        assert_eq!(
+            chase.yaw,
+            ChaseCamera::default().yaw,
+            "zero action never spends it"
         );
     }
 }

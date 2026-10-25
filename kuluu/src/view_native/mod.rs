@@ -461,10 +461,6 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     app.add_plugins(plugin_group);
     app_icon::install(&mut app);
     app.add_plugins(walker::WalkerPlugin);
-    app.add_systems(
-        Update,
-        walker::debug::sync_field_debug_enabled.run_if(in_state(AppPhase::InGame)),
-    );
 
     // Persisted audio settings: /debug Sound off (or /sound off) writes to
     // audio.json alongside graphics.json; restarts read it back here. CLI
@@ -1190,7 +1186,7 @@ fn drain_mzb_load_state(
     mzb_in_flight.tasks.clear();
     zone_geom_cache.entries.clear();
 
-    zone_collision_bvh.0 = None;
+    zone_collision_bvh.invalidate();
     if dropped_tasks > 0 || dropped_cache > 0 {
         tracing::info!(
             dropped_tasks,

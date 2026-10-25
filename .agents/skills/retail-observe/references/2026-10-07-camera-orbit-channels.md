@@ -26,6 +26,43 @@ Established: direct manual action and body-facing reference are distinct inputs;
 
 Material gaps: mapping the camera-follow flag and lateral-control flag to normal/default versus lock-on versus first-person gameplay; relating the observed mouse/control configuration to a user-facing retail camera-spring setting; exact menu/gamepad/mouse arbitration; producer order relative to camera update across an entire frame; reference behavior on zone/session transitions; lock release priority and lifetime; selected-device polarity as perceived through Kuluu mouse input; behavior in other client builds. The branch trace is insufficient to invent these policies or recommend the entire PR985 camera overhaul as merge-ready. Narrow manual-channel preservation can be tested independently, but broader mode or priority integration needs a separate applicable record and rendered runtime evidence.
 
+## Pull-in: a state-block query into the same engine (re-established 2026-10-25)
+
+Camera pull-in away from geometry is **not** a dedicated ray cast. The camera unit keeps its own eye
+state block (four floats) beside it, and each frame it:
+
+- reads that state block through the same controllable-object accessor movement uses, taking two points
+  or offsets out of the first three float slots plus one more from a second read of the same block;
+- shortens one of those values by one world unit;
+- copies the camera unit's own placement (a transform helper on an offset sub-object) so the test runs in
+  world space;
+- assembles a query descriptor on the stack and runs it through the **candidate-instance collision
+  engine** described in the movement-time collision record - same list of candidate shapes, same
+  per-shape test method;
+- shortens the eye position by distance work (multiply plus square root over hit distances) and merges
+  results with the element-wise vector helpers.
+
+Three further query invocations per camera frame go straight to the shared query handler with a caller
+buffer instead of going through the state block. So pull-in is one more consumer of one collision engine,
+reached from a state block rather than from the actor's own pose, and it shares the readiness gate
+(registered handle, resolved object, no pending word) that every candidate in that engine needs.
+
+The September addresses for the update unit and its sub-laws were re-verified on the 2026-10-05 build by
+behavior at each site (see the provenance addition below): nothing moved.
+
+## Kuluu delta
+
+| rule | kuluu symbol | status |
+| --- | --- | --- |
+| direct manual orbit angle is action times frame tick times a fixed rate constant | kuluu-render/src/mouse.rs CAMERA_ORBIT_RATE_RAD_PER_SEC | matches |
+| unscaled when the follow-mode flag is set, otherwise scaled by nominal-radius-over-distance | kuluu-render/src/mouse.rs camera_orbit_yaw_rate_rad_per_sec | matches |
+| orbit applier preserves horizontal radius and rebuilds eye from polar angle around focus | kuluu/src/view_native/camera_collision.rs rotate_about | matches |
+| positive transition timer suppresses the direct manual angle while follow mode is set | kuluu-render/src/mouse.rs manual_orbit_suppressed, applied by orbit_chase_by_axis with mouse_camera_system's remaining CameraTransition seconds; pinned by a_positive_transition_timer_suppresses_the_direct_angle_in_follow_mode | matches (closed 2026-10-25): positive remaining time zeroes the direct horizontal angle while kuluu's follow-mode flag reads set, pitch untouched. Producer scope: this record does not establish what sets retail's timer; kuluu produces it from its one timed following-camera transition (the mode-toggle CameraTransition) and reads zero otherwise |
+| pull-in reuses the movement collision engine through a camera-owned state block, shortening one value by one world unit before querying | kuluu/src/view_native/camera_collision.rs resolve_camera | differs: kuluu runs its own camera ray/leash resolution against zone geometry instead of sharing the walker's query |
+| eye shortened from hit distances with multiply and square root, merged by element-wise vector add | kuluu/src/view_native/locked_camera.rs short_of_wall | matches: same net law - move the eye to just short of the hit, one world unit of standoff built in (WALL_RAY_RISE) |
+| body-facing reference correction is applied only after the direct manual orbit within the frame | producer kuluu/src/view_native/input.rs StanceParams::body_facing (dispatch commits each turn via camera.rs heading_change_term_rad); state and gates kuluu-render/src/camera.rs BodyFacingReference post_orbit_angle; spent by kuluu-render/src/mouse.rs orbit_chase_by_axis after the direct angle, through the same polar applier | matches (closed 2026-10-25): the channel carries one stored heading-change term with its active flag (producer replaces or retires it, no timer), and all four record predicates gate the negative-of-term correction - control-config active, follow-mode set, reference active, manual horizontal action nonzero - with remaining transition time forcing it zero; pinned by an_active_body_reference_springs_back_after_the_direct_angle. Scope notes: retail ties the consumer to one value of a menu-side control setting this record leaves unmapped (its own gap list), so kuluu reads that predicate active via mouse.rs BODY_REFERENCE_CONTROL_CONFIG_ACTIVE as an authored choice; and follow_share's per-tick blend stays, since it smooths look point and distance - channels this record does not cover - while the new correction rides the angular channel after the manual orbit |
+| camera aim height consumes a movement-probe answer's vertical word directly: the unit probes with an id byte from its own accessor (skipping one sentinel value) and adds the second word of that answer straight into a local accumulator feeding aim height - no intermediate global on this path | kuluu/src/view_native/camera_collision.rs resolve_camera | differs: kuluu's camera derives height placement from its own ray resolution and never consumes walker-side probe answers (collision record, 2026-10-25 re-read section) |
+
 ## Provenance
 
 All code locations below are RVAs in retail-2026-09, image-baseVA0x10000000. Installed DLL SHA256 f2245d1c9d06e02c36624942483913f5120c0d40777fc1bb8703c6f4bda823e4. Verified raw unpacked .textSHA256 b55f8b4c730c00229e2febd1ea6a5efba29920e094fa565a3816b763c3d9cdc9. Installedpath `/Users/jon/Library/Application Support/kuluu/installs/retail/SquareEnix/FINAL FANTASY XI/FFXiMain.dll`; rawtext `/private/tmp/emission-retail.text.bin`. No process was executed or modified.
@@ -39,3 +76,26 @@ Reference setterRVA0x1e2f0 writes modeVA0x10456db0/referenceVA0x10456db4 fromarg
 Referenceconsumer0x1f14d calls0x25e050, which returns whether a configurationobject+0x44equals2.0x1f15a..0x1f188 requiremodegettertrue, modebyteactive, actionh at[esp+0x1c]nonzero.0x1f18e..0x1f19a negatesreference.0x1f19e repeats the same modegetter andjumps0x1f20a when true, thus bypassing0x1f1a8..0x1f208distance scaleonstablegetter.0x1f218..0x1f235 suppresses when modegettertrue andpositive transitiontimer.0x1f24e..0x1f255 callsorbitapplier. This entire block occurs afterdirectmanualorbit.
 
 Own saveddisassembly `camera-channels.asm`, `camera-consumer.asm`, `camera-facing-producer.asm`; no implementation writer may readthese mechanics. Source inlineRVAs and communityCameraManager/ControllableActor/InputActionDefinitions were locator hypotheses only. Conditional facts above were verified inactualretailbytes. No source edits, implementations, commits or external posts occurred.
+
+Re-verified on the 2026-10-05 build (generated C recompile per vendor/rea/INSTALL.md; provenance
+"generated C, build 2026-10-05"), all September addresses unchanged:
+
+- Update unit `f_1001ee60`, covering `0x1001ee60..0x10020b9f`; manual orbit block
+  `0x1001ef4a..0x1001f255` with action reads for 6 and 7, frame-tick call at the same site as before,
+  transition timer dword `[0x10456d7c]`, polar applier `f_1001ebb0` used twice. Orbit constant near
+  site `0x1001fcc8`. Recomp hook sites unchanged (build meta): cam_tick `0x1001fa55`, swing
+  `0x1001fcc8`, wait `0x1001fb9c`, cam1..4 `0x1001fd26`/`0x1001fd4c`/`0x1001fda5`/`0x1001fe36`, look1
+  `0x1001f5d9`, look2 `0x1002017c`.
+- Reference setter `f_1001e2f0` (mode `[0x10456db0]`, active `[0x10456db1]`, reference dword
+  `[0x10456db4]`), called six times from the walker; state block `0x10456d70..0x10456db4` with wait latch
+  at `0x10456d8c` and both-zoom flag at `0x10456d84`.
+- Camera unit receiver getter `f_10015250` = dword at `[[0x104568fc]+0x50]`; the manager global is written
+  by init functions `f_10001240`, `f_100013c0`, `f_10001520`.
+- Virtual-slot census inside the unit: accessor `[edx+0x1bc]` eighteen times, of which four sites form the
+  pull-in cluster `0x10020640..0x100206b4` (reads block floats at `[eax]`, `[eax+4]`, `[eax+8]` and a second
+  call's `[eax+0xC]`; subtraction of f32 unit constant `[0x1032961c]`; transform copy through `f_1001e760`
+  which does `add ecx,0x44; call f_10026eb0(out,in)`; stack query helpers `f_10026eb0` and `f_10028230` over
+  list head `[ebx+0x44]`). Query handler invocations at camera sites `0x1001f344`, `0x1001f4fa`,
+  `0x10020044`. Accessor semantics confirmed by the shared impl `f_100a4740` (`lea eax,[ecx+0x5FC]`).
+- Engine and record layout behind those calls: see the 2026-10-25 collision record (engine `f_1002c3e0`
+  to `f_1002c400`, readiness `f_10071060` with manager dword `[0x1047d128]`).

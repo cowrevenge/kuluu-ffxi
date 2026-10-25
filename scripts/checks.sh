@@ -7,7 +7,7 @@
 # the *exact* fmt/clippy invocation CI will, and vice versa.
 #
 # Usage: scripts/checks.sh <stage>...
-#   stage ∈ {harness, readme, comments, literals, records, fmt, clippy, style, contracts, install, test, enhanced, build, wasm, doc, sweep}
+#   stage ∈ {harness, readme, comments, literals, records, records-index, fmt, clippy, style, contracts, install, test, enhanced, build, wasm, doc, sweep}
 #   scripts/checks.sh harness comments fmt contracts clippy  # pre-push default
 #   COMMENTS_DIFF=staged scripts/checks.sh comments  # pre-commit (staged hunks)
 #   RECORDS_DIFF=staged scripts/checks.sh records    # pre-commit (staged observation records)
@@ -597,6 +597,36 @@ run_records() {
   python3 scripts/record-provenance.py $files
 }
 
+run_records_index() {
+  # INDEX.md under the observation records is generated from their Kuluu delta tables by
+  # scripts/records-index.py; a stale index miscounts which retail laws kuluu still lacks, so
+  # regenerating it here must change nothing (a missing file counts as a change).
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "checks: records-index - skipped (no python3)"
+    return 0
+  fi
+  local index=.agents/skills/retail-observe/references/INDEX.md before after
+  fingerprint() {
+    if [ -f "$index" ]; then
+      sha1sum < "$index" | cut -d' ' -f1
+    else
+      printf absent
+    fi
+  }
+  before=$(fingerprint)
+  if ! python3 scripts/records-index.py; then
+    echo "checks: records-index - regeneration failed" >&2
+    return 1
+  fi
+  after=$(fingerprint)
+  if [ "$before" != "$after" ]; then
+    echo "checks: records-index - INDEX.md was stale and has been regenerated ($before -> $after); commit the new index" >&2
+    git status --porcelain -- "$index" >&2
+    return 1
+  fi
+  return 0
+}
+
 run_contracts() {
   # Two entry points because the ferry/bootstrap contracts block on their own
   # current-thread runtime and must run outside an active tokio context; both
@@ -841,6 +871,7 @@ for stage in "$@"; do
     comments) echo "checks: comments"; run_comments ;;
     literals) echo "checks: literals"; run_literals ;;
     records) echo "checks: records"; run_records ;;
+    records-index) echo "checks: records-index"; run_records_index ;;
     harness) echo "checks: harness"; run_harness ;;
     contracts) echo "checks: contracts"; run_contracts ;;
     install) echo "checks: install"; run_install ;;

@@ -1,3 +1,5 @@
+SUPERSEDED 2026-10-24: see vendor/rea/INSTALL.md
+
 # Reading FFXiMain.dll through REA
 
 REA is a pinned Ghidra reader served over MCP, installed locally in `vendor/rea`

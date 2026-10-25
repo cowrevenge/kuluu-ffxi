@@ -101,3 +101,8 @@ archive/scratch/
 
 # Legacy local SDK/runtime downloads; the optional pinned SDK is vendor/DLSS.
 /Dlss_Nvidia_dll/
+
+# Generated C recompile of FFXiMain (research/xi-on-anything): regenerated from this machine's
+# install, never committed. Procedure: vendor/rea/INSTALL.md.
+research/xi-on-anything/generated/
+research/xi-on-anything/build/

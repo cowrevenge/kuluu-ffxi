@@ -62,8 +62,9 @@ which states each patch's reason. Grep `KULUU PATCH` for the changed lines.
 
 ## Local tools (git-ignored)
 
-`vendor/rea/` holds [REA](https://github.com/morluto/rea), a Ghidra reader
-served over MCP, for agents that read FFXiMain.dll. It is not a build input and
+(retired, see vendor/rea/INSTALL.md) `vendor/rea/` holds
+[REA](https://github.com/morluto/rea), a Ghidra reader served over MCP, for agents
+that read FFXiMain.dll. It is not a build input and
 nothing in the workspace depends on it. `scripts/install-rea.ps1` installs it
 on Windows; every download is pinned and SHA-256 checked:
 

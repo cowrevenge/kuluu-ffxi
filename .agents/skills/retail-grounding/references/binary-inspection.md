@@ -1,3 +1,5 @@
+SUPERSEDED 2026-10-24: see vendor/rea/INSTALL.md
+
 # Inspecting the installed retail client
 
 Use this route when the question needs the original computation or binary

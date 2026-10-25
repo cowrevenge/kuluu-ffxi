@@ -1,3 +1,4 @@
+# SUPERSEDED 2026-10-24: see vendor/rea/INSTALL.md
 #requires -Version 5.1
 <#
   Installs REA, the pinned Ghidra reader for agents, into vendor\rea (git-ignored).

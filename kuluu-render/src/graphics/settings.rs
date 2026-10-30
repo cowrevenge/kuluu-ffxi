@@ -1338,7 +1338,11 @@ impl GraphicsSettings {
                 faithful_shadow_receive: true,
                 character_shadow_cast: true,
                 zone_shadow_cast: true,
-                depth_of_field: true,
+                // Depth of field stays off at every tier (USER 2026-10-28: "kull is applying some
+                // kind of distance blurr, and blurr on movment.. get rid of that shit via toggle
+                // off defaults") - retail never blurs the world, so no preset turns it on any
+                // more; the Graphics > Depth of Field row is now the only way in.
+                depth_of_field: false,
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
                 enhanced_actor_arrival: false,
@@ -3332,14 +3336,16 @@ mod tests {
         assert_eq!(s, GraphicsSettings::for_preset(QualityPreset::Minimum));
     }
 
+    /// Toggle-off defaults (USER 2026-10-28): neither blurer ever arrives with a preset - depth
+    /// of field at NO tier (not even Maximum; retail never blurs the world, and its bokeh reads
+    /// as distance + motion blur), TAA never either. The Graphics rows stay the only way in.
     #[test]
-    fn presets_are_dof_and_taa_free_below_maximum() {
+    fn presets_are_dof_and_taa_free() {
         for &preset in PRESET_CYCLE {
             let s = GraphicsSettings::for_preset(preset);
-            assert_eq!(
-                s.depth_of_field,
-                preset == QualityPreset::Maximum,
-                "{preset:?} DoF drifted"
+            assert!(
+                !s.depth_of_field,
+                "{preset:?} must not turn on depth of field"
             );
             assert_ne!(
                 s.anti_aliasing,

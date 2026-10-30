@@ -9,12 +9,16 @@
 //!
 //! Layout: `consts` (every walker constant in one place), `sweep` (horizontal
 //! slide against walls), `obstacles` (doors + mobs, rebuilt every fixed tick),
-//! `step` (the tick itself).
+//! `step` (the tick itself), `debug` (stair-debug ring, gizmos and panel feed).
 
 pub mod consts;
+pub mod debug;
 pub mod obstacles;
 pub mod step;
 pub mod sweep;
+
+#[cfg(test)]
+mod tests_shipped_stairs;
 
 pub use step::step;
 
@@ -71,19 +75,23 @@ impl ActorContact {
     }
 }
 
-/// The walker's vertical mode. Driven by input: `want_len == 0` is
-/// Stopped this tick; Airborne persists until a landing, which picks the next
-/// mode from that tick's input.
+/// The walker's vertical mode - and while grounded, the readout of the
+/// player-state tracker (`in_motion`, `moved_last_tick`): Walking while
+/// travelling, Stopped when not (intent alone does not walk - pressed against
+/// geometry is also stopped). Airborne persists until a landing. Vertical
+/// resolution treats Walking and Stopped identically (neutral lean); only
+/// Airborne changes the law.
 #[derive(Clone, Copy, Debug, Default)]
 pub enum WalkMode {
     #[default]
     Stopped,
     Walking,
     /// Falling. There is no velocity to carry: retail's fall is a fixed
-    /// per-frame step (`consts::FALL_STEP_FRAME_PROBE`, alternate
-    /// `FALL_STEP_FRAME_ALT`) scaled by one lean float, applied fresh every
-    /// frame from the first moment of the drop. `lean` is that float; neutral
-    /// posture is `consts::LEAN_DEFAULT_NEUTRAL`.
+    /// per-frame step after the scene driver's rescale
+    /// (`consts::FALL_STEP_FRAME_INTEGRATED`, alternate `FALL_STEP_FRAME_ALT`
+    /// carried unscaled as sourced data) times one lean float, applied fresh
+    /// every frame from the first moment of the drop. `lean` is that float;
+    /// neutral posture is `consts::LEAN_DEFAULT_NEUTRAL`.
     Airborne {
         lean: f32,
     },
@@ -95,11 +103,39 @@ pub struct Walker {
     pub mode: WalkMode,
     /// Retail's contact block against the actor currently being walked into.
     pub contact: ActorContact,
+    /// Retail's step-up assist reach (`CollidableActor::field_F4`): how far this
+    /// walker will raise its own pose to mount ground inside the narrow-phase probe
+    /// window. Grows while moving, zeroes on a hard block - see `STEP_ASSIST_*` in
+    /// `step.rs`, where it is applied.
+    pub step_assist_yamls: f32,
+    /// False until this walker's first corrected pose, the frame retail clamps its
+    /// assist reach down to `STEP_ASSIST_FIRST_YAMLS`.
+    pub step_assist_started: bool,
     /// The frame's published contact-probe vertical (yalms, up-positive like
     /// `step`'s interior): retail keeps one scene-wide measurement word that its
     /// integration units add straight into position vertical, so kuluu publishes
     /// the same thing here - exactly what `step` added to Y this tick.
     pub probe_measurement_y: f32,
+    /// Player-state tracker (USER 2026-10-28): "YOU FALL in STOPPED.. you rise the slope
+    /// in WALKING". Walking means this tick carries movement intent AND the last tick
+    /// actually travelled (`moved_last_tick`) - pressed against geometry is also not
+    /// motion, so a blocked press never pre-climbs with look-ahead and rebounds. The
+    /// forward look-ahead lift lives or dies by this state: a stopped walker never
+    /// anticipates the edge in front of it and falls back to its own flat
+    /// (`step::motion_lookahead_lift`).
+    pub in_motion: bool,
+    /// Whether this walker's previous executed tick displaced at least half its
+    /// intended step (`step::STEP_MOVED_MIN_RATIO`): the travelling half of the
+    /// walk-vs-stopped tracker above. False by default, so look-ahead opens one tick
+    /// after a walk-out begins.
+    pub moved_last_tick: bool,
+    /// The look-ahead lift actually applied last grounded tick. A lift may start
+    /// instantly (its riser appeared ahead) but never collapse faster than one
+    /// uplift per frame: when the forward column crosses onto the higher patch
+    /// before this walker's own support catches up, an instant collapse drops the
+    /// pose by the whole lift in one tick - the W+D jitter class (USER 2026-10-28,
+    /// Bastok shell seam). See `LOOK_UNFADE_PER_FRAME_YAMLS` in `step.rs`.
+    pub look_latch: f32,
 }
 
 /// One tick's outcome. `dx`/`dy` are the allowed horizontal displacement in
@@ -243,12 +279,24 @@ pub struct WalkerPlugin;
 impl Plugin for WalkerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<obstacles::ObstacleSet>();
+        app.init_resource::<debug::FieldDebug>();
+        app.init_resource::<debug::StairDebugZoneCache>();
         app.add_systems(
             FixedUpdate,
             (
                 obstacles::snapshot_mob_block_radius.before(obstacles::rebuild_obstacles_system),
                 obstacles::rebuild_obstacles_system.before(super::input::dispatch_movement_system),
             )
+                .run_if(in_state(super::AppPhase::InGame)),
+        );
+        app.add_systems(
+            Update,
+            (
+                debug::sync_field_debug_enabled,
+                debug::draw_walker_field_gizmos,
+                debug::update_stair_debug_snapshot_system,
+            )
+                .chain()
                 .run_if(in_state(super::AppPhase::InGame)),
         );
     }

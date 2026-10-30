@@ -42,6 +42,13 @@ pub struct MenuHelpTitleBox;
 #[derive(Component)]
 pub struct MenuHelpRightPart;
 
+/// Split part three - the framed corner slot standing behind the pinned network S/R readout.
+/// It belongs to the top controls: drawn only while the band stands, riding its fade exactly
+/// like every other fill under it (USER 2026-10-28: "you need to draw the box whent he top
+/// helper bar IS present" - the send/receive system itself draws no box; this is theirs).
+#[derive(Component)]
+pub struct MenuNetSlotBox;
+
 /// The visible gap between the band's two split parts. Owner ruling 2026-10-20 (captures
 /// ur/29-31): this was 4, which parked the help segment's left frame at x=132 - 2 px off the
 /// column line (x=130) every detail window hangs on. 2 makes bar and windows share one line.
@@ -63,8 +70,17 @@ pub const BAR_HEIGHT: f32 = 26.0;
 /// title box exactly.
 pub const BAR_LEFT: f32 = crate::hud::status_panel::PERSONA_STATUS_LEFT;
 pub const BAR_TOP: f32 = crate::hud::status_panel::PERSONA_STATUS_TOP;
-/// The bar stops short of the network panel instead of running under it.
-const BAR_RIGHT: f32 = crate::hud::network_status::NET_PANEL_W + BAR_SEGMENT_GAP_PX;
+/// The band runs to the viewport corner; its third split part owns exactly the width this
+/// used to stop short by (the network slot), so the right part's edge sits where it always did.
+const BAR_RIGHT: f32 = 0.0;
+
+/// Corner-slot box sizes (`MenuNetSlotBox`). The width is the reserved netstat slot; the height
+/// matches every other bar segment exactly - one menu row (USER 2026-10-28, seeing the first cut:
+/// "the box and the separate arrow text are much too large.. the width is fine, but height should
+/// match the other bar and the inside to match fitting inside"). The S/R readout shrinks its own
+/// fonts to live inside this row instead of the box growing to the text.
+pub const NET_SLOT_BOX_W: f32 = crate::hud::network_status::NET_PANEL_W;
+const NET_SLOT_BOX_H: f32 = BAR_HEIGHT;
 /// Retail frames the active menu title in its own boxed segment, flush left.
 /// Owner ruling 2026-10-19: "the 'status' part of command bar needs to be a
 /// little shorter" — exactly `menu    persona`'s record width (112), so the box ends where the
@@ -205,6 +221,24 @@ pub fn spawn_menu_help_bar(mut commands: Commands) {
                     ));
                 });
             });
+            // Split part three - the framed corner slot behind the pinned network S/R readout.
+            // It carries no content of its own; the text floats above it from the network panel's
+            // higher z. Being a child of the band, `fade_menu_help_bar_in` captures and scales
+            // its fill exactly like the other parts: box present when the bar is, plain arrows
+            // and text alone once the bar fades out (USER 2026-10-28).
+            p.spawn((
+                MenuNetSlotBox,
+                Node {
+                    flex_shrink: 0.0,
+                    width: Val::Px(NET_SLOT_BOX_W),
+                    height: Val::Px(NET_SLOT_BOX_H),
+                    margin: UiRect::left(Val::Px(BAR_SEGMENT_GAP_PX)),
+                    border: UiRect::all(Val::Px(1.0)),
+                    ..default()
+                },
+                BackgroundColor(theme::FRAME_BG),
+                BorderColor::all(theme::FRAME_EDGE),
+            ));
         });
 }
 
@@ -1383,11 +1417,14 @@ mod tests {
         );
     }
 
-    /// The band is two framed parts — each with its own border and fill — the title box
-    /// left, the counter/help box right, split by a visible gap (owner ruling 2026-10-18:
+    /// The band is three framed parts — each with its own border and fill — the title box
+    /// left, the counter/help box right, and the corner slot box standing behind the pinned
+    /// network readout (the third joined 2026-10-28 so the S/R box belongs to the top controls
+    /// and rides their fade; USER: "you need to draw the box whent he top helper bar IS
+    /// present"). The left/right split ruling stands (owner 2026-10-18:
     /// "ensure the LEFT and RIGHT are split parts").
     #[test]
-    fn command_band_is_two_split_parts() {
+    fn command_band_is_three_split_parts() {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
         world.run_system_once(spawn_menu_help_bar).unwrap();
@@ -1447,6 +1484,24 @@ mod tests {
             "split by a visible gap: {:?}",
             right_node.margin.left
         );
+
+        // Third part - the corner slot box behind the network readout: framed and filled on
+        // its own like every other part, fixed at the reserved slot width so the right part's
+        // edge never moved, tall enough (with its lift) to stand around the S/R stack.
+        let (slot_node, slot_bg, slot_border) = world
+            .query_filtered::<(&Node, &BackgroundColor, &bevy::ui::BorderColor), With<MenuNetSlotBox>>()
+            .single(&world)
+            .expect("the corner slot box");
+        assert_eq!(
+            all_edges(slot_node),
+            [Val::Px(1.0); 4],
+            "the corner slot box frames itself"
+        );
+        assert_eq!(slot_bg.0, theme::FRAME_BG);
+        assert_eq!(slot_border.top, theme::FRAME_EDGE);
+        assert_eq!(slot_node.width, Val::Px(NET_SLOT_BOX_W));
+        assert_eq!(slot_node.flex_shrink, 0.0, "fixed at the slot width");
+        assert_eq!(slot_node.height, Val::Px(NET_SLOT_BOX_H));
     }
 
     #[test]

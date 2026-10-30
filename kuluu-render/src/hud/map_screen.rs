@@ -145,6 +145,11 @@ pub struct MapScreenState {
     pub viewed: Option<(u16, u8)>,
     /// Active text-entry buffer while naming a new marker.
     pub marker_entry: Option<String>,
+    /// Event script 0x8D OPEN_MAP_PROPS asked this window to hold its prop-label
+    /// layer at (`select`, `value`), the raw work-operand pair; stored from the
+    /// wire, drawn by nothing yet - kuluu has no prop labels
+    /// (`.agents/skills/retail-observe/references/2026-10-28-event-opcode-no-skip-pass.md`).
+    pub event_props_layer: Option<(i32, i32)>,
     /// Map zoom radius in yalms. `None` = fit the whole zone (the default, so
     /// the Map opens showing the full map, not a close crop); `Some(r)` = a
     /// player-centered window of half-span `r`. Independent of the minimap zoom.

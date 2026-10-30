@@ -142,11 +142,11 @@ pub fn update_target_action_menu(
         return;
     };
 
+    // The staleness guard is exactly "the server-side mount disappeared" - a menu opened
+    // while riding must survive every mount the snapshot still reports, chocobos included
+    // (the record's evidence row: `.agents/skills/retail-observe/references/2026-10-02-mounted-command-menu.md`).
     if matches!(&*mode, InputMode::TargetAction(state) if state.ctx.modern_mount)
-        && !matches!(
-            scene.snapshot.self_mount,
-            Some(kuluu_snapshot::Mount::Other { .. })
-        )
+        && scene.snapshot.self_mount.is_none()
     {
         *mode = InputMode::World;
     }
@@ -454,6 +454,40 @@ mod tests {
             .world_mut()
             .query_filtered::<&Node, With<TargetActionMenu>>();
         assert_eq!(panel.single(app.world()).unwrap().display, Display::None);
+    }
+
+    /// The record's evidence row is a rented CHOCOBO screenshot
+    /// (.agents/skills/retail-observe/references/2026-10-02-mounted-command-menu.md): riding one keeps the
+    /// mounted self menu up - the staleness guard answers only to the mount disappearing.
+    #[test]
+    fn a_riding_chocobo_keeps_its_self_menu_open() {
+        let mut app = App::new();
+        app.init_resource::<crate::snapshot::SceneState>()
+            .init_resource::<ActiveOverlay>()
+            .insert_resource(InputMode::TargetAction(TargetActionState::open(
+                TargetActionContext {
+                    modern_mount: true,
+                    ..default()
+                },
+            )))
+            .add_systems(Update, update_target_action_menu);
+        app.world_mut().spawn((TargetActionMenu, Node::default()));
+        app.world_mut()
+            .resource_mut::<crate::snapshot::SceneState>()
+            .snapshot
+            .self_mount = Some(kuluu_snapshot::Mount::Chocobo {
+            colour: kuluu_snapshot::ChocoboColour::Yellow,
+        });
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(
+            matches!(
+                app.world().resource::<InputMode>(),
+                InputMode::TargetAction(_)
+            ),
+            "a menu opened on a chocobo must not be closed by its own kind"
+        );
     }
 
     #[test]

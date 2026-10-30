@@ -58,6 +58,7 @@ pub mod party_frame;
 pub mod self_fishing;
 pub mod shop;
 pub mod stage_bar;
+pub mod stair_debug;
 pub mod status_panel;
 pub mod status_ribbon;
 pub mod style;
@@ -99,6 +100,13 @@ pub struct HudPanels {
     pub auto_enter_cs: bool,
     /// Graphics-debug panel (win/img/panel metrics). Runtime-only, no persist.
     pub graphics_debug: bool,
+    /// Stair-debug status panel: last two ticks' walker decisions, the probe
+    /// columns along the heading and the wall faces blocking them.
+    /// Runtime-only, no persist.
+    pub stair_debug: bool,
+    /// Draws the in-world stair gizmos (probe-column markers, feet/h0 bars,
+    /// move arrow, blocking-contact mark). Runtime-only, no persist.
+    pub stair_draw: bool,
     /// Nameplate Debug panel: last-two-tick pass state from the final in-view
     /// nameplate pass (extract/bind/draw counters + far-plate clip position).
     /// Runtime-only, no persist.
@@ -281,6 +289,7 @@ impl Plugin for HudPlugin {
         app.init_resource::<chat_panel::ChatActivityTracker>();
         app.init_resource::<mesh_debug::MeshHoverDebug>();
         app.init_resource::<graphics_debug::GraphicsDebugState>();
+        app.init_resource::<stair_debug::StairDebugSnapshot>();
         if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
             render_app.add_systems(
                 bevy::render::Render,
@@ -650,6 +659,7 @@ impl Plugin for HudPlugin {
                 graphics_debug::graphics_debug_metrics_system,
                 graphics_debug::update_graphics_debug_hud,
                 graphics_debug::update_nameplate_debug_hud,
+                stair_debug::update_stair_debug_hud,
             )
                 .chain(),
         );
@@ -693,6 +703,7 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
     );
     app.add_systems(schedule.clone(), graphics_debug::spawn_graphics_debug_hud);
     app.add_systems(schedule.clone(), graphics_debug::spawn_nameplate_debug_hud);
+    app.add_systems(schedule.clone(), stair_debug::spawn_stair_debug_hud);
 
     #[cfg(feature = "enhanced-buff-tooltips")]
     app.add_systems(schedule.clone(), status_ribbon::tooltip::spawn_buff_tooltip);

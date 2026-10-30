@@ -454,6 +454,14 @@ pub(super) fn confirm_target_action_at_cursor(
             }
             Some(InputMode::World)
         }
+        // The dig has no confirm in retail - the dispatch issues `/dig` straight
+        // (.agents/skills/retail-observe/references/2026-10-02-mounted-command-menu.md, literal at
+        // FFXiMain.dll retail-2026-09 VA 0x1012BACF); permission is the server's
+        // boundary.
+        TargetActionId::Dig => {
+            send_self_action(ActionKind::ChocoboDig, "dig", scene_state, entities, cmd_tx);
+            Some(InputMode::World)
+        }
         TargetActionId::Dismount => {
             state.confirm_dismount();
             None

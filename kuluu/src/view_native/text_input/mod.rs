@@ -468,10 +468,10 @@ pub(crate) fn text_input_system(
                 let self_char_id = scene_state.snapshot.self_char_id;
                 let usable_items = kuluu_render::hud::menu::any_usable_item(&scene_state.snapshot);
                 let can_fish = slash_writers.fishing_spot.0.is_ready();
-                let modern_mount = matches!(
-                    scene_state.snapshot.self_mount,
-                    Some(kuluu_snapshot::Mount::Other { .. })
-                );
+                // Any mount qualifies, chocobos included: the record's own evidence is a
+                // rented-chocobo screenshot showing the Chat / Dig / Dismount self menu
+                // (.agents/skills/retail-observe/references/2026-10-02-mounted-command-menu.md).
+                let modern_mount = scene_state.snapshot.self_mount.is_some();
                 if let Some(next) = handle_world_key(
                     &ev.logical_key,
                     &bindings,

@@ -909,6 +909,12 @@ const WAIST_MOTION_OFFSET: u32 = 2;
 /// the upper-body DAT.
 const WAIST_TYPE_MIN: u8 = 1;
 
+/// The rider-side file at offset 0 of each race's action-animation block — chair/desk motions
+/// and the `coff` get-off routine with its `ch1?`/`ch2?` Motions (census cited at the load site,
+/// `ffxi-dat/examples/zz-mount-clips.rs`). The named offsets beside it:
+/// `ACTION_ANIM_FISHING_OFFSET` (+0x01) and `ACTION_ANIM_MOUNT_OFFSET` (+0x05).
+const ACTION_ANIM_RIDER_OFFSET: u16 = 0x00;
+
 /// One DAT off the race's action-animation base.
 /// research/xim poc/Model.kt, PcModel.getMountAnimationResource.
 fn action_anim_dat(
@@ -1166,6 +1172,15 @@ pub fn load_pc_with_sub_model(
     ) {
         Some(bytes) => anim_dirs.push(ResourceDir::from_bytes(bytes)),
         None => warn!("load_pc race={race}: no fishing DAT — fishing poses unavailable"),
+    }
+
+    // The block's base file carries the chair/desk family (`ci*`, `chh?`) and, with it, the
+    // rider-side get-off routine `coff` and its `ch1?`/`ch2?` hop-down/land motions (census
+    // 2026-10-29: ffxi-dat/examples/zz-mount-clips.rs + dat-routine-stages over ROM/351/*).
+    // Nobody read this file before dismount staging needed it. Loaded last so first-writer-wins
+    // dedup keeps every gait and battle clip the race config already chose.
+    if let Some(bytes) = action_anim_dat(root, dll.as_deref(), race, ACTION_ANIM_RIDER_OFFSET) {
+        anim_dirs.push(ResourceDir::from_bytes(bytes));
     }
 
     let resolved_default;
@@ -5842,7 +5857,7 @@ pub fn tick_live_ffxi_actors(
                 hidden: true,
                 ..Default::default()
             });
-            let step = next_special_pose(&prev, e.status, e.animationsub);
+            let step = next_special_pose(&prev, e.status, e.animationsub, mounted);
             if let Some(routine) = step.triggered {
                 special_routines.push((e.id, routine));
             }
@@ -5997,9 +6012,19 @@ pub fn tick_live_ffxi_actors(
             continue;
         };
         let lookup = crate::scheduler_runtime::RoutineLookup::new().with_actor(actor.routines());
-        let Some(active) =
+        // The rider's get-off `coff` runs its authored timeline in full: the edge re-keys the
+        // model (the mounted flag rides the load key), so a pose pinned onto one actor dies with
+        // it - the Motion stages have to be dispatched per authored frame by the scheduler, which
+        // is how they reach whichever render actor stands on the entity when each stage fires
+        // (ffxi-actor/src/actor_state.rs DISMOUNT_ROUTINE; census over file 38603: ch1? at 0,
+        // ch2? at 104, under a 180-frame Movement+AnimationLock that also holds each stage until
+        // the next arrives). Everything else keeps the effects-only contract from above.
+        let dismount_rider = routine == ffxi_actor::actor_state::DISMOUNT_ROUTINE;
+        let Some(active) = (if dismount_rider {
+            crate::scheduler_runtime::ActiveScheduler::from_routine(&lookup, &routine)
+        } else {
             crate::scheduler_runtime::ActiveScheduler::effects_only(&lookup, &routine)
-        else {
+        }) else {
             continue;
         };
         // Insert-or-push like the other dispatchers (scheduler_runtime.rs enqueue_routine): a
@@ -10473,11 +10498,14 @@ mod pose_resolution_tests {
             anchor: usize,
             writers: usize,
         }
+        // Re-measured 2026-10-29 for the rider family joining every PC's set (loader law cited
+        // on `every_pc_carries_the_rider_family_inertly_and_only_riders_get_mount_variants`):
+        // the hand-keyed anchors gained exactly its four hop/seat pair writers, the rest moved not at all.
         const PINNED: [HeldWeapon; 9] = [
             HeldWeapon {
                 model_id: 1,
                 anchor: 3,
-                writers: 123,
+                writers: 127,
             },
             // The dagger-family anchor has no authored writer in either the race-wide block or its own stance
             // block on this install, so only the engaged handle re-parent gives it a transform.
@@ -10499,22 +10527,22 @@ mod pose_resolution_tests {
             HeldWeapon {
                 model_id: 9,
                 anchor: 6,
-                writers: 115,
+                writers: 119,
             },
             HeldWeapon {
                 model_id: 10,
                 anchor: 15,
-                writers: 93,
+                writers: 97,
             },
             HeldWeapon {
                 model_id: 11,
                 anchor: 13,
-                writers: 96,
+                writers: 100,
             },
             HeldWeapon {
                 model_id: 12,
                 anchor: 13,
-                writers: 96,
+                writers: 100,
             },
             HeldWeapon {
                 model_id: 13,
@@ -10824,24 +10852,103 @@ mod pose_resolution_tests {
         );
     }
 
-    /// The rider's seat clips live in a DAT that is only loaded while mounted.
+    /// Census guard for the mount side of the get-off: the yellow chocobo's own race config
+    /// ships `coff` as buck `ch1?` then the gallop-away `run?` authored with two loops - the
+    /// routine `FfxiRenderActor::start_mount_off_gallop` plays when its rider leaves (dump:
+    /// dat-routine-stages over file 55295, census 2026-10-29).
     #[test]
-    fn mounted_rider_gains_the_seat_clip_an_unmounted_one_lacks() {
+    fn the_yellow_chocobo_carries_its_own_off_gallop() {
         let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
         };
-        let has_chi = |mounted: bool| {
+        let mount = load_mount_race(
+            &root,
+            chocobo_race_for_colour(kuluu_snapshot::ChocoboColour::Yellow),
+        )
+        .expect("yellow chocobo race config");
+        let routines = mount.all_routines();
+        let coff = routines
+            .get(&DatId::from_str("coff"))
+            .expect("the chocobo ships its own get-off routine");
+        let motions: Vec<([u8; 4], u16, u16)> = coff
+            .stages
+            .iter()
+            .filter(|t| t.stage.kind == StageKind::Motion)
+            .map(|t| (t.stage.id, t.stage.duration_frames, t.stage.max_loops))
+            .collect();
+        assert_eq!(motions.len(), 2, "buck then gallop-away");
+        assert_eq!(&motions[0].0, b"ch1?");
+        assert_eq!(&motions[1].0, b"run?");
+        assert_eq!(
+            motions[1].2, 2,
+            "the gallop-away is authored as two loops of the run clip"
+        );
+
+        // And it survives the scheduler spine intact: flattened in Play mode with its frames and
+        // loop count, which is exactly what dispatch_motion_stages hands to playback.
+        let lookup = crate::scheduler_runtime::RoutineLookup::new().with_actor(&routines);
+        let active = crate::scheduler_runtime::ActiveScheduler::from_routine(&lookup, b"coff")
+            .expect("the mount's coff flattens in Play mode");
+        let flat: Vec<([u8; 4], u32, u16)> = active
+            .stages
+            .iter()
+            .filter(|t| t.stage.kind == StageKind::Motion)
+            .map(|t| (t.stage.id, t.frame, t.stage.max_loops))
+            .collect();
+        assert_eq!(
+            flat,
+            vec![(*b"ch1?", 0u32, 1u16), (*b"run?", 100u32, 2u16)],
+            "buck at frame 0, the two-loop gallop firing at its authored frame 100"
+        );
+    }
+
+    /// Loader law (USER 2026-10-29, dismount staging): the rider family (`ch?` hops, `chi?`
+    /// seats - the action-animation block's base file, census cited on
+    /// [`ffxi_actor::actor_state::DISMOUNT_ROUTINE`]) rides along for EVERY PC, because a
+    /// dismount is only known at the wire edge and fires on any actor, self or remote. What
+    /// must stay law: it rides inertly - no foot pose ever selects it - and the mount-pose
+    /// variants (the per-mount-type `{n}{un,lk,vb,hi}` block) remain mounted-only.
+    #[test]
+    fn every_pc_carries_the_rider_family_inertly_and_only_riders_get_mount_variants() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let clip_ids = |mounted: bool| -> Vec<String> {
             load_pc(&root, 1, mounted, &[], None, None, None)
                 .expect("load Hume M")
                 .animations
                 .iter()
-                .any(|a| a.id.as_str().starts_with("chi"))
+                .map(|a| a.id.as_str().to_string())
+                .collect()
         };
-        assert!(has_chi(true), "a rider must have chi? to sit on a chocobo");
+        let on_foot = clip_ids(false);
         assert!(
-            !has_chi(false),
-            "the seat clips must not be paid for by every PC on foot"
+            on_foot.iter().any(|s| s.starts_with("chi"))
+                && on_foot.iter().any(|s| s.starts_with("ch1")),
+            "a foot model must still carry the get-off family - dismount is unguessable"
         );
+        let mounted = clip_ids(true);
+        assert!(
+            mounted
+                .iter()
+                .any(|s| s.as_bytes().first().is_some_and(u8::is_ascii_digit)),
+            "the rider gains the per-mount-type gait variants block"
+        );
+        assert!(
+            !on_foot
+                .iter()
+                .any(|s| s.as_bytes().first().is_some_and(u8::is_ascii_digit)),
+            "mount-pose variants stay exclusive to riders - they are the part a foot PC must not pay for"
+        );
+
+        let Some(actor) = load_hume_m() else { return };
+        for pose in [PoseState::Idle, PoseState::Walk, PoseState::Run] {
+            let ids = resolved_clip_ids(&actor, &inputs_for_pose(pose, false));
+            assert!(
+                !ids.iter().any(|s| s.starts_with("ch")),
+                "a foot {pose:?} must never select the rider family, got {ids:?}"
+            );
+        }
     }
 
     #[test]
@@ -11664,6 +11771,77 @@ mod pose_resolution_tests {
                 .last_clip
                 .is_some_and(|c| c.parameterized_match(&settled)),
             "the settled stage owns the pose until the use resolves"
+        );
+    }
+
+    /// Retail-DAT guard (skips without an install): every PC's action-animation block ships a
+    /// rider-side get-off routine - `coff`, two chained Motion stages, hop-down and land on
+    /// 104- and 72-frame windows - and the HumeM motion set carries both clips (census
+    /// 2026-10-29: ffxi-dat/examples/zz-mount-clips.rs + dat-routine-stages over ROM/351/*).
+    #[test]
+    fn shipped_hume_carries_the_get_off_routine_and_both_hop_clips() {
+        let Some(loaded) = load_hume_m() else { return };
+        let routines = loaded.all_routines();
+        let coff = routines
+            .get(&DatId::from_str("coff"))
+            .expect("HumeM ships the rider-side get-off routine at the block base");
+        let motions: Vec<([u8; 4], u16)> = coff
+            .stages
+            .iter()
+            .filter(|t| t.stage.kind == StageKind::Motion)
+            .map(|t| (t.stage.id, t.stage.duration_frames))
+            .collect();
+        assert_eq!(motions.len(), 2, "hop-down then land");
+        assert_eq!(&motions[0].0, b"ch1?");
+        assert_eq!(&motions[1].0, b"ch2?");
+        for (id, _) in motions {
+            let want = DatId::from_name(&id);
+            assert!(
+                loaded
+                    .animations
+                    .iter()
+                    .any(|a| a.id.parameterized_match(&want)),
+                "the motion set carries {}",
+                want.as_str(),
+            );
+        }
+    }
+
+    /// Spine guard for the rider's get-off (USER 2026-10-29: read the DAT, play what it says):
+    /// `coff` must run on the scheduler as its authored timeline - Motion `ch1?` at frame 0 and
+    /// `ch2?` at 104 dispatched by the stage clock, under an AnimationLock that holds each stage
+    /// until the next arrives. The edge re-keys the model (the mounted flag rides the load key),
+    /// so a pose pinned onto one render actor dies with it; only per-frame stage dispatch reaches
+    /// whichever actor stands on the entity when each half plays.
+    #[test]
+    fn the_get_off_runs_as_its_authored_timeline_on_the_scheduler() {
+        let Some(loaded) = load_hume_m() else { return };
+        let routines = loaded.all_routines();
+        let lookup = crate::scheduler_runtime::RoutineLookup::new().with_actor(&routines);
+        let active = crate::scheduler_runtime::ActiveScheduler::from_routine(&lookup, b"coff")
+            .expect("the rider model's coff flattens in Play mode");
+        let motions: Vec<([u8; 4], u32)> = active
+            .stages
+            .iter()
+            .filter(|t| t.stage.kind == StageKind::Motion)
+            .map(|t| (t.stage.id, t.frame))
+            .collect();
+        assert_eq!(
+            motions,
+            vec![(*b"ch1?", 0u32), (*b"ch2?", 104u32)],
+            "hop-down at frame 0, land at 104 - the authored order and spacing"
+        );
+        let mut holder = crate::scheduler_runtime::ActiveSchedulers::one(active);
+        assert!(holder.dismount_settled(), "keys held on the first frame");
+        holder.routines_mut()[0].elapsed += 90.0 / crate::scheduler_runtime::ROUTINE_FPS;
+        assert!(
+            holder.dismount_settled(),
+            "mid-flight, inside the authored 180-frame MovementLock"
+        );
+        holder.routines_mut()[0].elapsed += 120.0 / crate::scheduler_runtime::ROUTINE_FPS;
+        assert!(
+            !holder.dismount_settled(),
+            "past both authored windows the lock has lapsed and so do the keys"
         );
     }
 

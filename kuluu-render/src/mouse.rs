@@ -488,6 +488,59 @@ pub fn manual_orbit_suppressed(transition_secs_remaining: f32, follow_mode: bool
     follow_mode && transition_secs_remaining > 0.0
 }
 
+/// Retail's followed-camera update does not let one-frame manual yaw reach the view as-is. Alongside
+/// the direct angle it keeps a pending accumulator: after each polar-applier call the frame adds
+/// `action6 × frame-tick × nought-point-one-oh-six-six-six` (float `[0x1032a3e4]`, build 2026-10-05, read from
+/// the unpacked image) into `[obj+0x48]`, and while that pending angle stands against nought the update
+/// latches the value **ten** (register `ebp` loaded at `0x1001f014`) into camera state dword `[0x10456d74]`
+/// (`f_1001ee60`, sites `0x1001f0f7..0x1001f14d`; the pair `[obj+0x48]`/`[obj+0x54]` is then consumed against
+/// threshold global `[0x10456d78]` at `0x1001fea4..0x1001fee5`). The apply semantics of that pair are not
+/// resolved; what the playtest establishes (user, retail 2026-10-27) is the visible law: rapid alternating
+/// keyboard ←/→ taps - each a fresh press cycle inside the latch window - move retail's camera not at all,
+/// while kuluu applied every tap instantly and jackhammered.
+///
+/// Kuluu reproduces that observed law on its manual yaw press channel with a dwell of the same ten
+/// frame ticks: angles from a press cycle apply only once it has been held continuously through the
+/// window. The window length is the recorded latch value at kuluu's standing camera-tick measure
+/// ([`CAMERA_FRAME_TICK_SECS`]); the internal pending/decay mechanism stays retail's.
+pub const ORBIT_TAP_LATCH_FRAME_TICKS: f32 = 10.0;
+
+/// The camera unit's frame tick, one sixtieth of a second - kuluu's standing measure for retail's
+/// `f_10014cf0` multiplier; [`CAMERA_ORBIT_RATE_RAD_PER_SEC`] converts by the same factor.
+pub const CAMERA_FRAME_TICK_SECS: f32 = 1.0 / 60.0;
+
+/// How long a manual yaw press cycle must be held continuously before its angles reach the view:
+/// [`ORBIT_TAP_LATCH_FRAME_TICKS`] camera frame ticks (a sixth of a second).
+pub const ORBIT_TAP_DWELL_SECS: f32 = ORBIT_TAP_LATCH_FRAME_TICKS * CAMERA_FRAME_TICK_SECS;
+
+/// One manual-yaw press cycle's dwell memory ([`ORBIT_TAP_DWELL_SECS`] above for the law and its
+/// evidence). Keyboard and pad axes share it - retail feeds both devices into the one action6 channel,
+/// so a stick flick-tap is gated exactly like a key tap. Mouse drag does not pass through here: that
+/// chain gates earlier, on the button's engagement machine (`MousePointer::left_dragged`).
+#[derive(Default, Clone)]
+pub struct OrbitKeyDwell {
+    held_secs: f32,
+}
+
+impl OrbitKeyDwell {
+    /// Float slop on the press-clock comparison alone: `held_secs` accumulates frame deltas by addition,
+    /// ten of which need not land bit-exactly on the window computed as a product. A frame short of the
+    /// window sits a whole delta away (a sixtyth of a second), far beyond this epsilon.
+    const COMPARE_EPS_SECS: f32 = 1e-6;
+
+    /// Whether this frame's manual yaw may reach the view. Advances the press-cycle clock while any
+    /// manual yaw input is held; release resets it. A direction flip inside one still-held cycle does
+    /// not restart the dwell - retail's latch rides the action channel, not its sign.
+    pub fn allow(&mut self, held_now: bool, delta_secs: f32) -> bool {
+        if !held_now {
+            self.held_secs = 0.0;
+            return false;
+        }
+        self.held_secs += delta_secs;
+        self.held_secs >= ORBIT_TAP_DWELL_SECS - Self::COMPARE_EPS_SECS
+    }
+}
+
 /// Spend an aim axis on the rig through the orbit and eye-rise laws, inside the mode's pitch band.
 /// The frame spends it in retail's order (camera record, "Body-facing reference channel"): the direct
 /// manual angle first, under its transition-timer suppression, then the separately gated body-reference
@@ -1447,6 +1500,79 @@ mod tests {
         assert!(manual_orbit_suppressed(0.35, true));
         assert!(!manual_orbit_suppressed(0.35, false));
         assert!(!manual_orbit_suppressed(0.0, true));
+    }
+
+    #[test]
+    fn the_latch_window_is_the_recorded_ten_camera_frame_ticks() {
+        // Latch value ten at f_1001ee60 site 0x1001f141 (pending angle standing against nought);
+        // kuluu's camera-tick measure is one sixtieth of a second.
+        assert_eq!(ORBIT_TAP_LATCH_FRAME_TICKS, 10.0);
+        assert!((ORBIT_TAP_DWELL_SECS - 10.0 / 60.0).abs() < 1e-7);
+    }
+
+    #[test]
+    fn rapid_alternating_yaw_taps_below_the_latch_apply_nothing() {
+        // The user's retail playtest of 2026-10-27: clicking ←/→ rapidly does not move the view. Eight
+        // press cycles of two frames each - shorter than the ten-frame latch every time - must open the
+        // gate never, so every tap contributes exactly zero angle.
+        let mut dwell = OrbitKeyDwell::default();
+        let dt = 1.0 / 60.0;
+        for _ in 0..8 {
+            for held in [true, true, false] {
+                assert!(
+                    !dwell.allow(held, dt),
+                    "a tap cycle under the latch window opened the gate"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_press_held_through_the_latch_opens_on_the_tenth_frame_and_stays_open() {
+        let mut dwell = OrbitKeyDwell::default();
+        let dt = 1.0 / 60.0;
+        let mut opened_at = None;
+        for frame in 1..=25 {
+            if dwell.allow(true, dt) && opened_at.is_none() {
+                opened_at = Some(frame);
+            }
+        }
+        assert_eq!(
+            opened_at,
+            Some(10),
+            "the gate must open on the tenth held frame and not before"
+        );
+    }
+
+    #[test]
+    fn a_release_restarts_the_latch() {
+        let mut dwell = OrbitKeyDwell::default();
+        let dt = 1.0 / 60.0;
+        // Warm one press cycle through its own dwell first: frames 1-9 of a fresh cycle are shut by
+        // construction, so only require the gate to stand open once past the window.
+        let mut opened = false;
+        for _ in 0..12 {
+            opened |= dwell.allow(true, dt);
+        }
+        assert!(opened, "a twelve-frame hold never opened the gate");
+        assert!(
+            dwell.allow(true, dt),
+            "an open cycle must stay open frame to frame"
+        );
+        assert!(
+            !dwell.allow(false, dt),
+            "a released key must not hold the gate open"
+        );
+        for frame in 1..=9 {
+            assert!(
+                !dwell.allow(true, dt),
+                "the fresh press cycle opened early at frame {frame}"
+            );
+        }
+        assert!(
+            dwell.allow(true, dt),
+            "the fresh press cycle never opened on frame 10"
+        );
     }
 
     /// One rig frame retail's way (`orbit_chase_by_axis`): the direct angle first and an active body

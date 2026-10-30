@@ -480,6 +480,14 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                 .after(combat_stance::predict_entities_system)
                 .after(scene::self_visual_yaw_system),
         );
+        // The departing mount stands free of the pin (its own last spot) and plays its
+        // authored get-off gallop; it only needs to run after the pose pass that advances
+        // the one-shot chain so `done` lands the frame the windows end.
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(
+            Update,
+            scene::drive_mount_departure_system.after(scene::pin_mount_actors_system),
+        );
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(
             Update,

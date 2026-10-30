@@ -1035,6 +1035,13 @@ pub fn controls_rows(bindings: &crate::keybinds::Bindings) -> Vec<DynamicMenuRow
 pub const DEBUG_PERF: &str = "Perf";
 pub const DEBUG_TARGET_CYCLE: &str = "Target Cycle";
 pub const DEBUG_MESH: &str = "Mesh Debug";
+/// Stair-climber gizmo row: [on] draws the walker's probe-column markers,
+/// feet/h0 bars and blocking-contact marks in-world. Default off.
+pub const DEBUG_STAIR_DRAW: &str = "Draw Stair Climber";
+/// Stair-status panel row: [on] shows the walker's last two decisions, the
+/// probe columns along the heading and wall-face identities top-left.
+/// Default off.
+pub const DEBUG_STAIR_STATUS: &str = "Show Stair Status";
 pub const DEBUG_NET_STATUS: &str = "Net Status";
 pub const DEBUG_NOCLIP: &str = "NoClip";
 /// Enhanced build only: forces the retail weapon draw/sheathe movement hold
@@ -1203,6 +1210,8 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_PERF,
     DEBUG_TARGET_CYCLE,
     DEBUG_MESH,
+    DEBUG_STAIR_DRAW,
+    DEBUG_STAIR_STATUS,
     DEBUG_NET_STATUS,
     DEBUG_NOCLIP,
     #[cfg(feature = "enhanced-engage-move-lock-off")]
@@ -12955,6 +12964,8 @@ pub fn debug_panel_state(
         DEBUG_PERF => panels.perf,
         DEBUG_TARGET_CYCLE => panels.target_cycle,
         DEBUG_MESH => panels.mesh_debug,
+        DEBUG_STAIR_DRAW => panels.stair_draw,
+        DEBUG_STAIR_STATUS => panels.stair_debug,
         DEBUG_NOCLIP => panels.noclip,
         #[cfg(feature = "enhanced-engage-move-lock-off")]
         DEBUG_ENGAGE_ANIM_LOCK => panels.engage_anim_lock,

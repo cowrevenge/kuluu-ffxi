@@ -33,6 +33,22 @@ pub const UPPER_CENTER_OFFSET: f32 = BODY_HEIGHT - BODY_RADIUS;
 /// Sweep: slide re-projection passes per tick (wall, then crease).
 pub const SLIDE_ITERATIONS: usize = 3;
 
+/// Minimum approach cosine for a contact to count as moving INTO the face in
+/// `sweep::body_sweep`. Kuluu-authored numerical guard, not a retail number: the sweep's own
+/// invariant is that only an opposing face stops it - "grazes and partings pass through"
+/// (sweep.rs). After one clip plane the tangential velocity carries dot(noise) ~1e-9 against
+/// the same face; at exactly-parallel travel a wall whose authored XZ-normal is not perpendicular
+/// to travel direction (every non-axis-aligned wall: the shipped Bastok bastion faces
+/// n=(-0.945,+0.319,-0.072) lean 0.076 of the normal along the wall's run - DAT 334 tri 17851,
+/// `kuluu-render/tests/mzb_bastok_wall_slide_dump.rs`) decides catch-vs-slide by float sign: a
+/// resting pose touching a face at standoff sits inside r_eff, so an unscaled approach test
+/// fires on noise alone, the bisection collapses to t~0 every tick, and the body creeps along
+/// at ~1e-5/tick ("caught on walls, should be sliding", 2026-10-27 report). Below this approach
+/// fraction a contact passes; real shallow approaches still stop via the pinch term, whose
+/// penetration slop accumulates as the body closes. One part in a thousand of head-on:
+/// shallower than ~0.06 degrees, i.e., grazing only.
+pub const INTO_FACE_APPROACH_SLOP: f32 = 1e-3;
+
 /// Penetration depth at which a face we are NOT moving into still blocks the
 /// sweep. Two faces pinching a gap narrower than the body each read "parallel"
 /// to the motion individually, but together they must stop us (corridor pass
@@ -110,6 +126,25 @@ pub const LEAN_DEFAULT_NEUTRAL: f32 = 1.0;
 /// The margin wrapper's constant: the record states it as 0.8 times the length
 /// of the answer block's measured pair.
 pub const PROBE_MARGIN_SCALE: f32 = 0.8;
+
+/// Scene-driver scale on the published measurement word, applied before
+/// integration adds it into height. The driver unit re-reads the one global
+/// measurement float `[0x10456da8]`, multiplies it by dword `[0x10329a34]` -
+/// decoded from the unpacked 2026-10-05 image as exactly +0.8, the same dword
+/// behind [`PROBE_MARGIN_SCALE`] - and stores it back (`f_100c549c..0x100c54a8`
+/// in `research/xi-on-anything/generated/all`), gated on a mover-state getter
+/// answering 5 or 6 (calls @`0x100c548b/0x100c5492`, compares @`0x100c548b..0x100c549a`);
+/// whether the gate covers other mover states is unresolved, so kuluu applies
+/// this scale to the no-contact (fall) feed only - on contact the record states
+/// no penalty word enters that channel at all (collision record
+/// `.agents/skills/retail-observe/references/2026-10-25-collision-query.md`, "Result vector
+/// (consumer pass)", rescored 2026-10-26: kuluu formerly integrated unscaled).
+pub const MEASUREMENT_DRIVER_SCALE: f32 = PROBE_MARGIN_SCALE;
+
+/// The fall step as kuluu integrates it - the probe constant after the scene
+/// driver's scale. This is what height moves per airborne frame and exactly what
+/// every vertical branch publishes, keeping measurement parity by construction.
+pub const FALL_STEP_FRAME_INTEGRATED: f32 = FALL_STEP_FRAME_PROBE * MEASUREMENT_DRIVER_SCALE;
 
 // Gait scale, from the movement-time gait helper - record
 // `.agents/skills/retail-observe/references/2026-10-25-walker-speed-and-step.md` spec section

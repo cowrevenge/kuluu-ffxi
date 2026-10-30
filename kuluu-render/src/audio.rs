@@ -236,6 +236,18 @@ pub struct AudioMuteState {
     /// full volume instead of silent.
     #[serde(default = "default_master_volume")]
     pub master: f32,
+
+    /// Event-script 0x69/0x6A scale on the music bus — runtime-only, never in
+    /// audio.json (`#[serde(skip)]`), and restored at `CutsceneEnded` exactly like
+    /// the 0x5D duck. `.agents/skills/retail-observe/references/
+    /// 2026-10-28-event-opcode-no-skip-pass.md`
+    #[serde(skip, default = "unity_event_channel_scale")]
+    pub event_music_scale: f32,
+
+    /// Event-script 0x69/0x6A scale on the effects bus; same scoping as
+    /// [`AudioMuteState::event_music_scale`].
+    #[serde(skip, default = "unity_event_channel_scale")]
+    pub event_effects_scale: f32,
 }
 
 impl Default for AudioMuteState {
@@ -246,6 +258,8 @@ impl Default for AudioMuteState {
             bgm: false,
             sfx: false,
             master: default_master_volume(),
+            event_music_scale: unity_event_channel_scale(),
+            event_effects_scale: unity_event_channel_scale(),
         }
     }
 }
@@ -253,6 +267,35 @@ impl Default for AudioMuteState {
 /// Full volume. New installs and pre-volume `audio.json` files both start here.
 fn default_master_volume() -> f32 {
     1.0
+}
+
+/// Both event channel scales rest here outside an event script's 0x69/0x6A reach.
+fn unity_event_channel_scale() -> f32 {
+    1.0
+}
+
+// Retail addresses its mixer through four channel arms plus a global whole-sound
+// multiplier slot; kuluu folds those five into its two buses with this bit map,
+// stated as authored choice in `.agents/skills/retail-observe/references/
+// 2026-10-28-event-opcode-no-skip-pass.md`.
+pub const EVENT_CHANNEL_MUSIC_MASK: u8 = 0x02;
+pub const EVENT_CHANNEL_EFFECTS_MASK: u8 = 0x01 | 0x04 | 0x08;
+/// The global multiplier slot scales every bus.
+pub const EVENT_CHANNEL_BOTH_MASK: u8 = 0x10;
+
+/// Retail's per-mille scale constant for 0x6A is exactly 1/1000, so the wire
+/// carries thousandths of full scale.
+pub const EVENT_VOLUME_PER_MILLE: f32 = 1000.0;
+
+/// Set every bus `mask` selects to `scale`; unselected buses keep their level.
+pub fn apply_event_channel_scale(mute: &mut AudioMuteState, mask: u8, scale: f32) {
+    let scale = scale.clamp(0.0, 1.0);
+    if mask & (EVENT_CHANNEL_MUSIC_MASK | EVENT_CHANNEL_BOTH_MASK) != 0 {
+        mute.event_music_scale = scale;
+    }
+    if mask & (EVENT_CHANNEL_EFFECTS_MASK | EVENT_CHANNEL_BOTH_MASK) != 0 {
+        mute.event_effects_scale = scale;
+    }
 }
 
 /// Volume menu step: 0..=100 in fives, stored as 0.0..=1.0.
@@ -355,10 +398,10 @@ pub fn bus_gain(bus: AudioBus, mute: &AudioMuteState, volumes: &RetailConfigVolu
             if mute.bgm {
                 0.0
             } else {
-                mute.master * volumes.music
+                mute.master * volumes.music * mute.event_music_scale
             }
         }
-        AudioBus::Effects => mute.master * volumes.effects,
+        AudioBus::Effects => mute.master * volumes.effects * mute.event_effects_scale,
     }
 }
 
@@ -505,7 +548,11 @@ pub fn derive_bgm_playback_state(
 /// 0x5D volume ramp.
 pub const UNITY_SLOT_GAIN: f32 = 1.0;
 
-pub fn drain_music_events_system(events: Res<EventLog>, mut slots: ResMut<BgmSlots>) {
+pub fn drain_music_events_system(
+    events: Res<EventLog>,
+    mut slots: ResMut<BgmSlots>,
+    mut mute: ResMut<AudioMuteState>,
+) {
     let total = events.pushed_total;
     let first_global = total.saturating_sub(events.recent.len() as u64);
 
@@ -538,10 +585,30 @@ pub fn drain_music_events_system(events: Res<EventLog>, mut slots: ResMut<BgmSlo
                     slots.slot_gain[s] = (*volume as f32 / 127.0).clamp(0.0, 1.0);
                 }
             }
+            // 0x69: the selected channels snap to exactly full or exactly silence,
+            // no ramp — the event's flag already made that comparison.
+            ViewerEvent::EventSoundChannelsSet { mask, enabled } => {
+                let scale = if *enabled { 1.0 } else { 0.0 };
+                apply_event_channel_scale(&mut mute, *mask, scale);
+            }
+            // 0x6A: the target is thousandths of full scale (retail multiplies its
+            // work operand by exactly 1/1000 before handing it to each arm).
+            ViewerEvent::EventSoundChannelsChange {
+                mask,
+                volume_thousandths,
+            } => {
+                let scale = *volume_thousandths as f32 / EVENT_VOLUME_PER_MILLE;
+                apply_event_channel_scale(&mut mute, *mask, scale);
+            }
             // An event script's 0x5D duck is scoped to its session the way every other
             // cutscene cue is: the bytecode routinely ends without restoring the volume.
+            // The same scoping holds for the 0x69/0x6A bus scales — an event that
+            // silenced its channels and ended without restoring must not leak silence
+            // into gameplay.
             ViewerEvent::CutsceneEnded => {
                 slots.slot_gain = [UNITY_SLOT_GAIN; SLOT_COUNT];
+                mute.event_music_scale = unity_event_channel_scale();
+                mute.event_effects_scale = unity_event_channel_scale();
             }
             _ => {}
         }
@@ -1911,6 +1978,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<EventLog>()
             .init_resource::<BgmSlots>()
+            .init_resource::<AudioMuteState>()
             .add_systems(Update, drain_music_events_system);
 
         {
@@ -1936,6 +2004,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<EventLog>()
             .init_resource::<BgmSlots>()
+            .init_resource::<AudioMuteState>()
             .add_systems(Update, drain_music_events_system);
 
         {
@@ -1957,11 +2026,92 @@ mod tests {
         );
     }
 
+    /// 0x69/0x6A mask bits land on the buses per the record's bit map (two →
+    /// music; one, four and eight → effects; sixteen → both): the set op snaps to
+    /// exactly full or silence, the change op scales by thousandths, and a session
+    /// end undoes all of it — a cutscene that silenced BGM must not leak silence
+    /// into gameplay (`.agents/skills/retail-observe/references/
+    /// 2026-10-28-event-opcode-no-skip-pass.md`).
+    #[test]
+    fn event_channel_volumes_scale_their_buses_and_end_with_the_session() {
+        let mut app = App::new();
+        app.init_resource::<EventLog>()
+            .init_resource::<BgmSlots>()
+            .init_resource::<AudioMuteState>()
+            .add_systems(Update, drain_music_events_system);
+
+        {
+            let mut events = app.world_mut().resource_mut::<EventLog>();
+            events.push(ViewerEvent::CutsceneStarted { event_id: 599 });
+            // Silence the music bus (bit two) and ease the effects bus (bit one)
+            // to half.
+            events.push(ViewerEvent::EventSoundChannelsSet {
+                mask: EVENT_CHANNEL_MUSIC_MASK,
+                enabled: false,
+            });
+            events.push(ViewerEvent::EventSoundChannelsChange {
+                mask: 0x01,
+                volume_thousandths: 500,
+            });
+        }
+        app.update();
+
+        let mute = *app.world().resource::<AudioMuteState>();
+        assert_eq!(mute.event_music_scale, 0.0);
+        assert!((mute.event_effects_scale - 0.5).abs() < 1e-6);
+        let volumes = RetailConfigVolumes {
+            music: 1.0,
+            effects: 1.0,
+        };
+        assert_eq!(bus_gain(AudioBus::Music, &mute, &volumes), 0.0);
+        assert!((bus_gain(AudioBus::Effects, &mute, &volumes) - 0.5).abs() < 1e-6);
+
+        // Bit sixteen is the global slot: it scales every bus at once.
+        {
+            let mut events = app.world_mut().resource_mut::<EventLog>();
+            events.push(ViewerEvent::EventSoundChannelsSet {
+                mask: EVENT_CHANNEL_BOTH_MASK,
+                enabled: true,
+            });
+        }
+        app.update();
+        let mute = *app.world().resource::<AudioMuteState>();
+        assert_eq!(mute.event_music_scale, 1.0);
+        assert_eq!(mute.event_effects_scale, 1.0);
+
+        {
+            let mut events = app.world_mut().resource_mut::<EventLog>();
+            // Silence everything for the rest of the session's staging...
+            events.push(ViewerEvent::EventSoundChannelsSet {
+                mask: EVENT_CHANNEL_MUSIC_MASK
+                    | EVENT_CHANNEL_EFFECTS_MASK
+                    | EVENT_CHANNEL_BOTH_MASK,
+                enabled: false,
+            });
+        }
+        app.update();
+        assert_eq!(
+            app.world().resource::<AudioMuteState>().event_music_scale,
+            0.0
+        );
+
+        // ...and the session end takes it all back, bytecode teardown or not.
+        {
+            let mut events = app.world_mut().resource_mut::<EventLog>();
+            events.push(ViewerEvent::CutsceneEnded);
+        }
+        app.update();
+        let mute = *app.world().resource::<AudioMuteState>();
+        assert_eq!(mute.event_music_scale, 1.0);
+        assert_eq!(mute.event_effects_scale, 1.0);
+    }
+
     #[test]
     fn zone_change_clears_stale_music_slots() {
         let mut app = App::new();
         app.init_resource::<EventLog>()
             .init_resource::<BgmSlots>()
+            .init_resource::<AudioMuteState>()
             .add_systems(Update, drain_music_events_system);
 
         {
@@ -2004,6 +2154,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<EventLog>()
             .init_resource::<BgmSlots>()
+            .init_resource::<AudioMuteState>()
             .add_systems(Update, drain_music_events_system);
 
         {

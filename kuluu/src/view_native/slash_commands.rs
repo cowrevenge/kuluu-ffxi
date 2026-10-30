@@ -1074,7 +1074,7 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 names: &["devhud"],
                 set: CommandSet::Dev,
                 usage: "[on|off|toggle]",
-                summary: "stage + diagnostics bars (top/bottom telemetry). Per-panel overlays (perf, target cycle, mesh, netstat) live in the in-game Debug menu",
+                summary: "development diagnostics panel and stage bars; individual panels are in the Debug menu",
                 handler: |c| parse_devhud(c.rest),
             },
             Command {

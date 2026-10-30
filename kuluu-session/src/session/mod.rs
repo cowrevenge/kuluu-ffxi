@@ -2879,10 +2879,30 @@ async fn send_pending_tag(
         // its answer (vendor/server/src/map/packets/c2s/0x0eb_reqsubmapnum.cpp).
         PendingTag::SubMapNum => build_subpacket_reqsubmapnum(*sub_seq),
     };
-    let header = datagram_header_id(*sub_seq);
     *sub_seq = sub_seq.wrapping_add(1);
+    let header = datagram_header_id(*sub_seq);
+    tracing::trace!(
+        target: "event_trace",
+        unique_no,
+        act_index,
+        event_id,
+        ?tag,
+        header,
+        server_last_seq,
+        "sending event pending tag"
+    );
     if let Err(e) = map.send_encrypted(&payload, header, server_last_seq).await {
         tracing::warn!(error = %e, "pending-tag c2s send failed");
+    } else {
+        tracing::trace!(
+            target: "event_trace",
+            unique_no,
+            act_index,
+            event_id,
+            ?tag,
+            header,
+            "event pending tag sent"
+        );
     }
 }
 

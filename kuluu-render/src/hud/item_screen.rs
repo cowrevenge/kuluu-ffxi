@@ -1,4 +1,7 @@
+use bevy::picking::events::PointerPress;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::ui_widgets::Button;
 
 use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
 use crate::hud::item_detail::{self, ItemMenuFocus, SortOptionId, SortOptions, SORT_OPTIONS};
@@ -459,6 +462,7 @@ fn spawn_bag_tabs(col: &mut ChildSpawnerCommands) {
                 .spawn((
                     BagTab(i),
                     Button,
+                    Hovered::default(),
                     Node {
                         padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
                         display: Display::None,
@@ -498,6 +502,7 @@ fn spawn_list_box(col: &mut ChildSpawnerCommands, placeholder: Handle<Image>) {
                 list.spawn((
                     ItemListRow(i),
                     Button,
+                    Hovered::default(),
                     Node {
                         display: Display::None,
                         ..list_view::row_node()
@@ -555,6 +560,7 @@ fn spawn_options_box(root: &mut ChildSpawnerCommands) {
             p.spawn((
                 ItemText(ItemRole::OptionsRow(i)),
                 Button,
+                Hovered::default(),
                 Text::new(""),
                 text_font(12.0),
                 TextColor(theme::TEXT),
@@ -926,7 +932,7 @@ pub(crate) fn item_row_mouse_hover_system(
     sort: Res<SortOptions>,
     active_bag: Res<ItemScreenContainer>,
     mut focus: ResMut<ItemMenuFocus>,
-    rows: Query<(&Interaction, &ItemListRow), Changed<Interaction>>,
+    rows: Query<(&Hovered, &ItemListRow), Changed<Hovered>>,
 ) {
     let Some(screen_mode) = item_screen_mode(&mode) else {
         return;
@@ -943,7 +949,7 @@ pub(crate) fn item_row_mouse_hover_system(
         return;
     };
     for (interaction, row) in &rows {
-        if !matches!(interaction, Interaction::Hovered | Interaction::Pressed) {
+        if !interaction.0 {
             continue;
         }
         let list_idx = start + row.0;
@@ -964,9 +970,12 @@ pub(crate) fn item_row_mouse_click_system(
     state: Res<SceneState>,
     sort: Res<SortOptions>,
     active_bag: Res<ItemScreenContainer>,
-    rows: Query<(&Interaction, &ItemListRow), Changed<Interaction>>,
+    rows: Query<&ItemListRow>,
     mut out: MessageWriter<MenuRowActivated>,
+    mut presses: MessageReader<PointerPress>,
+    parents: Query<&ChildOf>,
 ) {
+    let pressed_rows = super::primary_pressed_rows(&mut presses, &rows, &parents);
     let Some(screen_mode) = item_screen_mode(&mode) else {
         return;
     };
@@ -975,10 +984,7 @@ pub(crate) fn item_row_mouse_click_system(
     }
     let total = list_rows(&state.snapshot, screen_mode, active_bag.0, &sort).len();
     let start = viewport.start;
-    for (interaction, row) in &rows {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for row in pressed_rows {
         let list_idx = start + row.0;
         if list_idx < total {
             out.write(MenuRowActivated { slot: list_idx });
@@ -1051,15 +1057,15 @@ pub(crate) fn bag_tab_mouse_system(
     mut mode: ResMut<InputMode>,
     state: Res<SceneState>,
     mut active_bag: ResMut<ItemScreenContainer>,
-    tabs: Query<(&Interaction, &BagTab), Changed<Interaction>>,
+    tabs: Query<&BagTab>,
+    mut presses: MessageReader<PointerPress>,
+    parents: Query<&ChildOf>,
 ) {
+    let pressed_rows = super::primary_pressed_rows(&mut presses, &tabs, &parents);
     if !items_open(&mode) {
         return;
     }
-    for (interaction, tab) in &tabs {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for tab in pressed_rows {
         let bags = browsable_containers(&state.snapshot);
         let Some(&id) = bags.get(tab.0) else {
             continue;
@@ -1082,8 +1088,12 @@ pub(crate) fn sort_option_mouse_system(
     mut focus: ResMut<ItemMenuFocus>,
     mut active_bag: ResMut<ItemScreenContainer>,
     mut sort_req: MessageWriter<item_detail::InventorySortRequested>,
-    rows: Query<(&Interaction, &ItemText), Changed<Interaction>>,
+    rows: Query<(&Hovered, &ItemText), Changed<Hovered>>,
+    targets: Query<&ItemText>,
+    mut presses: MessageReader<PointerPress>,
+    parents: Query<&ChildOf>,
 ) {
+    let pressed_rows = super::primary_pressed_rows(&mut presses, &targets, &parents);
     if !items_open(&mode) || submenu_open(&mode) {
         return;
     }
@@ -1094,27 +1104,30 @@ pub(crate) fn sort_option_mouse_system(
         let Some(&id) = SORT_OPTIONS.get(i) else {
             continue;
         };
-        match interaction {
-            Interaction::Hovered => {
-                focus.enter_sort(id);
-            }
-            Interaction::Pressed => {
-                focus.enter_sort(id);
-                if id == SortOptionId::RecycleBin {
-                    if open_recycle_bin(&state.snapshot, &mut active_bag, &mut focus) {
-                        if let InputMode::Menu(stack) = &mut *mode {
-                            if let Some(level) = stack.current_mut() {
-                                level.cursor = 0;
-                            }
-                        }
+        if interaction.0 {
+            focus.enter_sort(id);
+        }
+    }
+    for tag in pressed_rows {
+        let ItemRole::OptionsRow(i) = tag.0 else {
+            continue;
+        };
+        let Some(&id) = SORT_OPTIONS.get(i) else {
+            continue;
+        };
+        focus.enter_sort(id);
+        if id == SortOptionId::RecycleBin {
+            if open_recycle_bin(&state.snapshot, &mut active_bag, &mut focus) {
+                if let InputMode::Menu(stack) = &mut *mode {
+                    if let Some(level) = stack.current_mut() {
+                        level.cursor = 0;
                     }
-                } else if item_detail::apply_sort_option(&mut sort, id) {
-                    sort_req.write(item_detail::InventorySortRequested {
-                        container: ffxi_proto::map::container::LOC_INVENTORY,
-                    });
                 }
             }
-            Interaction::None => {}
+        } else if item_detail::apply_sort_option(&mut sort, id) {
+            sort_req.write(item_detail::InventorySortRequested {
+                container: ffxi_proto::map::container::LOC_INVENTORY,
+            });
         }
     }
 }

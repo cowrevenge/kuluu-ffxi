@@ -1,5 +1,8 @@
+use bevy::picking::events::PointerPress;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui::ComputedNode;
+use bevy::ui_widgets::Button;
 
 use crate::graphics_settings::{
     config_rows, dlss_config_rows, graphics_rows, GraphicsField, GraphicsSection, GraphicsSettings,
@@ -1032,7 +1035,7 @@ pub fn controls_rows(bindings: &crate::keybinds::Bindings) -> Vec<DynamicMenuRow
     rows
 }
 
-pub const DEBUG_PERF: &str = "Perf";
+pub const DEBUG_PERF: &str = "Diagnostics";
 pub const DEBUG_TARGET_CYCLE: &str = "Target Cycle";
 pub const DEBUG_MESH: &str = "Mesh Debug";
 /// Stair-climber gizmo row: [on] draws the walker's probe-column markers,
@@ -6450,6 +6453,7 @@ fn spawn_stacked_window(parent: &mut ChildSpawnerCommands, slot: usize) {
                     // column is still the live top window - its rows take mouse like
                     // any selector. The systems gate on stack position.
                     Button,
+                    Hovered::default(),
                     Node {
                         display: Display::None,
                         ..default()
@@ -6595,6 +6599,7 @@ fn spawn_pane_column(parent: &mut ChildSpawnerCommands) {
                 c.spawn((
                     MainMenuRow { slot },
                     Button,
+                    Hovered::default(),
                     Text::new(""),
                     text_nowrap(),
                     style::text_font(MENU_ROW_FONT_PX),
@@ -12680,8 +12685,8 @@ pub fn menu_mouse_hover_system(
     dynamic: Res<DynamicMenu>,
     config_rows: Option<Res<ConfigDatRows>>,
     seats: Res<PooledSeats>,
-    rows: Query<(&Interaction, &MainMenuRow), Changed<Interaction>>,
-    pool_q: Query<(&Interaction, &MenuStackWindowRow), Changed<Interaction>>,
+    rows: Query<(&Hovered, &MainMenuRow), Changed<Hovered>>,
+    pool_q: Query<(&Hovered, &MenuStackWindowRow), Changed<Hovered>>,
 ) {
     let InputMode::Menu(stack) = &mut *mode else {
         return;
@@ -12702,7 +12707,7 @@ pub fn menu_mouse_hover_system(
         .is_some_and(|frames| menu_stack_layout(stack, frames).covered_child());
     if !covered {
         for (interaction, row) in &rows {
-            if !matches!(interaction, Interaction::Hovered | Interaction::Pressed) {
+            if !interaction.0 {
                 continue;
             }
             let cursor = stack.levels[level_idx].cursor;
@@ -12722,7 +12727,7 @@ pub fn menu_mouse_hover_system(
         }
     }
     for (interaction, row) in &pool_q {
-        if !matches!(interaction, Interaction::Hovered | Interaction::Pressed) {
+        if !interaction.0 {
             continue;
         }
         let Some(frames) = config_rows.as_deref() else {
@@ -12746,10 +12751,49 @@ pub fn menu_mouse_hover_system(
         {
             continue;
         }
-        if matches!(interaction, Interaction::Hovered) && open.cursor != list_idx {
+        if open.cursor != list_idx {
             stack.levels[level].cursor = list_idx;
         }
     }
+}
+
+/// This frame's primary presses, split across the stack's two row surfaces. The shared
+/// [`super::primary_pressed_rows`] helper answers for one query at a time and consumes its reader,
+/// so the pane column and the pooled window frames cannot both use it in the same system; this
+/// walks each press chain once instead and hands the hit to whichever surface owns the entity.
+/// Same first-row-ancestor-wins and dedupe-by-entity law as the helper.
+fn stack_press_rows<'a>(
+    presses: &mut MessageReader<PointerPress>,
+    rows: &'a Query<&MainMenuRow>,
+    pool_q: &'a Query<&MenuStackWindowRow>,
+    parents: &Query<&ChildOf>,
+) -> (Vec<&'a MainMenuRow>, Vec<&'a MenuStackWindowRow>) {
+    use bevy::platform::collections::HashSet;
+
+    let mut pane = Vec::new();
+    let mut pool = Vec::new();
+    let mut seen_pane = HashSet::<Entity>::default();
+    let mut seen_pool = HashSet::<Entity>::default();
+    for press in presses.read() {
+        if press.button != bevy::picking::pointer::PointerButton::Primary {
+            continue;
+        }
+        for entity in std::iter::once(press.entity).chain(parents.iter_ancestors(press.entity)) {
+            if let Ok(row) = rows.get(entity) {
+                if seen_pane.insert(entity) {
+                    pane.push(row);
+                }
+                break;
+            }
+            if let Ok(row) = pool_q.get(entity) {
+                if seen_pool.insert(entity) {
+                    pool.push(row);
+                }
+                break;
+            }
+        }
+    }
+    (pane, pool)
 }
 
 pub fn menu_mouse_click_system(
@@ -12758,10 +12802,14 @@ pub fn menu_mouse_click_system(
     dynamic: Res<DynamicMenu>,
     config_rows: Option<Res<ConfigDatRows>>,
     seats: Res<PooledSeats>,
-    rows: Query<(&Interaction, &MainMenuRow), Changed<Interaction>>,
-    pool_q: Query<(&Interaction, &MenuStackWindowRow), Changed<Interaction>>,
+    rows: Query<&MainMenuRow>,
+    pool_q: Query<&MenuStackWindowRow>,
     mut out: MessageWriter<MenuRowActivated>,
+    mut presses: MessageReader<PointerPress>,
+    parents: Query<&ChildOf>,
 ) {
+    let (pressed_rows, pressed_pool_rows) =
+        stack_press_rows(&mut presses, &rows, &pool_q, &parents);
     let InputMode::Menu(stack) = &*mode else {
         return;
     };
@@ -12779,10 +12827,7 @@ pub fn menu_mouse_click_system(
         .as_deref()
         .is_some_and(|frames| menu_stack_layout(stack, frames).covered_child());
     if !covered {
-        for (interaction, row) in &rows {
-            if *interaction != Interaction::Pressed {
-                continue;
-            }
+        for row in pressed_rows {
             let (total, viewport_start) =
                 resolve_viewport(kind, level.cursor, &dynamic, settings.dlss_supported);
             let window = visible_window(kind, total);
@@ -12792,10 +12837,7 @@ pub fn menu_mouse_click_system(
             }
         }
     }
-    for (interaction, row) in &pool_q {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for row in pressed_pool_rows {
         let Some(frames) = config_rows.as_deref() else {
             continue;
         };
@@ -15517,8 +15559,9 @@ mod tests {
     #[test]
     fn key_item_rows_sorted_by_id_with_plain_labels() {
         // Key items 1/8 = Zeruhn Report / Airship Pass
-        // (vendor/server/scripts/enum/key_item.lua). ur/152: unseen items carry
-        // no `" (new)"` text at all - the blue dot column paints that state.
+        // (vendor/server/data/enums/key_item.yaml, which `ffxi-vocab/build.rs`
+        // scrapes). ur/152: unseen items carry no `" (new)"` text at all - the
+        // blue dot column paints that state.
         let snap = kuluu_snapshot::SceneSnapshot {
             key_items: vec![8, 1],
             key_items_seen: vec![8],
@@ -22568,6 +22611,13 @@ mod tests {
     /// The pointer neither moves the cursor onto the unselectable item nor selects it.
     #[test]
     fn the_pointer_ignores_the_unselectable_item() {
+        use bevy::camera::NormalizedRenderTarget;
+        use bevy::picking::{
+            backend::HitData,
+            events::Pointer,
+            pointer::{Location, PointerButton, PointerId},
+        };
+
         const LOCKED: usize = 2;
         let mut app = App::new();
         app.insert_resource(InputMode::Menu(locked_hub(LOCKED)))
@@ -22577,12 +22627,29 @@ mod tests {
                 ..Default::default()
             })
             .add_message::<MenuRowActivated>()
+            .add_message::<PointerPress>()
             .init_resource::<PooledSeats>()
             .add_systems(Update, (menu_mouse_hover_system, menu_mouse_click_system));
         let row = app
             .world_mut()
-            .spawn((MainMenuRow { slot: LOCKED }, Interaction::Pressed))
+            .spawn((MainMenuRow { slot: LOCKED }, Hovered(true)))
             .id();
+        app.world_mut().write_message(PointerPress {
+            entity: row,
+            pointer: Pointer::new(
+                PointerId::Mouse,
+                Location {
+                    target: NormalizedRenderTarget::None {
+                        width: 1,
+                        height: 1,
+                    },
+                    position: Vec2::ZERO,
+                },
+            ),
+            button: PointerButton::Primary,
+            hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+            count: 1,
+        });
         app.update();
         let InputMode::Menu(stack) = app.world().resource::<InputMode>() else {
             panic!("menu");
@@ -22598,7 +22665,7 @@ mod tests {
         app.world_mut()
             .entity_mut(row)
             .insert(MainMenuRow { slot: 1 });
-        app.world_mut().entity_mut(row).insert(Interaction::Hovered);
+        app.world_mut().entity_mut(row).insert(Hovered(true));
         app.update();
         let InputMode::Menu(stack) = app.world().resource::<InputMode>() else {
             panic!("menu");

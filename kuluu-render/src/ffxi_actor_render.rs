@@ -1431,7 +1431,7 @@ impl JointBoundsAccum {
 
 // Re-expresses bevy_mesh-0.19.0/src/skinning.rs:120-171 (SkinnedMeshBounds::
 // from_mesh) for the FFXI dual-influence stream: p0/p1 are joint-local
-// positions pre-scaled by their weight (skinned_ffxi.wgsl header), so the
+// positions pre-scaled by their weight (skinned_ffxi.wesl header), so the
 // weight divides back out to recover the unweighted point each joint box must
 // bound. The skinned position is a convex combination of the two
 // joint-transformed points, so the union of transformed boxes bounds every pose.
@@ -2600,7 +2600,7 @@ fn build_actor_children(
             .spawn((
                 Mesh3d(mesh_handle.clone()),
                 MeshMaterial3d(mat),
-                MeshTag(instance_slot),
+                MeshTag::new(instance_slot),
                 FfxiInstanceSlot(instance_slot),
                 Transform::default(),
                 FfxiActorMeshChild,
@@ -5132,7 +5132,24 @@ pub struct ActorLoadInFlight {
     cache: ActorPrepCache,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ActorLoadDiagnosticCounts {
+    pub queued: usize,
+    pub preparing: usize,
+    pub uploading: usize,
+    pub awaiting_gpu: usize,
+}
+
 impl ActorLoadInFlight {
+    pub fn diagnostic_counts(&self) -> ActorLoadDiagnosticCounts {
+        ActorLoadDiagnosticCounts {
+            queued: self.queued.len(),
+            preparing: self.tasks.len(),
+            uploading: self.uploads.len(),
+            awaiting_gpu: self.ready.len(),
+        }
+    }
+
     fn cancel(&mut self, entity_id: u32) {
         self.queued.retain(|req| req.entity_id != entity_id);
         self.tasks.remove(&entity_id);
@@ -5524,7 +5541,7 @@ pub fn tick_morph_in(
 }
 
 pub fn finish_actor_reveal(
-    trigger: On<Discard, crate::components::MorphIn>,
+    trigger: On<Discard<crate::components::MorphIn>>,
     q: Query<&crate::components::MorphIn>,
     actors: Query<(&FfxiRenderActor, &Children)>,
     mut materials: Query<(&ActorFadeMaterial, &mut MeshMaterial3d<FfxiSkinnedMaterial>)>,
@@ -7380,13 +7397,18 @@ mod pose_resolution_tests {
     /// quarter turn about X leaves that axis alone and swings the other two right angles each.
     #[test]
     fn axis_disp_pairs_each_axis_with_its_own() {
+        const IDENTITY_TOLERANCE_DEG: f32 = 1e-6;
+        const QUARTER_TURN_TOLERANCE_DEG: f32 = 1e-3;
         let identity = axis_disp(&Mat4::IDENTITY, &Mat4::IDENTITY);
-        assert!(identity <= 1e-6, "identity measured {identity} deg");
+        assert!(
+            identity <= IDENTITY_TOLERANCE_DEG,
+            "identity measured {identity} deg"
+        );
         let quarter_turn_about_x = Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2);
         let two_axes_at_right_angles = std::f32::consts::FRAC_PI_2.to_degrees() * 2.0 / 3.0;
         let measured = axis_disp(&Mat4::IDENTITY, &quarter_turn_about_x);
         assert!(
-            (measured - two_axes_at_right_angles).abs() < 1e-3,
+            (measured - two_axes_at_right_angles).abs() < QUARTER_TURN_TOLERANCE_DEG,
             "expected {two_axes_at_right_angles} deg, measured {measured}"
         );
     }

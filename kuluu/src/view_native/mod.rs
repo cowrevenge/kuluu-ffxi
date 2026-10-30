@@ -1,27 +1,16 @@
-#[cfg(feature = "debug-animation_room")]
-pub mod animation_test_scene;
-
-/// This build's animation-room drive surface, for the key-drive knob query. None means the room is
-/// not compiled in — the listener answers that explicitly rather than leaving a driver guessing.
-#[cfg(feature = "debug-animation_room")]
-pub fn animtest_knobs() -> Option<serde_json::Value> {
-    Some(animation_test_scene::knob_report())
-}
-
-#[cfg(not(feature = "debug-animation_room"))]
-pub fn animtest_knobs() -> Option<serde_json::Value> {
-    None
-}
+#![cfg_attr(not(test), deny(clippy::disallowed_methods))]
 
 mod app_icon;
 pub mod auto_target;
 mod backdrop_preload;
 pub mod bridge;
 pub mod camera_collision;
+mod camera_trace;
 pub mod collision_bvh;
 pub mod command_surface;
 pub mod cutscene_motion_done;
 pub mod debug_heights;
+pub mod dev_diagnostics;
 pub mod engage;
 pub mod entity_list_hud;
 pub mod exit_watchdog;
@@ -30,13 +19,8 @@ pub mod input;
 pub mod key_drive;
 pub mod key_items;
 pub mod launcher_backdrop;
-// 0.19 deprecated the feathers `*_bundle` spawn fns in favor of BSN scenes;
-// the launcher screens migrate to BSN in kuluu-dnr5, so tolerate the shims
-// until then.
-#[allow(deprecated)]
 pub mod launcher_ui;
 pub mod locked_camera;
-#[allow(deprecated)]
 pub mod model_viewer;
 pub mod nameplate_occlude;
 pub mod navmesh_overlay;
@@ -49,7 +33,6 @@ pub mod sun_occlusion;
 pub mod target_list_hud;
 pub mod text_input;
 pub mod walker;
-#[allow(deprecated)]
 pub mod widgets;
 pub mod zone_transition;
 
@@ -85,9 +68,9 @@ use self::launcher_ui::{LoginErrorMsg, PendingConnect};
 
 fn drive_feathers_cursor(
     style: Res<CursorStyle>,
-    mut default_cursor: ResMut<bevy::feathers::cursor::DefaultCursor>,
+    mut default_cursor: ResMut<bevy::picking::cursor::DefaultCursor>,
 ) {
-    let want = bevy::feathers::cursor::EntityCursor::System(system_cursor_icon(*style));
+    let want = bevy::picking::cursor::EntityCursor::System(system_cursor_icon(*style));
     if default_cursor.0 != want {
         default_cursor.0 = want;
     }
@@ -490,7 +473,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     // submit). Default to the CPU mesh-batching path (Bevy 0.18-style) on macOS;
     // FFXI_GPU_PREPROCESS=1 opts back in. Two prongs are required to force the CPU path:
     // (1) insert before dependent plugins' finish() bake their CPU-vs-GPU choice
-    //     (vendor/bevy_pbr render/mesh.rs reads it in finish), and
+    //     (the mesh renderer reads it in finish), and
     // (2) re-assert in RenderStartup because bevy_render's BatchingPlugin re-creates the
     //     resource there via init_gpu_resource.
     if cfg!(target_os = "macos") && std::env::var_os("FFXI_GPU_PREPROCESS").is_none() {
@@ -549,7 +532,9 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
                 stamp_render_graph_done
                     .after(RenderSystems::Render)
                     .before(RenderSystems::Cleanup),
-                stamp_render_total.in_set(RenderSystems::PostCleanup),
+                stamp_render_total
+                    .in_set(RenderSystems::PostCleanup)
+                    .after(RenderSystems::Cleanup),
             ),
         );
     }
@@ -644,6 +629,13 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     add_hud_spawners(&mut app, OnEnter(AppPhase::InGame));
     app.init_resource::<perf_hud::PerfMonitor>();
     app.init_resource::<perf_hud::AssetChurn>();
+    app.add_plugins((
+        bevy::diagnostic::SystemInformationDiagnosticsPlugin,
+        bevy::render::diagnostic::MeshAllocatorDiagnosticPlugin,
+        bevy::render::diagnostic::RenderAssetDiagnosticPlugin::<
+            bevy::render::texture::GpuImage,
+        >::new(" images"),
+    ));
     // Ungated: fires ~15s in regardless of app phase so the dump can't be
     // silently skipped if InGame is late (or never) entered.
     app.add_systems(Update, perf_hud::dump_render_diagnostics);
@@ -678,6 +670,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         (
             perf_hud::update_perf_monitor,
             perf_hud::update_perf_graph,
+            dev_diagnostics::update_summary,
             target_list_hud::update_target_list_hud,
             entity_list_hud::update_entity_list_hud,
         )
@@ -692,6 +685,14 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             entity_list_hud::apply_entity_list_visibility,
             entity_list_hud::entity_list_wheel_system,
         )
+            .run_if(in_state(AppPhase::InGame)),
+    );
+    app.add_systems(
+        PreUpdate,
+        perf_hud::scroll_perf_panel
+            .after(bevy::ui::UiSystems::Focus)
+            .after(kuluu_render::mouse::collect_mouse_system)
+            .before(kuluu_render::mouse::wheel_zoom_accumulate_system)
             .run_if(in_state(AppPhase::InGame)),
     );
     app.add_systems(
@@ -742,11 +743,6 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     // Every Config-page choice lives in one client-side option table, and retail keeps that
     // table across logout through its `cnf.dat` user file (vault main_menu.md §59 addendum 47).
     app.insert_resource(crate::config_options_store::load_or_default());
-
-    // The room's systems and resources must stay out of a default build entirely: an unregistered
-    // plugin is inert, but registering it puts tester state into every session.
-    #[cfg(feature = "debug-animation_room")]
-    app.add_plugins(animation_test_scene::AnimationTestScenePlugin);
 
     app.add_plugins((
         ViewerCorePlugin::<NativeSource>::default(),
@@ -951,6 +947,13 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             .run_if(in_state(AppPhase::InGame)),
     );
 
+    app.add_systems(
+        Last,
+        camera_trace::report
+            .run_if(camera_trace::enabled)
+            .run_if(in_state(AppPhase::InGame)),
+    );
+
     app.add_message::<debug_heights::DebugHeightsRequest>()
         .add_systems(
             Update,
@@ -1052,9 +1055,11 @@ fn discard_distortion_on_zone_change(
 
 fn despawn_ingame_entities(
     mut commands: Commands,
-    (q, mut shop): (
+    (q, mut shop, mut perf, mut churn): (
         Query<Entity, With<InGameEntity>>,
         ResMut<kuluu_render::hud::shop::ShopScreenState>,
+        ResMut<perf_hud::PerfMonitor>,
+        ResMut<perf_hud::AssetChurn>,
     ),
     mut scene: ResMut<SceneState>,
     mut events: ResMut<EventLog>,
@@ -1097,6 +1102,8 @@ fn despawn_ingame_entities(
     }
 
     shop.reset();
+    *perf = default();
+    *churn = default();
     tracked.by_id.clear();
     // Whole-resource reset, not a field-by-field clear: the parallel per-triangle
     // arrays and `cell_index` must go together, or a stale cell index will hand
@@ -1530,6 +1537,8 @@ mod zone_teardown_tests {
         world.init_resource::<kuluu_render::ffxi_actor_render::SelfKnockback>();
         world.init_resource::<kuluu_render::scheduler_runtime::PendingKnockbacks>();
         world.init_resource::<kuluu_render::hud::shop::ShopScreenState>();
+        world.init_resource::<super::perf_hud::PerfMonitor>();
+        world.init_resource::<super::perf_hud::AssetChurn>();
         world.init_resource::<super::EventLog>();
         world.init_resource::<super::TrackedEntities>();
         world.init_resource::<super::MzbCollisionGeometry>();

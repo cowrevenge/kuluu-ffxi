@@ -113,7 +113,7 @@ pub struct SubTargetState {
 
     /// When `pending_switch` was armed; the wait lapses if no 0x058 lands.
     /// research/XiPackets/world/server/0x0058/README.md
-    pub pending_since: Option<std::time::Instant>,
+    pub pending_since: Option<bevy::platform::time::Instant>,
 }
 
 impl SubTargetState {

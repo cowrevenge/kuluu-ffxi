@@ -1856,7 +1856,7 @@ fn tnw(mes_num: u16, num: [i32; 4], name: &str) -> ZoneMessage {
 
 #[test]
 fn talknumwork_resolves_key_item_marker_from_zone_text() {
-    // Key item 1 = Zeruhn Report (vendor/server/scripts/enum/key_item.lua).
+    // Key item 1 = Zeruhn Report (vendor/server/data/enums/key_item.yaml).
     let line = zone_message_chat_line(
         &tnw(6438 | decode::MESNUM_HIDE_NAME_FLAG, [1, 0, 0, 0], ""),
         Some("Obtained key item: {KeyItem:0}.".to_string()),
@@ -1881,7 +1881,7 @@ fn test_dat_root() -> Option<ffxi_dat::DatRoot> {
 /// Full 0x02A chat composition against the retail DAT: the zone string's
 /// inline key-item tag must decode to `{KeyItem:0}` and resolve through
 /// `num[0]` (pre-fix this line rendered "Obtained key item: {Auto:128}3\u{FFFD}.").
-/// Key item 1 = Zeruhn Report (vendor/server/scripts/enum/key_item.lua).
+/// Key item 1 = Zeruhn Report (vendor/server/data/enums/key_item.yaml).
 /// Self-skips without game files.
 #[test]
 fn talknumwork_composes_real_keyitem_line_from_zone_dat() {

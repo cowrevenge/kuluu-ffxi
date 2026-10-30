@@ -1,4 +1,3 @@
-use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::{
     CascadeShadowConfig, CascadeShadowConfigBuilder, DirectionalLightShadowMap, VolumetricFog,
 };
@@ -6,6 +5,7 @@ use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 use bevy::render::renderer::RenderAdapter;
+use bevy::render::view::Tonemapping;
 use bevy::window::{PresentMode, PrimaryWindow};
 use serde::{Deserialize, Serialize};
 
@@ -1832,7 +1832,7 @@ impl GraphicsSettings {
     // Retail outputs colour directly with no filmic tonemap; a filmic curve desaturates
     // and flattens the authored palette.
     pub fn tonemapping(&self) -> Tonemapping {
-        Tonemapping::None
+        Tonemapping::Linear
     }
 
     fn lights_fine_is_default(&self) -> bool {
@@ -2871,7 +2871,10 @@ mod tests {
         assert!(!graphics_fields()
             .iter()
             .any(|f| f.label().contains("Sky") || f.label().contains("Water")));
-        assert_eq!(GraphicsSettings::default().tonemapping(), Tonemapping::None);
+        assert_eq!(
+            GraphicsSettings::default().tonemapping(),
+            Tonemapping::Linear
+        );
     }
 
     #[test]

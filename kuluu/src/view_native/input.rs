@@ -1299,6 +1299,10 @@ pub fn dispatch_movement_system(
             bindings.pressed(Action::CameraZoomIn, keys) || bindings.pressed(Action::PageUp, keys);
         let zoom_out = bindings.pressed(Action::CameraZoomOut, keys)
             || bindings.pressed(Action::PageDown, keys);
+        let trace_zoom = zoom_in || zoom_out || env.wheel_zoom.armed().is_some();
+        let focal_before = env.view_fov.focal_length;
+        let owed_before = env.wheel_zoom.frames_owed();
+        let owed_arm = env.wheel_zoom.armed();
         // Retail's tick: the 1/60 s frames elapsed since the last update (M29), so the focal moves at
         // 360/s whatever rate the fixed step runs at.
         let tick_frames = time.delta_secs() * kuluu_render::scheduler_runtime::ROUTINE_FPS;
@@ -1328,6 +1332,9 @@ pub fn dispatch_movement_system(
                 // Reaching a band end discards the rest of the owed frames too.
                 env.wheel_zoom.clear();
             }
+        }
+        if trace_zoom {
+            tracing::trace!(target: "input_trace", delta_secs = time.delta_secs(), tick_frames, focal_before, focal_after = env.view_fov.focal_length, owed_before, owed_after = env.wheel_zoom.frames_owed(), ?owed_arm, zoom_in, zoom_out, "Fixed camera zoom");
         }
     }
 
@@ -2547,6 +2554,12 @@ mod tests {
     use kuluu_snapshot::{Entity as WireEntity, EntityKind, Vec3 as WireVec3};
 
     fn movement_app() -> (App, mpsc::Receiver<AgentCommand>) {
+        movement_app_with_schedule(Update)
+    }
+
+    fn movement_app_with_schedule(
+        schedule: impl bevy::ecs::schedule::ScheduleLabel,
+    ) -> (App, mpsc::Receiver<AgentCommand>) {
         let mut app = App::new();
         let (tx, rx) = mpsc::channel(32);
         app.add_plugins(MinimalPlugins)
@@ -2582,13 +2595,72 @@ mod tests {
             .init_resource::<kuluu_render::cutscene::CutsceneMode>()
             .init_resource::<kuluu_render::rotation_drives::SelfAuthoredHeading>()
             .add_systems(
-                Update,
+                schedule,
                 (dispatch_movement_system, engage_locks_target_system),
             );
         let mut scene = app.world_mut().resource_mut::<SceneState>();
         scene.snapshot.self_char_id = Some(1);
         scene.snapshot.entities.push(ent(1, 0.0, 0.0));
         (app, rx)
+    }
+    #[test]
+    fn wheel_zoom_preserves_fractional_input_across_render_rates() {
+        use bevy::input::mouse::{MouseButtonInput, MouseMotion, MouseScrollUnit, MouseWheel};
+        const RENDER_RATES: [u32; 4] = [30, 60, 120, 240];
+        const SCROLL_EVENTS: u32 = 12;
+        const SCROLL_DELTA: f32 = 0.25;
+        const EPSILON: f32 = 0.001;
+        for fps in RENDER_RATES {
+            let (mut app, _commands) = movement_app_with_schedule(FixedUpdate);
+            app.add_message::<MouseMotion>()
+                .add_message::<MouseButtonInput>()
+                .add_message::<MouseWheel>()
+                .add_message::<CursorMoved>()
+                .add_plugins(kuluu_render::MousePlugin);
+            app.insert_resource(Time::<Fixed>::from_hz(RETAIL_MOVE_TICKS_PER_SEC as f64));
+            app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                Duration::from_secs_f64(1.0 / f64::from(fps)),
+            ));
+            app.insert_resource(slab_collision(0.0));
+            let file_id = {
+                let mut scene = app.world_mut().resource_mut::<SceneState>();
+                scene.snapshot.zone_id = Some(100);
+                kuluu_render::snapshot::effective_zone_file_id(&scene.snapshot)
+            };
+            app.world_mut()
+                .resource_mut::<kuluu_render::dat_mzb::LastAutoLoadedZone>()
+                .file_id = file_id;
+            app.update();
+            let initial = app.world().resource::<kuluu_render::ViewFov>().focal_length;
+            for frame in 0..fps + SCROLL_EVENTS {
+                if frame < SCROLL_EVENTS {
+                    app.world_mut().write_message(MouseWheel {
+                        unit: MouseScrollUnit::Pixel,
+                        x: 0.0,
+                        y: SCROLL_DELTA,
+                        window: Entity::PLACEHOLDER,
+                        phase: bevy::input::touch::TouchPhase::Moved,
+                    });
+                }
+                app.update();
+            }
+            let expected = initial
+                + SCROLL_EVENTS as f32
+                    * SCROLL_DELTA
+                    * kuluu_render::ViewFov::WHEEL_FRAMES_PER_NOTCH as f32
+                    * kuluu_render::ViewFov::FOCAL_STEP_PER_TICK;
+            let actual = app.world().resource::<kuluu_render::ViewFov>().focal_length;
+            assert!(
+                (actual - expected).abs() < EPSILON,
+                "{fps} FPS: {actual} != {expected}"
+            );
+            assert_eq!(
+                app.world()
+                    .resource::<kuluu_render::WheelZoom>()
+                    .frames_owed(),
+                0
+            );
+        }
     }
 
     #[test]

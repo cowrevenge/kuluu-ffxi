@@ -3,24 +3,33 @@ use super::slash_apply::{apply_keybind_update, apply_menu_text_command};
 
 /// ur/76: ◄ ► on a mission log's caption band step its members exactly as the
 /// Left/Right keys do - one law, `mission_cycle_member`'s greyed-skip included.
+/// Bevy 0.20 removed the ui interaction component these arrows watched, so the press arrives as a
+/// picking message and resolves through the parent chain to the arrow, exactly as every menu row
+/// now works (primary_pressed_rows in kuluu-render/src/hud/mod.rs; that helper is crate-private,
+/// so this system walks the chain itself).
 pub fn mission_log_arrow_press_system(
     mut mode: ResMut<InputMode>,
     scene_state: Res<SceneState>,
-    arrows: Query<
-        (
-            &kuluu_render::hud::menu::MissionLogArrow,
-            &bevy::prelude::Interaction,
-        ),
-        Changed<bevy::prelude::Interaction>,
-    >,
+    arrows: Query<&kuluu_render::hud::menu::MissionLogArrow>,
+    parents: Query<&ChildOf>,
+    mut presses: MessageReader<bevy::picking::events::PointerPress>,
 ) {
     let InputMode::Menu(stack) = &mut *mode else {
         return;
     };
-    for (arrow, interaction) in &arrows {
-        if *interaction != bevy::prelude::Interaction::Pressed {
+    for press in presses.read() {
+        if press.button != bevy::picking::pointer::PointerButton::Primary {
             continue;
         }
+        let Some(arrow_entity) = std::iter::once(press.entity)
+            .chain(parents.iter_ancestors(press.entity))
+            .find(|entity| arrows.get(*entity).is_ok())
+        else {
+            continue;
+        };
+        let Ok(arrow) = arrows.get(arrow_entity) else {
+            continue;
+        };
         let Some(level) = stack.current_mut() else {
             continue;
         };

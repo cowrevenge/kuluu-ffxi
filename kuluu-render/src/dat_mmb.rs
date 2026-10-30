@@ -1338,7 +1338,7 @@ pub fn resolve_static_model_textures(
 /// `zone_mesh_name`) starting with '_' selects an alpha-tested cutout at
 /// XIM's `discardThreshold` of 0.375; the `0x8000` flag bit marks translucency
 /// (water/glass), rendered as `AlphaMode::Blend` — the zone shader emits real
-/// alpha for these (see `flags.y` in `zone_ffxi.wgsl`). Everything else is
+/// alpha for these (see `flags.y` in `zone_ffxi.wesl`). Everything else is
 /// opaque. The render mode is NEVER derived from texture alpha content — doing
 /// so punches holes in ordinary opaque ground/wall textures that carry
 /// incidental transparency.

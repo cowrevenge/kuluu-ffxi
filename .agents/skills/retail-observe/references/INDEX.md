@@ -13,6 +13,9 @@ cites. Records from before the delta convention show "no delta".
 | 2026-10-25 | 2026-10-25-equip-set-apply.md | 10 | 9 | 1 | 0 |  |
 | 2026-10-25 | 2026-10-25-movement-input-actions.md | 8 | 6 | 1 | 1 |  |
 | 2026-10-25 | 2026-10-25-walker-speed-and-step.md | 12 | 11 | 1 | 0 |  |
+| 2026-10-20 | 2026-10-20-sprite-sheet-color-stages.md | no delta |  |  |  |  |
+| 2026-10-20 | 2026-10-20-wheel-zoom-timing.md | no delta |  |  |  |  |
+| 2026-10-20 | 2026-10-20-windurst-woods-lamps.md | no delta |  |  |  |  |
 | 2026-10-15 | 2026-10-15-gettext-tables.md | no delta |  |  |  |  |
 | 2026-10-15 | 2026-10-15-menu-docking-and-flags.md | no delta |  |  |  |  |
 | 2026-10-15 | 2026-10-15-menu-window-stacking.md | no delta |  |  |  |  |

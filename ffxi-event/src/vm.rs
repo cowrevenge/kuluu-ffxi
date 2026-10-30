@@ -4427,13 +4427,10 @@ mod tests {
             }
         }
 
-        assert!(
-            matches!(
-                e.step(),
-                StepResult::AwaitServerAck(PendingTag::SendTag { end_para: 0 })
-            ),
-            "an owner parked on its 0x43 poll surfaces the event-global tag through \
-             the master - zone 235's event 22 froze when this was swallowed"
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::SendTag { end_para: 0 }),
+            "an owner parked on its 0x43 poll surfaces the event-global tag through \n             the master - zone 235's event 22 froze when this was swallowed"
         );
         assert!(
             e.pending_tag().is_some(),
@@ -4492,11 +4489,9 @@ mod tests {
             }
         }
 
-        assert!(
-            matches!(
-                e.step(),
-                StepResult::AwaitServerAck(PendingTag::SendTag { end_para: 0 })
-            ),
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::SendTag { end_para: 0 }),
             "the owner surfaces its 0x43 poll through the master"
         );
         e.apply_pending_num(&[11, 22, 33, 44, 55, 66, 77, 88]);

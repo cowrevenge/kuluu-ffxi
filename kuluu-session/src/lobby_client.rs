@@ -1681,6 +1681,13 @@ mod tests {
         data.write_all(&DATA_ACK_SELECT).await.ok()?;
         let mut req_handoff = [0u8; IXFF_HEADER_SIZE];
         data.read_exact(&mut req_handoff).await.ok()?;
+        // The 0xA2's key3 fields are placeholders: LSB copies them without
+        // validating, overwrites the first 16 with its own md5(session_hash),
+        // and stamps its counter + HANDOFF_KEY_COUNTER_STEPS at [16..20]
+        // (vendor/server/src/login/data_session.cpp case 0xA2). What must be on
+        // the wire is exactly what xiloader puts there, our KEY3 untouched; the
+        // predicted seed is checked downstream in handoff.session_key_seed.
+        assert_eq!(&req_handoff[1..21], &KEY3);
         view.write_all(&next_login_packet(
             select_char_id(&select),
             ROSTER_CHAR_NAME,

@@ -558,11 +558,12 @@ impl CameraTransition {
 
 pub fn camera_transition_system(
     time: Res<Time>,
+    cutscene: Res<crate::cutscene::CutsceneMode>,
     mut transition: ResMut<CameraTransition>,
     mut mode: ResMut<CameraMode>,
     mut chase: ResMut<ChaseCamera>,
 ) {
-    if !transition.active {
+    if cutscene.camera_locked || !transition.active {
         return;
     }
 
@@ -739,13 +740,17 @@ pub use snapshot_chase_camera_system as chase_camera_system;
 
 pub fn firstperson_camera_system(
     mode: Res<CameraMode>,
+    cutscene: Res<crate::cutscene::CutsceneMode>,
     chase: Res<ChaseCamera>,
     step: Res<CameraStepSmoothing>,
     arrange: Option<Res<crate::myroom_arrange::ArrangeCameraHold>>,
     q_self: Query<(&Transform, Option<&BakedActor>), (With<IsSelf>, Without<OperatorCamera>)>,
     mut q_cam: Query<&mut Transform, (With<OperatorCamera>, Without<IsSelf>)>,
 ) {
-    if !matches!(*mode, CameraMode::FirstPerson) || arrange.is_some_and(|hold| hold.0) {
+    if cutscene.camera_locked
+        || !matches!(*mode, CameraMode::FirstPerson)
+        || arrange.is_some_and(|hold| hold.0)
+    {
         return;
     }
     let Ok((self_t, baked)) = q_self.single() else {
@@ -875,6 +880,67 @@ mod tests {
         let chain = heading_change_term_rad(10, 42)
             - (heading_change_term_rad(10, 26) + heading_change_term_rad(26, 42));
         assert!(chain.abs() < 1e-5);
+    }
+
+    #[test]
+    fn locked_cutscene_preserves_pose_in_first_person() {
+        let mut app = App::new();
+        app.insert_resource(CameraMode::FirstPerson)
+            .init_resource::<ChaseCamera>()
+            .init_resource::<CameraStepSmoothing>()
+            .insert_resource(crate::cutscene::CutsceneMode::active_locked())
+            .add_systems(Update, firstperson_camera_system);
+        app.world_mut().spawn((IsSelf, Transform::default()));
+        let authored_pose = Transform::from_translation(Vec3::X).looking_at(Vec3::ZERO, Vec3::Y);
+        let camera = app.world_mut().spawn((OperatorCamera, authored_pose)).id();
+
+        app.update();
+        assert_eq!(
+            *app.world().get::<Transform>(camera).unwrap(),
+            authored_pose
+        );
+
+        app.world_mut()
+            .resource_mut::<crate::cutscene::CutsceneMode>()
+            .camera_locked = false;
+        app.update();
+        assert_ne!(
+            *app.world().get::<Transform>(camera).unwrap(),
+            authored_pose
+        );
+    }
+
+    #[test]
+    fn locked_cutscene_pauses_active_camera_transition() {
+        let mut app = App::new();
+        let chase = ChaseCamera::default();
+        let distance = chase.distance;
+        let mut transition = CameraTransition::default();
+        transition.begin(CameraMode::Chase, distance);
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_secs_f32(transition.duration));
+        app.insert_resource(time)
+            .insert_resource(CameraMode::Chase)
+            .insert_resource(chase)
+            .insert_resource(transition)
+            .insert_resource(crate::cutscene::CutsceneMode::active_locked())
+            .add_systems(Update, camera_transition_system);
+
+        app.update();
+        assert_eq!(*app.world().resource::<CameraMode>(), CameraMode::Chase);
+        assert_eq!(app.world().resource::<ChaseCamera>().distance, distance);
+        assert_eq!(app.world().resource::<CameraTransition>().t, 0.0);
+        assert!(app.world().resource::<CameraTransition>().active);
+
+        app.world_mut()
+            .resource_mut::<crate::cutscene::CutsceneMode>()
+            .camera_locked = false;
+        app.update();
+        assert_eq!(
+            *app.world().resource::<CameraMode>(),
+            CameraMode::FirstPerson
+        );
+        assert!(!app.world().resource::<CameraTransition>().active);
     }
 
     fn locator_skeleton(bone: usize) -> ffxi_dat::skel::Skeleton {

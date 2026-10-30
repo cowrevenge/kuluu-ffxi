@@ -1,4 +1,4 @@
-use std::time::Instant;
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 use kuluu_snapshot::{

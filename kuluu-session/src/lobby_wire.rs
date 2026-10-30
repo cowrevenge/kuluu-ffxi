@@ -308,6 +308,24 @@ mod tests {
         );
     }
 
+    /// The counter word wraps rather than overflowing: LSB adds its handoff steps with C's unsigned
+    /// arithmetic, so a loader key at the top of the range still predicts the same seed
+    /// (vendor/server/src/login/data_session.cpp case 0xA2).
+    #[test]
+    fn the_handoff_word_wraps_at_the_top_of_the_range() {
+        let mut wire = LobbyWire::for_session(&lsb_session());
+        const NEAR_TOP: u32 = u32::MAX - HANDOFF_KEY_COUNTER_STEPS;
+        wire.note_view_request(0x26);
+        wire.begin_lobby_counter(NEAR_TOP);
+        let seed = wire.lsb_map_seed().unwrap();
+        assert_eq!(
+            u32::from_le_bytes(seed[16..20].try_into().unwrap()),
+            0,
+            "{NEAR_TOP:#010X} + 1 adopted, then + {HANDOFF_KEY_COUNTER_STEPS} handoff steps is
+             exactly 2^32, which wraps to zero"
+        );
+    }
+
     /// vendor/server/src/login/view_session.cpp stepsKeyOnError excludes the
     /// register request while name check is included; the retry re-steps as a
     /// fresh stepped request.

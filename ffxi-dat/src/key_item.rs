@@ -464,7 +464,7 @@ pub fn parse_key_item_filing(dat_bytes: &[u8]) -> Result<KeyItemFiling, KeyItemT
 }
 
 /// The installed client's key-item names, keyed by the id
-/// `vendor/server/scripts/enum/key_item.lua` uses. Empty when the DAT is
+/// `vendor/server/data/enums/key_item.yaml` uses. Empty when the DAT is
 /// missing or malformed, so a partial install degrades to whatever the caller
 /// already had.
 #[derive(Debug, Clone, Default)]

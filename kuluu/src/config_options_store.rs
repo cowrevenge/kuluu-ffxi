@@ -24,7 +24,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use bevy::prelude::*;
+// Named rather than globbed: Bevy 0.20's prelude carries its own `context`/`with_context`
+// extensions (`bevy_ecs/src/error/bevy_error.rs`), which make a bare `.with_context(..)` ambiguous
+// against `anyhow::Context`. The schedule and change-flag items the tests need are imported there.
+use bevy::prelude::{Local, Res, ResMut, Resource};
 use kuluu_render::hud::menu::DynamicMenu;
 
 /// File name for the option bucket, beside `graphics.json` and friends.
@@ -199,6 +202,8 @@ pub fn persist_config_options_on_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests drive a schedule or dirty a resource by hand.
+    use bevy::prelude::{App, DetectChangesMut, Update};
 
     fn tmp_path(label: &str) -> PathBuf {
         let mut p = std::env::temp_dir();

@@ -74,10 +74,12 @@ run_fmt() {
 }
 
 run_clippy() {
+  python3 scripts/check-blocking-policy.py
   # --all-targets also compiles tests/examples, so stale constructors and
   # broken examples surface as errors here, not just lint warnings. --locked
   # additionally fails on an out-of-date Cargo.lock.
-  cargo clippy --workspace --all-targets --locked "${FEATURES[@]}" -- -D warnings
+  # The method list is workspace-wide; viewer modules enable its blocking-call restriction.
+  cargo clippy --workspace --all-targets --locked "${FEATURES[@]}" -- -D warnings -A clippy::disallowed_methods
   run_style
 }
 
@@ -162,7 +164,15 @@ run_harness() {
   # tree as the runtime playbook for an agent playing the game.
   local settings=".claude/settings.json" codex_hooks=".codex/hooks.json"
   local codex_config=".codex/config.toml" bad=0 link target cmd path doc mode target_rel
-  local hook hook_file recipe check_output
+  local hook hook_file recipe check_output py
+  # Same interpreter probe as the other Python-backed stages: a Windows box may expose only
+  # `python`, or a `python3` alias that cannot exec.
+  py=$(python_bin)
+  if [ -z "$py" ]; then
+    echo "checks: harness - no python3/python found, so scripts/release-candidate.test.py cannot run" >&2
+    return 1
+  fi
+  "$py" scripts/release-candidate.test.py
 
   # 1. Every tracked entry under .claude/ is a symlink resolving inside
   #    .agents/, or settings.json itself. Content never lives here. The
@@ -785,7 +795,7 @@ run_enhanced() {
     return 1
   fi
   local features=(--no-default-features --features "native-window,$enhanced")
-  cargo clippy --workspace --all-targets --locked "${features[@]}" -- -D warnings
+  cargo clippy --workspace --all-targets --locked "${features[@]}" -- -D warnings -A clippy::disallowed_methods
   cargo test --workspace --locked "${features[@]}"
 }
 

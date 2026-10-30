@@ -1,7 +1,7 @@
 use bevy::input::mouse::{MouseButtonInput, MouseMotion, MouseWheel};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::camera::{
     yaw_for_heading, BodyFacingReference, CameraMode, CameraTransition, ChaseCamera, ViewFov,
@@ -218,7 +218,7 @@ impl Plugin for MousePlugin {
                 PreUpdate,
                 wheel_zoom_accumulate_system.after(collect_mouse_system),
             )
-            .add_systems(PostUpdate, wheel_zoom_drain_system)
+            .add_systems(FixedPostUpdate, wheel_zoom_drain_system)
             .add_systems(Update, sync_camera_inversion_system)
             .add_systems(Update, sync_edge_rotate_system)
             .add_systems(
@@ -278,19 +278,42 @@ pub fn collect_mouse_system(
     mut buttons: MessageReader<MouseButtonInput>,
     mut wheel: MessageReader<MouseWheel>,
     mut cursor: MessageReader<CursorMoved>,
+    windows: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
     mut state: ResMut<MousePointer>,
 ) {
     state.delta = Vec2::ZERO;
     state.wheel = 0.0;
 
     for ev in motion.read() {
+        tracing::trace!(target: "input_trace", delta = ?ev.delta, "Raw mouse motion");
         state.delta += ev.delta;
     }
-    for ev in cursor.read() {
-        state.cursor_pos = Some(ev.position);
+    let motion_delta = state.delta;
+    let locked = windows.single().is_ok_and(|(window, options)| {
+        window.focused && options.grab_mode == CursorGrabMode::Locked
+    });
+    if locked && (state.left || state.right) {
+        for ev in cursor.read() {
+            tracing::trace!(target: "input_trace", position = ?ev.position, locked, "Logical cursor position");
+        }
+        cursor.clear();
+        if let Some(position) = state.cursor_pos.as_mut() {
+            *position += motion_delta;
+        }
+    } else {
+        for ev in cursor.read() {
+            tracing::trace!(target: "input_trace", position = ?ev.position, locked, "Logical cursor position");
+            state.cursor_pos = Some(ev.position);
+        }
     }
     for ev in wheel.read() {
+        tracing::trace!(target: "input_trace", unit = ?ev.unit, y = ev.y, "Mouse wheel input");
         state.wheel += ev.y;
+    }
+    if motion_delta != Vec2::ZERO || state.wheel != 0.0 {
+        if let Ok((window, options)) = windows.single() {
+            tracing::trace!(target: "input_trace", scale = window.scale_factor(), focused = window.focused, grab_mode = ?options.grab_mode, "Mouse window state");
+        }
     }
     for ev in buttons.read() {
         let pressed = ev.state == ButtonState::Pressed;
@@ -627,6 +650,7 @@ pub fn mouse_camera_system(
                 mode,
                 &inversion,
             );
+            let yaw_before = chase.yaw;
             orbit_chase_by_axis(
                 axis,
                 mode,
@@ -635,6 +659,9 @@ pub fn mouse_camera_system(
                 &body_facing,
                 transition_left,
             );
+            if axis != Vec2::ZERO {
+                tracing::trace!(target: "input_trace", ?anchor, ?cursor, ?axis, yaw_delta = chase.yaw - yaw_before, delta_secs = time.delta_secs(), "Mouse camera drag");
+            }
         }
     }
     // Parked-cursor rotation is the other aim feed and never runs beside a drag: retail's edge
@@ -680,16 +707,26 @@ pub fn mouse_camera_system(
 /// simply grows, and only the camera update spends it. Keeping this apart from `mouse_camera_system`
 /// also keeps a HUD that claims this frame's wheel (chat scroll, minimap pan) in front of the camera
 /// zoom (M34).
-pub fn wheel_zoom_accumulate_system(pointer: Res<MousePointer>, mut owed: ResMut<WheelZoom>) {
-    let notches = pointer.wheel.round() as i32;
+pub fn wheel_zoom_accumulate_system(
+    pointer: Res<MousePointer>,
+    mode: Res<InputMode>,
+    mut remainder: Local<f32>,
+    mut owed: ResMut<WheelZoom>,
+) {
+    if !matches!(*mode, InputMode::World) {
+        *remainder = 0.0;
+        owed.clear();
+        return;
+    }
+    *remainder += pointer.wheel;
+    let notches = remainder.trunc() as i32;
+    *remainder -= notches as f32;
     if notches != 0 {
         owed.add_notches(notches);
     }
 }
 
-/// The once-per-frame drain toward zero (`FFXiMain.dll retail-2026-09` RVA `0x25E240`, reached from
-/// the frame function at RVA `0x1295A` through thunk RVA `0x25E0E0`). Retail runs it unconditionally,
-/// so a scroll no camera owned still ages out instead of firing much later (M34).
+// Drain after the fixed camera update so render-only frames cannot discard scroll input.
 pub fn wheel_zoom_drain_system(mut owed: ResMut<WheelZoom>) {
     owed.drain_one();
 }
@@ -697,6 +734,68 @@ pub fn wheel_zoom_drain_system(mut owed: ResMut<WheelZoom>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locked_drag_uses_motion_when_cursor_position_stays_at_anchor() {
+        const ANCHOR: Vec2 = Vec2::new(400.0, 300.0);
+        const DELTA: Vec2 = Vec2::new(20.0, -10.0);
+        let mut app = test_app();
+        app.add_message::<MouseMotion>()
+            .add_message::<MouseButtonInput>()
+            .add_message::<MouseWheel>()
+            .add_message::<CursorMoved>()
+            .insert_resource(MousePointer {
+                right: true,
+                cursor_pos: Some(ANCHOR),
+                right_track: DragTrack {
+                    press_pos: Some(ANCHOR),
+                    ..default()
+                },
+                ..default()
+            })
+            .add_systems(Update, collect_mouse_system);
+        let window = app
+            .world_mut()
+            .spawn((
+                Window {
+                    focused: true,
+                    ..default()
+                },
+                PrimaryWindow,
+                CursorOptions {
+                    grab_mode: CursorGrabMode::Locked,
+                    ..default()
+                },
+            ))
+            .id();
+        for count in 1..=3 {
+            app.world_mut().write_message(MouseMotion { delta: DELTA });
+            app.world_mut().write_message(CursorMoved {
+                window,
+                position: ANCHOR,
+                delta: Some(Vec2::ZERO),
+            });
+            app.update();
+            assert_eq!(
+                app.world().resource::<MousePointer>().cursor_pos,
+                Some(ANCHOR + DELTA * count as f32)
+            );
+        }
+        app.world_mut()
+            .get_mut::<CursorOptions>(window)
+            .unwrap()
+            .grab_mode = CursorGrabMode::None;
+        app.world_mut().write_message(CursorMoved {
+            window,
+            position: ANCHOR,
+            delta: None,
+        });
+        app.update();
+        assert_eq!(
+            app.world().resource::<MousePointer>().cursor_pos,
+            Some(ANCHOR)
+        );
+    }
 
     #[test]
     fn collect_mouse_resets_per_frame_signals() {
@@ -1007,6 +1106,15 @@ mod tests {
                 .insert_resource(CameraMode::Chase)
                 .insert_resource(ChaseCamera::default());
 
+            app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f64(
+                    1.0 / crate::scheduler_runtime::ROUTINE_FPS as f64,
+                ),
+            ));
+            app.insert_resource(Time::<Fixed>::from_hz(
+                crate::scheduler_runtime::ROUTINE_FPS as f64,
+            ));
+            app.update();
             let rest = app.world().resource::<ViewFov>().focal_length;
             // The scroll frame: the handler adds the frames owed, then the frame function's drain
             // takes one of them.

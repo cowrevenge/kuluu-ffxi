@@ -11,7 +11,7 @@ use lsb_scrape::{
 
 const LSB_MSG_BASIC_H: &str = "../vendor/server/src/map/enums/msg_basic.h";
 const LSB_MSG_LUA: &str = "../vendor/server/scripts/enum/msg.lua";
-const LSB_KEY_ITEM_LUA: &str = "../vendor/server/scripts/enum/key_item.lua";
+const LSB_KEY_ITEM_YAML: &str = "../vendor/server/data/enums/key_item.yaml";
 const LSB_JOB_NAME_LUA: &str = "../vendor/server/scripts/enum/job_name.lua";
 /// The `xi.title` enum: every title id the server knows (`profile.title`, which s2c 0x061 sends as
 /// `designation`). Its values are identifiers, not retail's display text, so they go through
@@ -128,7 +128,7 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed={LSB_MISSIONS_LUA}");
     println!("cargo:rerun-if-changed={LSB_MSG_BASIC_H}");
     println!("cargo:rerun-if-changed={LSB_MSG_LUA}");
-    println!("cargo:rerun-if-changed={LSB_KEY_ITEM_LUA}");
+    println!("cargo:rerun-if-changed={LSB_KEY_ITEM_YAML}");
     println!("cargo:rerun-if-changed={LSB_JOB_NAME_LUA}");
     println!("cargo:rerun-if-changed={LSB_TITLE_LUA}");
     println!("cargo:rerun-if-changed={LSB_SPELL_LIST_SQL}");
@@ -229,18 +229,21 @@ fn main() -> Result<()> {
         floor::STATUS_EFFECT,
     )?;
 
-    let key_item_src = fs::read_to_string(LSB_KEY_ITEM_LUA)
-        .with_context(|| format!("reading {LSB_KEY_ITEM_LUA}"))?;
-    let key_item_entries = parse_xi_ident_table(&key_item_src, "xi.keyItem")?;
+    let key_item_src = fs::read_to_string(LSB_KEY_ITEM_YAML)
+        .with_context(|| format!("reading {LSB_KEY_ITEM_YAML}"))?;
+    let key_item_entries: Vec<_> = parse_yaml_enum_values(&key_item_src)?
+        .into_iter()
+        .map(|(name, id)| (id, prettify_snake_case(&name)))
+        .collect();
     write_u16_table(
         &out_dir.join("key_item_names_table.rs"),
         "KEY_ITEM_NAMES",
-        LSB_KEY_ITEM_LUA,
+        LSB_KEY_ITEM_YAML,
         &key_item_entries,
     )?;
     check_scrape_count(
         "key_item entries",
-        LSB_KEY_ITEM_LUA,
+        LSB_KEY_ITEM_YAML,
         key_item_entries.len(),
         floor::KEY_ITEM,
     )?;

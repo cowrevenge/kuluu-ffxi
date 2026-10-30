@@ -552,10 +552,10 @@ async fn run_char_create(
 ) -> Result<CharCreateOk> {
     let name = spec.name.clone();
     tracing::info!(name = %name, race = spec.race, job = spec.job, "char-create: sending");
-    let refreshed = handle
-        .create_character(&auth, &spec)
-        .await
-        .context("character creation")?;
+    let refreshed = Context::context(
+        handle.create_character(&auth, &spec).await,
+        "character creation",
+    )?;
     tracing::info!(
         name = %name,
         char_count = refreshed.chars().len(),

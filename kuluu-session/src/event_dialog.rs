@@ -766,6 +766,31 @@ impl DialogSession {
         self.runner.as_ref().and_then(|r| r.pending_tag().cloned())
     }
 
+    pub(crate) fn trace_step(&self, advance: &Advance) {
+        let (Some(runner), Some(active)) = (self.runner.as_ref(), self.active.as_ref()) else {
+            return;
+        };
+        let outcome = match advance {
+            Advance::Frame(_) => "frame",
+            Advance::Ended { .. } => "ended",
+            Advance::Waiting => "waiting",
+            Advance::AwaitServerAck(_) => "server_ack",
+        };
+        tracing::trace!(
+            target: "event_trace",
+            unique_no = active.unique_no,
+            act_index = active.act_index,
+            event_id = active.event_id,
+            outcome,
+            park = ?runner.park(),
+            exec_pointer = runner.exec_pointer(),
+            pending_tag = ?runner.pending_tag(),
+            progress = runner.progress_stamp(),
+            pending_motion_holds = ?self.pending_motion_holds,
+            "prepared event step"
+        );
+    }
+
     /// True exactly once per up→down transition of the displayed frame: call it
     /// after every step and emit [`AgentEvent::DialogDismissed`](crate::state::AgentEvent)
     /// when it fires. Retail clears CliEventMessOpenFlag on dismissal, so the
@@ -946,6 +971,13 @@ impl DialogSession {
     /// release the VM's hold when the last one lands. No-op when nothing is
     /// pending for the pair (stray report, event already ended).
     pub fn motion_done(&mut self, actor: CutsceneActor, key: FourCc) {
+        tracing::trace!(
+            target: "event_trace",
+            ?actor,
+            ?key,
+            pending = self.pending_motion_holds.contains_key(&(actor, key)),
+            "renderer motion completion"
+        );
         let Some(entry) = self.pending_motion_holds.get_mut(&(actor, key)) else {
             return;
         };
@@ -3939,7 +3971,7 @@ pub(crate) mod tests {
 
     #[test]
     fn substitutes_key_item_and_item_markers_with_scraped_names() {
-        // Key item 1 = Zeruhn Report (vendor/server/scripts/enum/key_item.lua),
+        // Key item 1 = Zeruhn Report (vendor/server/data/enums/key_item.yaml),
         // item 4509 = Flask of Distilled Water (vendor/server/sql/item_basic.sql).
         let text = "Obtained key item: {KeyItem:0}. Also {Item:1}.".to_string();
         assert_eq!(

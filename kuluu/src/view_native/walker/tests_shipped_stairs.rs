@@ -1922,6 +1922,7 @@ fn drive_flat(
 #[test]
 fn running_on_flat_shipped_ground_commits_one_height() {
     let mut checked = 0usize;
+    let mut zones_loaded = 0usize;
     let mut worst = 0.0f32;
     let mut worst_case = String::new();
     for (zone, lanes) in [
@@ -1936,8 +1937,10 @@ fn running_on_flat_shipped_ground_commits_one_height() {
         (234u16, [(-21.3f32, 60.0), (-30.0, 44.0), (-12.0, 30.0)]),
     ] {
         let Some(geom) = zone_geom(zone) else {
+            println!("flat-run: zone {zone} geometry unavailable here (no client install)");
             continue;
         };
+        zones_loaded += 1;
         for (x0, z0) in lanes {
             for (label, dir) in [
                 ("+x", (1.0f32, 0.0f32)),
@@ -1983,9 +1986,17 @@ fn running_on_flat_shipped_ground_commits_one_height() {
             format!(" ({worst_case})")
         }
     );
+    if zones_loaded == 0 {
+        // Same self-skip convention as every sibling in this module: with no client
+        // install on the machine there is no shipped ground to drive, and asserting here
+        // would only measure whether the DATs are present.
+        println!("flat-run skipped: no shipped zone geometry on this machine");
+        return;
+    }
     assert!(
         checked > 0,
-        "no flat shipped segment found to drive - install missing?"
+        "{zones_loaded} shipped zones loaded but not one flat segment drove - either the pinned \
+         lanes moved or drive_flat's acceptance gate changed"
     );
 }
 

@@ -114,7 +114,10 @@ use serde::{Deserialize, Serialize};
 // v47: CharStats gains the allegiance block s2c 0x061 already carries (title id, conquest rank and
 // bar, home-point zone, nation) and SceneSnapshot gains `job_ranks`, the mastery/mentor pair from
 // s2c 0x01B. The Status Profile window draws all of it.
-pub const PROTOCOL_VERSION: u32 = 47;
+// v48: ViewerEvent::{EventSoundChannelsSet, EventSoundChannelsChange, EventMapPropsState,
+// MapReloadRequested, ActorRenderFlagChanged} - the event VM's no-skip ops crossing to their
+// consumers (.agents/skills/retail-observe/references/2026-10-28-event-opcode-no-skip-pass.md).
+pub const PROTOCOL_VERSION: u32 = 48;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -2638,6 +2641,45 @@ pub enum ViewerEvent {
     /// research/XiEvents/OpCodes/0x008A.md
     MapClosed,
 
+    /// Event scripts 0x69 SETSOUNDVOLUME / 0x6A CHANGESOUNDVOLUME channel mask
+    /// (`.agents/skills/retail-observe/references/2026-10-28-event-opcode-no-skip-pass.md`):
+    /// the masked retail sound channels snap to exactly full (`enabled`) or
+    /// exactly silence, no ramp. The renderer folds it into its two buses.
+    EventSoundChannelsSet {
+        mask: u8,
+        enabled: bool,
+    },
+
+    /// 0x6A CHANGESOUNDVOLUME: the masked channels ease to
+    /// `volume_thousandths`/1000 — retail's scale constant is exactly 1/1000.
+    EventSoundChannelsChange {
+        mask: u8,
+        volume_thousandths: i32,
+    },
+
+    /// Event script 0x8D OPEN_MAP_PROPS: the prop-label layer state of a zone's
+    /// map window, both raw work operands; stored only until a label layer exists
+    /// (`.agents/skills/retail-observe/references/2026-10-28-event-opcode-no-skip-pass.md`).
+    EventMapPropsState {
+        select: i32,
+        value: i32,
+    },
+
+    /// Event scripts 0x34/0x35 MAPLOAD / MAPLOAD_KEEP, third pass: the running
+    /// event asks for a map-window reload on `map_id` (same record).
+    MapReloadRequested {
+        map_id: u16,
+    },
+
+    /// Event scripts 0x92/0x94 flag-word bits and 0x81 visual-half byte: one
+    /// actor render-flag write, bit index from the image offsets, published for
+    /// observation until a pass names the bits' visual role (same record).
+    ActorRenderFlagChanged {
+        actor: CutsceneActor,
+        bit: u32,
+        value: bool,
+    },
+
     LevelUp {
         player_id: u32,
     },
@@ -3314,7 +3356,7 @@ mod tests {
 
     #[test]
     fn current_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 47;
+        const VERSION: u32 = 48;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();

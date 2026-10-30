@@ -606,6 +606,29 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
             label,
         }),
         AgentEvent::MapClosed => Some(wire::ViewerEvent::MapClosed),
+        AgentEvent::EventSoundChannelsSet { mask, enabled } => {
+            Some(wire::ViewerEvent::EventSoundChannelsSet { mask, enabled })
+        }
+        AgentEvent::EventSoundChannelsChange {
+            mask,
+            volume_thousandths,
+        } => Some(wire::ViewerEvent::EventSoundChannelsChange {
+            mask,
+            volume_thousandths,
+        }),
+        AgentEvent::EventMapPropsState { select, value } => {
+            Some(wire::ViewerEvent::EventMapPropsState { select, value })
+        }
+        AgentEvent::MapReloadRequested { map_id } => {
+            Some(wire::ViewerEvent::MapReloadRequested { map_id })
+        }
+        AgentEvent::ActorRenderFlagChanged { actor, bit, value } => {
+            Some(wire::ViewerEvent::ActorRenderFlagChanged {
+                actor: cutscene_actor_to_wire(actor),
+                bit,
+                value,
+            })
+        }
 
         _ => None,
     }

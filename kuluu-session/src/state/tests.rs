@@ -3255,6 +3255,11 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::MapOpen { .. } => (),
         AgentEvent::MapMarkerPlaced { .. } => (),
         AgentEvent::MapClosed => (),
+        AgentEvent::EventSoundChannelsSet { .. } => (),
+        AgentEvent::EventSoundChannelsChange { .. } => (),
+        AgentEvent::EventMapPropsState { .. } => (),
+        AgentEvent::MapReloadRequested { .. } => (),
+        AgentEvent::ActorRenderFlagChanged { .. } => (),
         // The actor-mirrored arrangement mode (bead kuluu-o9qt7.39).
         AgentEvent::MyroomModeChanged { .. } => (),
     }

@@ -2895,6 +2895,11 @@ impl SessionState {
             | AgentEvent::CutsceneCue { .. }
             | AgentEvent::MapOpen { .. }
             | AgentEvent::MapMarkerPlaced { .. }
+            | AgentEvent::EventSoundChannelsSet { .. }
+            | AgentEvent::EventSoundChannelsChange { .. }
+            | AgentEvent::EventMapPropsState { .. }
+            | AgentEvent::MapReloadRequested { .. }
+            | AgentEvent::ActorRenderFlagChanged { .. }
             | AgentEvent::MapClosed => false,
             AgentEvent::CutsceneEnded => {
                 let changed = self.cs_mount_armed;
@@ -4091,6 +4096,50 @@ pub enum AgentEvent {
     /// Event script 0x8A CLOSE_MAP (research/XiEvents/OpCodes/0x008A.md):
     /// close the Map screen.
     MapClosed,
+
+    /// Event scripts 0x69 SETSOUNDVOLUME: drive the masked retail sound channels
+    /// to exactly full (`enabled`) or exactly silence at once — no ramp.
+    /// kuluu folds retail's four mixer arms plus its global multiplier slot into
+    /// two buses (`.agents/skills/retail-observe/references/
+    /// 2026-10-28-event-opcode-no-skip-pass.md`).
+    EventSoundChannelsSet {
+        mask: u8,
+        enabled: bool,
+    },
+
+    /// Event script 0x6A CHANGESOUNDVOLUME: the masked channels ease to
+    /// `volume_thousandths`/1000 — retail's scale constant is exactly 1/1000.
+    EventSoundChannelsChange {
+        mask: u8,
+        volume_thousandths: i32,
+    },
+
+    /// Event script 0x8D OPEN_MAP_PROPS: the prop-label layer state of a zone's
+    /// map window, both raw work operands (retail passes them to its shared
+    /// window helper as select/value). kuluu has no prop-label layer yet, so the
+    /// state is carried and stored only (record delta).
+    EventMapPropsState {
+        select: i32,
+        value: i32,
+    },
+
+    /// Event scripts 0x34/0x35 MAPLOAD/MAPLOAD_KEEP, third pass: retail tears
+    /// the map-window data down and re-opens it for the id its first work
+    /// operand names (record delta; kuluu's only observable branch).
+    MapReloadRequested {
+        map_id: u16,
+    },
+
+    /// Event scripts 0x92/0x94 flag-word bits and 0x81 visual-half byte: one
+    /// per-actor render-flag write, `bit` the index from the image offsets
+    /// (`.agents/skills/retail-observe/references/2026-10-28-event-opcode-no-skip-pass.md`).
+    /// Published only — no source names these bits' visual role yet, so nothing
+    /// applies them.
+    ActorRenderFlagChanged {
+        actor: CutsceneActor,
+        bit: u32,
+        value: bool,
+    },
 
     LevelUp {
         player_id: u32,

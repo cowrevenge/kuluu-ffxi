@@ -236,8 +236,10 @@ pub struct Config {
 #[derive(Clone, Debug)]
 pub struct InitialState {
     pub auth: crate::auth_client::AuthSession,
+    /// Map blowfish seed rides in the handoff (vendor/server/src/login/
+    /// data_session.cpp case 0xA2 rewrites it server-side; the lobby mirror
+    /// predicts the same bytes).
     pub handoff: crate::lobby_client::MapHandoff,
-    pub key3: [u8; 20],
 }
 
 pub async fn run(
@@ -248,13 +250,13 @@ pub async fn run(
     let auth = AuthClient::new(cfg.server.clone(), cfg.auth_port);
     let cert_sha256 = auth.verifier.fingerprint_hex();
 
-    let (auth_session, handoff, key3, resolved_char_id) = match cfg.initial_state.clone() {
+    let (auth_session, handoff, resolved_char_id) = match cfg.initial_state.clone() {
         Some(state) => {
             let char_id = match &cfg.char_selection {
                 CharSelection::Id(id) => *id,
                 CharSelection::Name(_) => state.handoff.char_id,
             };
-            (state.auth, state.handoff, state.key3, char_id)
+            (state.auth, state.handoff, char_id)
         }
         None => {
             emit_stage(&event_tx, Stage::Authenticating);
@@ -290,7 +292,7 @@ pub async fn run(
                     (char_id, handoff)
                 }
             };
-            (auth_session, handoff, key3, char_id)
+            (auth_session, handoff, char_id)
         }
     };
 
@@ -381,7 +383,7 @@ pub async fn run(
         }
     }
 
-    let mut current_seed = key3;
+    let mut current_seed = handoff.session_key_seed;
     let mut iteration: u32 = 0;
 
     // The spell DAT (ROM/118/114.DAT) is zone-invariant: load it once off the

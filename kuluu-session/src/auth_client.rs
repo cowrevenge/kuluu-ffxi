@@ -554,7 +554,7 @@ mod tests {
     use super::*;
 
     // vendor/server/src/login/auth_session.h SupportedXiloaderVersion
-    const LSB_SUPPORTED_XILOADER_VERSION: [u8; 3] = [2, 1, 0];
+    const LSB_SUPPORTED_XILOADER_VERSION: [u8; 3] = [2, 2, 0];
 
     #[test]
     fn default_version_matches_lsb_supported_xiloader() {

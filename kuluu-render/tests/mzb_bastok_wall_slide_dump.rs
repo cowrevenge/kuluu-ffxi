@@ -35,12 +35,14 @@ struct Spot {
     feet_y: f32,
 }
 
-fn bastok_block() -> (
+fn bastok_block() -> Option<(
     MzbCollisionGeometry,
     Vec<kuluu_render::dat_mzb::MzbSubMesh>,
     Vec<kuluu_render::dat_mzb::MzbInstance>,
-) {
-    let root = ffxi_dat::archive::open_test_install().expect("install");
+)> {
+    let Some(root) = ffxi_dat::archive::open_test_install() else {
+        return None; // install-gated, print-only: CI has no DATs
+    };
     bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
     let file_id = ffxi_dat::zone_dat::zone_id_to_mzb_file_id(BASTOK_ZONE).unwrap();
     let (submeshes, instances) = load_mzb_placed(&root, file_id, None).unwrap();
@@ -49,7 +51,7 @@ fn bastok_block() -> (
         &instances,
         Some(file_id),
     ));
-    (geom, submeshes, instances)
+    Some((geom, submeshes, instances))
 }
 
 fn dump_spot(
@@ -232,10 +234,10 @@ fn dump_spot(
 
 #[test]
 fn bastok_wall_slide_and_fence_census() {
-    let Some(_root) = ffxi_dat::archive::open_test_install() else {
+    // The loader owns the install check now, so there is one skip path, not two.
+    let Some((geom, submeshes, instances)) = bastok_block() else {
         return; // install-gated, print-only
     };
-    let (geom, submeshes, instances) = bastok_block();
     let spots = [
         Spot {
             name: "BUG-A caught-on-angled-wall t17851",

@@ -28,7 +28,11 @@ struct Box2 {
 }
 
 fn dump_zone(b: &Box2, known_ids: &[usize]) {
-    let root = ffxi_dat::archive::open_test_install().expect("install");
+    // install-gated, print-only: a checkout without a client install (CI) has no shipped
+    // triangles to census, and that is not a defect.
+    let Some(root) = ffxi_dat::archive::open_test_install() else {
+        return;
+    };
     bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
     let file_id = ffxi_dat::zone_dat::zone_id_to_mzb_file_id(b.zone).unwrap();
     let (submeshes, instances) = load_mzb_placed(&root, file_id, None).unwrap();

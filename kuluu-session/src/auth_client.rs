@@ -553,8 +553,14 @@ fn trim_trailing_zero(b: &[u8]) -> &[u8] {
 mod tests {
     use super::*;
 
-    // vendor/server/src/login/auth_session.h SupportedXiloaderVersion
-    const LSB_SUPPORTED_XILOADER_VERSION: [u8; 3] = [2, 2, 0];
+    // vendor/server/src/login/auth_session.h SupportedXiloaderVersion at the commit
+    // this repo pins (`git rev-parse HEAD:vendor/server`). build.rs scrapes that same
+    // header into `ffxi_proto::login::SUPPORTED_XILOADER_VERSION`, so a mismatch here
+    // means this checkout's vendor/server working tree is not at the pin (a stray
+    // newer LSB snapshot sits in it): realign with
+    // `git submodule update --checkout vendor/server`. Retyping these numbers instead
+    // forks CI from the dev machine.
+    const LSB_SUPPORTED_XILOADER_VERSION: [u8; 3] = [2, 1, 0];
 
     #[test]
     fn default_version_matches_lsb_supported_xiloader() {

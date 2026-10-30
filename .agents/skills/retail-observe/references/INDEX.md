@@ -6,8 +6,10 @@ cites. Records from before the delta convention show "no delta".
 
 | date | record | rules | matches | differs | missing | open beads |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-10-28 | 2026-10-28-cutscene-scheduler-stage-tags.md | 21 | 11 | 0 | 5 |  |
+| 2026-10-28 | 2026-10-28-event-opcode-no-skip-pass.md | 66 | 47 | 13 | 1 |  |
 | 2026-10-26 | 2026-10-26-placed-prop-collision.md | 7 | 2 | 2 | 3 |  |
-| 2026-10-25 | 2026-10-25-collision-query.md | 32 | 20 | 9 | 2 |  |
+| 2026-10-25 | 2026-10-25-collision-query.md | 47 | 25 | 18 | 3 |  |
 | 2026-10-25 | 2026-10-25-equip-set-apply.md | 10 | 9 | 1 | 0 |  |
 | 2026-10-25 | 2026-10-25-movement-input-actions.md | 8 | 6 | 1 | 1 |  |
 | 2026-10-25 | 2026-10-25-walker-speed-and-step.md | 12 | 11 | 1 | 0 |  |
@@ -17,7 +19,7 @@ cites. Records from before the delta convention show "no delta".
 | 2026-10-15 | 2026-10-15-merit-and-job-point-windows.md | no delta |  |  |  |  |
 | 2026-10-15 | 2026-10-15-mog-house-arrange.md | no delta |  |  |  |  |
 | 2026-10-15 | 2026-10-15-unity-and-fp-windows.md | no delta |  |  |  |  |
-| 2026-10-07 | 2026-10-07-camera-orbit-channels.md | 8 | 6 | 2 | 0 |  |
+| 2026-10-07 | 2026-10-07-camera-orbit-channels.md | 11 | 9 | 2 | 0 |  |
 | 2026-10-07 | 2026-10-07-procedural-distortion.md | no delta |  |  |  |  |
 | 2026-10-05 | 2026-10-05-attached-effect-placement.md | no delta |  |  |  |  |
 | 2026-10-04 | 2026-10-04-crtl-condition-grammar.md | no delta |  |  |  |  |

@@ -7,7 +7,7 @@
 # the *exact* fmt/clippy invocation CI will, and vice versa.
 #
 # Usage: scripts/checks.sh <stage>...
-#   stage ∈ {harness, readme, comments, literals, records, records-index, fmt, clippy, style, contracts, install, test, enhanced, build, wasm, doc, sweep}
+#   stage ∈ {harness, readme, comments, literals, records, records-index, opcode-table, fmt, clippy, style, contracts, install, test, enhanced, build, wasm, doc, sweep}
 #   scripts/checks.sh harness comments fmt contracts clippy  # pre-push default
 #   COMMENTS_DIFF=staged scripts/checks.sh comments  # pre-commit (staged hunks)
 #   RECORDS_DIFF=staged scripts/checks.sh records    # pre-commit (staged observation records)
@@ -627,6 +627,56 @@ run_records_index() {
   return 0
 }
 
+run_opcode_table() {
+  # references/data/opcode-effect-table.md is derived from this build's decompiled event handlers by
+  # scripts/opcode-effect-table.py: one row per dispatch slot, listing every store, call and yield the
+  # handler performs with its instruction VA. It exists so "this opcode does nothing" cannot be claimed
+  # without the instruction list backing it up - six rows were once mislabelled "effectless" here, and
+  # --check is the fence against that: it fails if a handler written off as store-free/call-free turns
+  # out not to be. Two things are enforced: the committed artifact matches a fresh derivation, and the
+  # effect-free set still equals the hand-verified one.
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "checks: opcode-table - skipped (no python3)"
+    return 0
+  fi
+  local table=.agents/skills/retail-observe/references/data/opcode-effect-table.md fresh status=0
+  if [ ! -f "$table" ]; then
+    echo "checks: opcode-table - $table is missing; run 'python3 scripts/opcode-effect-table.py'" >&2
+    return 1
+  fi
+  # The ledger's mirror into Rust needs no image, so it is fenced on every run, CI included.
+  if ! python3 scripts/opcode-table-embed.py --check; then
+    echo "checks: opcode-table - ffxi-event/src/opcode_table.rs drifted from the committed ledger; run 'python3 scripts/opcode-table-embed.py'" >&2
+    return 1
+  fi
+  # Both derivations read FFXiMain's unpacked image and its generated C under research/xi-on-anything,
+  # which a plain checkout does not populate (scripts/install-rea.ps1 populates it), so the image-backed
+  # half skips when that data is absent - like `install` skipping without game assets. The committed
+  # artifact still has to match its mirror above, and any machine holding the disassembly runs the
+  # full derivation, so a stale effect table cannot ride through on a checkout that lacks the image.
+  local gen=research/xi-on-anything/generated
+  if [ ! -f "$gen/FFXiMain.unpacked.dll" ] || [ ! -d "$gen/all" ]; then
+    echo "checks: opcode-table - $gen not populated (scripts/install-rea.ps1 populates it); image-backed derivation skipped"
+    return 0
+  fi
+  fresh=$(mktemp)
+  if ! python3 scripts/opcode-effect-table.py --out "$fresh" >/dev/null; then
+    echo "checks: opcode-table - derivation failed" >&2
+    rm -f "$fresh"
+    return 1
+  fi
+  if ! cmp -s "$fresh" "$table"; then
+    echo "checks: opcode-table - $table is stale; run 'python3 scripts/opcode-effect-table.py' and commit it" >&2
+    status=1
+  fi
+  rm -f "$fresh"
+  if ! python3 scripts/opcode-effect-table.py --check >/dev/null; then
+    echo "checks: opcode-table - an effect-free claim no longer matches the image (STUB_ONLY in the script)" >&2
+    status=1
+  fi
+  return $status
+}
+
 run_contracts() {
   # Two entry points because the ferry/bootstrap contracts block on their own
   # current-thread runtime and must run outside an active tokio context; both
@@ -872,6 +922,7 @@ for stage in "$@"; do
     literals) echo "checks: literals"; run_literals ;;
     records) echo "checks: records"; run_records ;;
     records-index) echo "checks: records-index"; run_records_index ;;
+    opcode-table) echo "checks: opcode-table"; run_opcode_table ;;
     harness) echo "checks: harness"; run_harness ;;
     contracts) echo "checks: contracts"; run_contracts ;;
     install) echo "checks: install"; run_install ;;

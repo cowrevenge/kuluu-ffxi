@@ -89,12 +89,12 @@ SKILL.md "Character strategy"):
 
 ```bash
 target/release/kuluu --agent-listen auto play --unfocused --mute \
-  verilight 'TestPass!1234' Verilamp
+  gui_cs1 'TestPass!1234' Csrent
 ```
 
-`verilight`/`TestPass!1234`/`Verilamp` (gmlevel 5) is this machine's throwaway
-dev account — a documented local example credential, not a secret; type it
-into launch commands freely. Use the user's real env-var account only when the
+`gui_cs1`/`TestPass!1234`/`Csrent` (`accounts.priv=5`) is this machine's single
+shared drive fixture — a documented local example credential, not a secret;
+type it into launch commands freely. Never invent another login. Use the user's real env-var account only when the
 check needs their own character.
 
 Credentials are **positional args to `play`** — the GUI path reads no
@@ -434,7 +434,7 @@ input-driven bugs; use `debug_drive` for those.
   Check this first when captures are blank; only a human unlock fixes it.
 - Ghost sessions: prefer a clean socket `disconnect` over `kill`. The map server
   holds a killed char for 2–5 min and the next login times out. To clear one:
-  `DELETE FROM accounts_sessions WHERE charid=<id>` (Verilamp is 17455719).
+  `DELETE FROM accounts_sessions WHERE charid=<id>` (Csrent is charid 5).
   That table's `targid` column is also the authoritative live targid —
   `charid & 0x7FF` is **not** it, and the server rejects actions built on it.
 - Agent-socket `chat` bypasses the client's local `/`-command parser and sends a

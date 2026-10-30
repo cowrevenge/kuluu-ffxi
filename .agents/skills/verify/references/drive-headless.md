@@ -103,7 +103,7 @@ D=/c/tmp/agent; rm -rf $D; mkdir -p $D; mkfifo $D/in
 
 (exec 3>$D/in; sleep 900) &   # hold the fifo write end open for the session's lifetime
 RUST_LOG=info ./target/release/kuluu.exe --server 127.0.0.1 \
-  play verilight 'TestPass!1234' Verilamp --headless --mute < $D/in > $D/events.jsonl 2> $D/client.log &
+  play gui_cs1 'TestPass!1234' Csrent --headless --mute < $D/in > $D/events.jsonl 2> $D/client.log &
 
 sleep 12; head -c 3000 $D/events.jsonl    # connected -> zone_changed -> entity_upserted
 ```
@@ -116,7 +116,7 @@ under test needs dev-profile assertions.
 # Unix — no mkfifo needed at all:
 D=$(mktemp -d)
 (sleep 1800 | RUST_LOG=info ./target/release/kuluu --server 127.0.0.1 play \
-  verilight 'TestPass!1234' Verilamp --headless --mute) > $D/events.jsonl 2> $D/client.log &
+  gui_cs1 'TestPass!1234' Csrent --headless --mute) > $D/events.jsonl 2> $D/client.log &
 ```
 
 The pipe's write end stays open for `sleep`'s lifetime, and EOF ends the session cleanly.
@@ -201,12 +201,12 @@ that only executes inside the render app. The window must exist; a capture is op
 cargo build -p kuluu --release --features native-window
 mkdir -p /c/tmp/health-$(date +%Y%m%d)
 KULUU_WINDOW_HIDDEN=1 RUST_LOG=warn \
-  ./target/release/kuluu.exe --server 127.0.0.1 play verilight 'TestPass!1234' Verilamp \
+  ./target/release/kuluu.exe --server 127.0.0.1 play gui_cs1 'TestPass!1234' Csrent \
   --mute > /dev/null 2> /c/tmp/health-<date>/client.log &
 
 # Unix — identical invocation, binary and kill differ:
 KULUU_WINDOW_HIDDEN=1 RUST_LOG=warn \
-  ./target/release/kuluu --server 127.0.0.1 play verilight 'TestPass!1234' Verilamp \
+  ./target/release/kuluu --server 127.0.0.1 play gui_cs1 'TestPass!1234' Csrent \
   --mute > /dev/null 2> $D/client.log &
 ```
 
@@ -243,7 +243,7 @@ KULUU_WINDOW_HIDDEN=1 \
 ANIMTEST_AUTO="zone,g141,g144,shot" \
 ANIMTEST_ZONE_ID=<id> ANIMTEST_MZB_FILE_ID=<fid> ANIMTEST_WORLD_POS="0,0,0" \
 ANIMTEST_SHOT_PATH=/c/tmp/<dated>/zone.png \
-RUST_LOG=info ./target/release/kuluu.exe --server 127.0.0.1 play verilight 'TestPass!1234' \
+RUST_LOG=info ./target/release/kuluu.exe --server 127.0.0.1 play gui_cs1 'TestPass!1234' \
   --mute > /dev/null 2> /c/tmp/<dated>/client.log &      # Unix: same, minus the .exe
 ```
 

@@ -127,25 +127,40 @@ mechanical middle, not the thinking.
 
 ## Character strategy
 
-**Never ask the user for credentials.** This is a local dev stack with
-throwaway accounts; verification is expected to launch sessions on its own.
-Default to one of the documented local accounts below (or provision a fresh
-one) — do not stop to request a login. The only credentials that are secret
-are the user's *real* env-var account, which you use only when a check needs
-their actual character; even then it comes from the environment, never a
-prompt.
+**Never ask the user for credentials.** This is a local dev stack; verification
+is expected to launch sessions on its own — from exactly one of the two logins
+below. The only credentials that are secret are the user's *real* env-var
+account, which you use only when a check needs their actual character; even
+then it comes from the environment, never a prompt.
 
-- **Local GM drive account** (default for GUI drives that need `!zone`/
-  `!addtime`/`!setweather`): account `verilight`, password `TestPass!1234`,
-  char `Verilamp` (gmlevel 5). This is the LSB provisioning-doc example
-  credential for this machine's dev DB — safe to type into launch commands and
-  logs, not a real secret. Launch:
-  `cargo run -p kuluu --features native-window -- --agent-listen auto play verilight 'TestPass!1234' Verilamp`
+**Do not create new accounts or logins, ever.** (User rule, 2026-10-29: the
+launcher's saved-accounts panel had filled with agent-invented names.) The two
+allowed logins on this machine are:
+
+- **`cow`** — the user's own account, char `Garfield`. Read-only citizen: use
+  it for nothing in automation except when the user explicitly asks to move/
+  test their character.
+- **`gui_cs1`**, password `TestPass!1234`, char **`Csrent`** (`accounts.priv=5`,
+  GM: `!zone`/`!addtime`/`!setweather` work) — the single shared drive fixture.
+  Default for every GUI or hidden headless drive. Want a fresh world state?
+  Reset the fixture through the DB instead of provisioning anything new, e.g.
+  `docker exec cow-db mariadb -uxiadmin -ppassword xidb -e "UPDATE chars SET pos_x=43.882,pos_y=0.750,pos_z=-108.629,pos_zone=234 WHERE charid=5; DELETE FROM char_effects WHERE charid=5;"`
+  Launch: `cargo run -p kuluu --features native-window -- --agent-listen auto play gui_cs1 'TestPass!1234' Csrent`
+
+The live integration tests (`kuluu-session/tests/common`) mint their own
+temporary `it_*` tombstone accounts and sweep them; those are test machinery,
+never interactive logins — do not drive them manually and never reuse the name.
+
+- **(retired) Local GM drive account** `verilight`/`Verilamp`: removed from
+  this machine 2026-10-29 (DB rebuild orphaned it; its GM role now lives on
+  `gui_cs1`). Any doc still naming it is stale — update it on sight.
 - **Real character** (the user's) — credentials come from env
   (`FFXI_USER`/`FFXI_PASS`/`FFXI_CHAR`); never commit or log them. Use only
   when the check specifically needs the user's own character/progress.
-- **Fresh provisioned chars** (`provision` + `create-char`, no DB teleport
-  needed) — full E2E vehicle including zone changes and Mog House entry. The
+- **(test-only; do not use for drives) Fresh provisioned chars** (`provision`
+  + `create-char`) — used by the automated E2E tests only, per the no-new-
+  accounts rule above; full E2E vehicle including zone changes and Mog House
+  entry. The
   old "fresh chars get all c2s silently ignored" blocker was two client bugs,
   both fixed: the c2s datagram header must be the last subpacket's sync
   (`session.rs::datagram_header_id` — drift = server skips every subpacket
